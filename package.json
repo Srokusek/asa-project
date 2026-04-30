@@ -4,7 +4,7 @@
   "description": "",
   "main": "basic_agent.js",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "test": "node route_planner.tests.js"
   },
   "repository": {
     "type": "git",

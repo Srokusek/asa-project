@@ -1,0 +1,87 @@
+{
+  "width": 10,
+  "height": 10,
+  "time": 0,
+  "grid": [
+    ["normal", "normal", "normal", "normal", "normal", "normal", "normal", "normal", "normal", "normal"],
+    ["green", "normal", "green", "green", "red", "normal", "normal", "normal", "normal", "normal"],
+    ["normal", "normal", "normal", "normal", "normal", "normal", "normal", "normal", "normal", "normal"],
+    ["normal", "normal", "normal", "normal", "normal", "normal", "normal", "normal", "normal", "normal"],
+    ["normal", "normal", "normal", "normal", "normal", "normal", "normal", "normal", "normal", "normal"],
+    ["normal", "normal", "wall", "wall", "wall", "wall", "wall", "wall", "normal", "normal"],
+    ["normal", "normal", "normal", "normal", "normal", "normal", "normal", "normal", "normal", "normal"],
+    ["normal", "normal", "normal", "normal", "normal", "normal", "normal", "normal", "normal", "normal"],
+    ["normal", "normal", "normal", "normal", "normal", "normal", "normal", "normal", "green", "red"],
+    ["normal", "normal", "normal", "normal", "normal", "normal", "normal", "normal", "normal", "normal"]
+  ],
+  "me": {
+    "id": "ME",
+    "position": { "x": 1, "y": 1 }
+  },
+  "enemies": [],
+  "greens": [
+    {
+      "id": "A",
+      "position": { "x": 0, "y": 1 },
+      "package": {
+        "id": "pkg_A",
+        "value": 100,
+        "spawnTime": 0,
+        "decayRate": 0
+      }
+    },
+    {
+      "id": "B",
+      "position": { "x": 2, "y": 1 },
+      "package": {
+        "id": "pkg_B",
+        "value": 60,
+        "spawnTime": 0,
+        "decayRate": 0
+      }
+    },
+    {
+      "id": "C",
+      "position": { "x": 3, "y": 1 },
+      "package": {
+        "id": "pkg_C",
+        "value": 70,
+        "spawnTime": 0,
+        "decayRate": 0
+      }
+    },
+    {
+      "id": "D",
+      "position": { "x": 8, "y": 8 },
+      "package": {
+        "id": "pkg_D",
+        "value": 40,
+        "spawnTime": 0,
+        "decayRate": 0
+      }
+    }
+  ],
+  "reds": [
+    {
+      "id": "R_MAIN",
+      "position": { "x": 4, "y": 1 }
+    },
+    {
+      "id": "R_SIDE",
+      "position": { "x": 9, "y": 8 }
+    }
+  ],
+  "params": {
+    "meanPackageValue": 65,
+    "decayRate": 0,
+    "generationMeanTime": 10,
+    "generationProbability": null,
+    "kSmoothMax": 0.25,
+    "kWin": 1,
+    "rhoGeneration": 0,
+    "moveWeight": 25,
+    "betaCarry": 1,
+    "periodicReplanTicks": 5,
+    "maxPickupsBeforeDelivery": 2
+  }
+}
