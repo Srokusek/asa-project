@@ -24,27 +24,22 @@ export function registerSdkListeners(socket, beliefs, _loop = null) {
   });
 
   socket.on("you", (...args) => {
-    beliefs.updateTime();
     beliefs.updateSelf(normalizeYouArgs(args));
   });
 
   socket.on("map", (width, height, tiles) => {
-    beliefs.updateTime();
     beliefs.updateMap(width, height, asArray(tiles));
   });
 
   socket.on("tile", (...args) => {
-    beliefs.updateTime();
     beliefs.updateTile(normalizeTileArgs(args));
   });
 
   socket.on("agentsSensing", (agents = []) => {
-    beliefs.updateTime();
     beliefs.updateAgentsSensing(asArray(agents));
   });
 
   socket.on("parcelsSensing", (parcels = []) => {
-    beliefs.updateTime();
     beliefs.updateParcelsSensing(asArray(parcels));
   });
 

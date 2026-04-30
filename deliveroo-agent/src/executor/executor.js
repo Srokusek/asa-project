@@ -13,7 +13,7 @@ export class Executor {
     this.busy = true;
     try {
       if (action.type === "move") return await this.move(action.direction);
-      if (action.type === "pick_up") return await this.pickUp();
+      if (action.type === "pick_up") return await this.pickUp(action);
       if (action.type === "put_down") return await this.putDown(action.parcels === "all" ? undefined : action.parcels);
       this.beliefs.pushEvent("UNKNOWN_ACTION", { action });
       return false;
@@ -45,16 +45,18 @@ export class Executor {
     }
   }
 
-  async pickUp() {
+  async pickUp(action = null) {
     try {
       const result = await this.socket.emitPickup();
       if (Array.isArray(result) && result.length > 0) {
         for (const picked of result) {
           const parcel = this.beliefs.parcels.get(picked.id);
+          const fallbackValue = Number(this.config.planner.meanPackageValue ?? 0);
           if (parcel) {
             const rewardNow = this.beliefs.estimateParcelReward(parcel);
             this.beliefs.carriedParcels.set(picked.id, {
               id: picked.id,
+              greenId: action?.targetId,
               valueAtPickup: rewardNow,
               pickupTime: this.beliefs.time,
               decayRate: this.config.planner.decayRate,
@@ -64,6 +66,17 @@ export class Executor {
             });
             parcel.carriedBy = this.beliefs.me?.id ?? "me";
             parcel.confidence = 0;
+          } else {
+            this.beliefs.carriedParcels.set(picked.id, {
+              id: picked.id,
+              greenId: action?.targetId,
+              valueAtPickup: fallbackValue,
+              pickupTime: this.beliefs.time,
+              decayRate: this.config.planner.decayRate,
+              confidence: this.config.planner.minParcelConfidence,
+              x: action?.at?.x ?? this.beliefs.me?.x,
+              y: action?.at?.y ?? this.beliefs.me?.y
+            });
           }
         }
         this.beliefs.pushEvent("PICK_PACKAGE", { parcels: result });

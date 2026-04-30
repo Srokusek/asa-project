@@ -3,8 +3,11 @@ import assert from "node:assert/strict";
 import {
   buildMapProfile,
   chooseConfig,
+  initialPlan,
+  planValue,
   parseMap,
-  replan
+  replan,
+  shortestGridPath
 } from "../src/planner/route-planner.js";
 
 function grid(width, height, fill = "3") {
@@ -159,4 +162,163 @@ test("100 green and 10 red map uses topK and beamWidth", () => {
   assert.equal(config.topK, 8);
   assert.equal(config.beamWidth, 20);
   assert.equal(plan.candidateGreens.length, 8);
+});
+
+test("paths never cross non-walkable tiles and use BFS cost when obstacles exist", () => {
+  const map = grid(5, 3);
+  map[1][1] = "0";
+  map[1][2] = "1";
+  map[1][4] = "2";
+  const state = parseMap({
+    width: 5,
+    height: 3,
+    grid: map,
+    me: { id: "ME", position: { x: 0, y: 1 } },
+    greens: [{ id: "G", position: { x: 2, y: 1 }, package: pkg("P", 30) }],
+    reds: [{ id: "R", position: { x: 4, y: 1 } }],
+    params: { moveWeight: 1, betaCarry: 1, decayRate: 0 }
+  });
+
+  const startToGreen = shortestGridPath(state, { x: 0, y: 1 }, { x: 2, y: 1 });
+  const plan = replan(state);
+
+  assert.equal(startToGreen.cost, 4);
+  assert.equal(plan.profile.hasObstacles, true);
+  assert.equal(plan.path.some((p) => p.x === 1 && p.y === 1), false);
+  assert.deepEqual(plan.sequence, ["START", "G", "R"]);
+});
+
+test("when already carrying parcels, direct delivery can beat another pickup", () => {
+  const map = grid(4, 1);
+  map[0][1] = "2";
+  map[0][3] = "1";
+  const plan = replan(
+    parseMap({
+      width: 4,
+      height: 1,
+      grid: map,
+      time: 10,
+      me: { id: "ME", position: { x: 0, y: 0 } },
+      carriedPackages: [
+        {
+          packageId: "CARRIED_1",
+          valueAtPickup: 100,
+          pickupTime: 10,
+          decayRate: 0,
+          confidence: 1
+        }
+      ],
+      greens: [{ id: "LOW_VALUE", position: { x: 3, y: 0 }, package: pkg("LOW", 1) }],
+      reds: [{ id: "R", position: { x: 1, y: 0 } }],
+      params: {
+        moveWeight: 1,
+        betaCarry: 1,
+        decayRate: 0,
+        maxPickupsBeforeDelivery: 2
+      }
+    })
+  );
+
+  assert.deepEqual(plan.sequence, ["START", "R"]);
+});
+
+test("carried packages count against max pickups before delivery", () => {
+  const map = grid(4, 1);
+  map[0][1] = "1";
+  map[0][2] = "1";
+  map[0][3] = "2";
+  const plan = replan(
+    parseMap({
+      width: 4,
+      height: 1,
+      grid: map,
+      me: { id: "ME", position: { x: 0, y: 0 } },
+      carriedPackages: [
+        {
+          packageId: "CARRIED_1",
+          valueAtPickup: 30,
+          pickupTime: 0,
+          decayRate: 0,
+          confidence: 1
+        }
+      ],
+      greens: [
+        { id: "G1", position: { x: 1, y: 0 }, package: pkg("P1", 100) },
+        { id: "G2", position: { x: 2, y: 0 }, package: pkg("P2", 100) }
+      ],
+      reds: [{ id: "R", position: { x: 3, y: 0 } }],
+      params: {
+        moveWeight: 0,
+        betaCarry: 1,
+        decayRate: 0,
+        maxPickupsBeforeDelivery: 1
+      }
+    })
+  );
+
+  assert.deepEqual(plan.sequence, ["START", "R"]);
+});
+
+test("carried potential subtracts future delivery movement cost", () => {
+  const map = grid(6, 1);
+  map[0][5] = "2";
+  const state = parseMap({
+    width: 6,
+    height: 1,
+    grid: map,
+    me: { id: "ME", position: { x: 0, y: 0 } },
+    carriedPackages: [
+      {
+        packageId: "CARRIED_1",
+        valueAtPickup: 10,
+        pickupTime: 0,
+        decayRate: 0,
+        confidence: 1
+      }
+    ],
+    reds: [{ id: "R", position: { x: 5, y: 0 } }],
+    params: { moveWeight: 3, betaCarry: 1, maxPickupsBeforeDelivery: 1 }
+  });
+  const routePlan = replan(state);
+  const partial = initialPlan(routePlan.state);
+
+  assert.equal(planValue(partial, routePlan.state, routePlan.oracle, routePlan.config), -5);
+});
+
+test("enemy competition uses obstacle-aware distance", () => {
+  const map = grid(6, 5);
+  map[1][4] = "0";
+  map[2][4] = "0";
+  map[3][4] = "0";
+  map[2][3] = "1";
+  map[3][3] = "2";
+  const plan = replan(
+    parseMap({
+      width: 6,
+      height: 5,
+      grid: map,
+      me: { id: "ME", position: { x: 0, y: 2 } },
+      enemies: [{ id: "E", position: { x: 5, y: 2 }, speed: 1 }],
+      greens: [{ id: "G", position: { x: 3, y: 2 }, package: pkg("P", 30) }],
+      reds: [{ id: "R", position: { x: 3, y: 3 } }],
+      params: { moveWeight: 1, betaCarry: 1, decayRate: 0, maxPickupsBeforeDelivery: 1 }
+    })
+  );
+
+  assert.deepEqual(plan.sequence, ["START", "G", "R"]);
+});
+
+test("ranking distance cache is attached to the normalized planning state", () => {
+  const state = parseMap({
+    width: 3,
+    height: 1,
+    grid: [["3", "1", "2"]],
+    me: { id: "ME", position: { x: 0, y: 0 } },
+    greens: [{ id: "G", position: { x: 1, y: 0 }, package: pkg("P", 10) }],
+    reds: [{ id: "R", position: { x: 2, y: 0 } }]
+  });
+  const plan = replan(state);
+
+  assert.ok(plan.state.__rankingDistanceCache instanceof Map);
+  assert.ok(plan.state.__rankingDistanceCache.size > 0);
 });

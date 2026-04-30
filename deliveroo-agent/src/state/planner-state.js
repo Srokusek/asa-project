@@ -1,4 +1,5 @@
 import { positionKey, roundTilePosition } from "../utils/geometry.js";
+import { parseMap } from "../planner/route-planner.js";
 
 function tileAt(beliefs, x, y) {
   return beliefs.tiles.get(`${x},${y}`)?.type ?? "0";
@@ -98,7 +99,7 @@ export function buildPlannerState(beliefs, config) {
     confidence: Number(parcel.confidence ?? 1)
   }));
 
-  return {
+  return parseMap({
     width,
     height,
     grid,
@@ -115,5 +116,5 @@ export function buildPlannerState(beliefs, config) {
     greens,
     reds,
     params: { ...config.planner }
-  };
+  });
 }

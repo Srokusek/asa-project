@@ -272,6 +272,7 @@ export function parseMap(json) {
     time: asNumber(input.time, 0),
     me,
     enemies: normalizeEnemies(input, me.id),
+    carriedPackages: (input.carriedPackages ?? []).map((pkg) => ({ ...pkg })),
     greens,
     reds,
     params
@@ -307,6 +308,22 @@ export function manhattan(a, b) {
 
 function estimateDistance(_state, from, to) {
   return manhattan(from, to);
+}
+
+function rankingDistance(state, from, to) {
+  const key = `${positionKey(from)}->${positionKey(to)}`;
+  const cache = state.__rankingDistanceCache;
+  if (cache?.has(key)) return cache.get(key);
+
+  const profile = state.__mapProfile ?? buildMapProfile(state);
+  let cost = manhattan(from, to);
+  if (!profile.hasObstacles && profile.hasUniformCosts) {
+    cache?.set(key, cost);
+    return cost;
+  }
+  cost = shortestGridPath(state, from, to, profile).cost;
+  cache?.set(key, cost);
+  return cost;
 }
 
 export function buildMapProfile(state) {
@@ -406,7 +423,7 @@ export function winProbability(state, green, etaMe, config) {
   let probability = 1;
   for (const enemy of state.enemies) {
     const speed = Math.max(EPSILON, asNumber(enemy.speed, 1));
-    const enemyEta = estimateDistance(state, enemy.position, green.position) / speed;
+    const enemyEta = rankingDistance(state, enemy.position, green.position) / speed;
     probability = Math.min(probability, sigmoid(config.kWin * (enemyEta - etaMe)));
   }
   return probability;
@@ -455,13 +472,15 @@ function hasAvailablePackage(green, config) {
 
 function nearestRedDistance(state, position) {
   if (!state.reds || state.reds.length === 0) return 0;
-  return Math.min(...state.reds.map((red) => estimateDistance(state, position, red.position)));
+  return Math.min(...state.reds.map((red) => rankingDistance(state, position, red.position)));
 }
 
 export function currentGreenValue(state, green, config) {
   if (!hasAvailablePackage(green, config)) return 0;
-  const etaMe = estimateDistance(state, state.me.position, green.position);
-  const etaTotal = etaMe + nearestRedDistance(state, green.position);
+  const etaMe = rankingDistance(state, state.me.position, green.position);
+  const etaRed = nearestRedDistance(state, green.position);
+  if (!Number.isFinite(etaMe) || !Number.isFinite(etaRed)) return 0;
+  const etaTotal = etaMe + etaRed;
   const decayRate = packageDecayRate(green, config.decayRate);
   const currentValue = packageReward(green, config.meanPackageValue);
   const deliveryAwareValue = Math.max(0, currentValue - decayRate * etaTotal);
@@ -469,7 +488,8 @@ export function currentGreenValue(state, green, config) {
 }
 
 export function futureGreenValue(state, green, config) {
-  const etaMe = estimateDistance(state, state.me.position, green.position);
+  const etaMe = rankingDistance(state, state.me.position, green.position);
+  if (!Number.isFinite(etaMe)) return 0;
   const q = generationProbabilityForGreen(state, config);
   const wait = expectedGenerationWait(config);
   if (!Number.isFinite(wait)) return 0;
@@ -498,8 +518,11 @@ export function selectCandidateGreens(state, greenScores, config) {
     .filter((green) => hasAvailablePackage(green, config))
     .map((green) => {
       const score = greenScores.get(green.id) ?? 0;
-      const distanceFromMe = estimateDistance(state, state.me.position, green.position);
+      const distanceFromMe = rankingDistance(state, state.me.position, green.position);
       const distanceToRed = nearestRedDistance(state, green.position);
+      if (!Number.isFinite(distanceFromMe) || !Number.isFinite(distanceToRed)) {
+        return { green, score, priority: -Infinity };
+      }
       const confidence = packageConfidence(green);
       const win = winProbability(state, green, distanceFromMe, config);
       const deliveryAwareReward = Math.max(
@@ -511,6 +534,7 @@ export function selectCandidateGreens(state, greenScores, config) {
       const priority = rankingScore / (1 + distanceFromMe + distanceToRed);
       return { green, score, priority };
     })
+    .filter((entry) => Number.isFinite(entry.priority))
     .sort((a, b) => b.priority - a.priority || b.score - a.score || a.green.id.localeCompare(b.green.id))
     .slice(0, config.topK)
     .map((entry) => entry.green);
@@ -764,7 +788,7 @@ function beatsEnemiesToGreen(state, green, etaMe, config) {
   const margin = asNumber(config.enemySafetyMargin, 0);
   return state.enemies.every((enemy) => {
     const speed = Math.max(EPSILON, asNumber(enemy.speed, 1));
-    const enemyEta = estimateDistance(state, enemy.position, green.position) / speed;
+    const enemyEta = rankingDistance(state, enemy.position, green.position) / speed;
     return etaMe + margin <= enemyEta + EPSILON;
   });
 }
@@ -837,25 +861,27 @@ export function extendToRed(plan, red, _state, oracle, _config) {
   };
 }
 
-export function carriedPotential(plan, _state, oracle) {
+export function carriedPotential(plan, _state, oracle, config = null) {
   if (plan.pickedPackages.length === 0) return 0;
   const reds = oracle.points.filter((point) => point.type === "red");
   if (reds.length === 0) return 0;
 
-  let best = 0;
+  let best = -Infinity;
+  const moveWeight = asNumber(config?.moveWeight, 0);
   for (const red of reds) {
     const edge = getOracleEdge(oracle, plan.currentId, red.id);
     if (!edge || !Number.isFinite(edge.cost)) continue;
     const deliveryTime = plan.time + edge.cost;
-    best = Math.max(best, computeDeliveredValue(plan.pickedPackages, deliveryTime));
+    const delivered = computeDeliveredValue(plan.pickedPackages, deliveryTime);
+    best = Math.max(best, delivered - moveWeight * edge.cost);
   }
-  return best;
+  return Number.isFinite(best) ? best : 0;
 }
 
 export function planValue(plan, state, oracle, config) {
   return (
     plan.deliveredScore +
-    config.betaCarry * carriedPotential(plan, state, oracle) -
+    config.betaCarry * carriedPotential(plan, state, oracle, config) -
     config.moveWeight * plan.moveCost
   );
 }
@@ -879,6 +905,7 @@ export function findBestSequence(state, points, oracle, _greenScores, config) {
   let beam = [initialPlan(state)];
   let bestComplete = null;
   let bestPartial = null;
+  const maxCarriedBeforeDelivery = Math.max(0, Math.round(asNumber(config.maxPickupsBeforeDelivery, 0)));
 
   for (let depth = 0; depth < config.maxPickupsBeforeDelivery; depth += 1) {
     const nextBeam = [];
@@ -891,11 +918,13 @@ export function findBestSequence(state, points, oracle, _greenScores, config) {
         }
       }
 
-      for (const green of greens) {
-        const nextPlan = extendToGreen(plan, green, state, oracle, config);
-        if (nextPlan) {
-          nextBeam.push(nextPlan);
-          bestPartial = betterPlan(bestPartial, nextPlan, state, oracle, config);
+      if (plan.pickedPackages.length < maxCarriedBeforeDelivery) {
+        for (const green of greens) {
+          const nextPlan = extendToGreen(plan, green, state, oracle, config);
+          if (nextPlan) {
+            nextBeam.push(nextPlan);
+            bestPartial = betterPlan(bestPartial, nextPlan, state, oracle, config);
+          }
         }
       }
     }
@@ -935,13 +964,16 @@ export function reconstructGridPath(sequence, oracle) {
 }
 
 export function replan(state) {
-  const profile = buildMapProfile(state);
-  const config = chooseConfig(profile, state.params);
-  const greenScores = computeGreenScores(state, config);
-  const candidateGreens = selectCandidateGreens(state, greenScores, config);
-  const points = buildPointsOfInterest(state, candidateGreens);
-  const oracle = buildDistanceOracle(state, points);
-  const bestPlan = findBestSequence(state, points, oracle, greenScores, config);
+  const planningState = parseMap(state);
+  const profile = buildMapProfile(planningState);
+  Object.defineProperty(planningState, "__mapProfile", { value: profile, enumerable: false });
+  Object.defineProperty(planningState, "__rankingDistanceCache", { value: new Map(), enumerable: false });
+  const config = chooseConfig(profile, planningState.params);
+  const greenScores = computeGreenScores(planningState, config);
+  const candidateGreens = selectCandidateGreens(planningState, greenScores, config);
+  const points = buildPointsOfInterest(planningState, candidateGreens);
+  const oracle = buildDistanceOracle(planningState, points);
+  const bestPlan = findBestSequence(planningState, points, oracle, greenScores, config);
   const path = reconstructGridPath(bestPlan.sequence, oracle);
 
   return {
@@ -954,7 +986,8 @@ export function replan(state) {
     greenScores: Object.fromEntries(greenScores),
     candidateGreens,
     oracle,
-    generatedAtTime: asNumber(state.time, 0),
+    state: planningState,
+    generatedAtTime: asNumber(planningState.time, 0),
     pathIndex: 0
   };
 }

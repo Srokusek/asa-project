@@ -21,6 +21,7 @@ export class BeliefState {
   constructor(config) {
     this.config = config;
     this.time = 0;
+    this.version = 0;
     this.me = null;
     this.width = 0;
     this.height = 0;
@@ -45,6 +46,7 @@ export class BeliefState {
 
   markDirty() {
     this.dirty = true;
+    this.version += 1;
   }
 
   clearDirty() {
@@ -53,7 +55,15 @@ export class BeliefState {
 
   updateTime(optionalServerTime) {
     const serverTime = nowTime(optionalServerTime);
-    this.time = serverTime ?? this.time + 1;
+    if (serverTime === null) return this.time;
+    this.time = serverTime;
+    this.decayUnseenAgents();
+    return this.time;
+  }
+
+  advanceTime(ticks = 1) {
+    const step = Math.max(0, Number(ticks) || 0);
+    this.time += step;
     this.decayUnseenAgents();
     return this.time;
   }

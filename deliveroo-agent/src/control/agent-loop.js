@@ -1,6 +1,6 @@
 import { Executor } from "../executor/executor.js";
 import { buildExecutablePlan } from "../planner/executable-plan.js";
-import { replan } from "../planner/route-planner.js";
+import { isWalkable, replan } from "../planner/route-planner.js";
 import { buildPlannerState } from "../state/planner-state.js";
 import { createLogger } from "../utils/logger.js";
 
@@ -22,6 +22,11 @@ const REPLAN_EVENTS = new Set([
 
 function eventType(event) {
   return typeof event === "string" ? event : event?.type;
+}
+
+function routePathIsWalkable(routePlan) {
+  if (!routePlan?.state || !Array.isArray(routePlan.path)) return true;
+  return routePlan.path.every((position) => isWalkable(routePlan.state, position));
 }
 
 export class AgentLoop {
@@ -73,8 +78,12 @@ export class AgentLoop {
     const start = Date.now();
     const plannerState = buildPlannerState(this.beliefs, this.config);
     const routePlan = replan(plannerState);
-    const executablePlan = buildExecutablePlan(routePlan);
+    const executablePlan = routePathIsWalkable(routePlan) ? buildExecutablePlan(routePlan) : [];
     const elapsed = Date.now() - start;
+
+    if (executablePlan.length === 0 && routePlan.sequence.length > 1) {
+      this.logger.warn("planner produced a non-executable path", { sequence: routePlan.sequence });
+    }
 
     this.currentRoutePlan = routePlan;
     this.currentExecutablePlan = executablePlan;
@@ -110,6 +119,7 @@ export class AgentLoop {
     this.ticking = true;
 
     try {
+      this.beliefs.advanceTime();
       const events = this.beliefs.consumeEvents();
       if (!this.beliefs.ready) return;
 
