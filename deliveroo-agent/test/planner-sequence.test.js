@@ -1,14 +1,20 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { CONFIG } from "../src/config.js";
+import { buildExecutablePlan } from "../src/planner/executable-plan.js";
 import {
   buildMapProfile,
   chooseConfig,
+  futureGreenValue,
   initialPlan,
+  isWalkable,
   planValue,
   parseMap,
   replan,
   shortestGridPath
 } from "../src/planner/route-planner.js";
+import { BeliefState } from "../src/state/belief-state.js";
+import { buildPlannerState } from "../src/state/planner-state.js";
 
 function grid(width, height, fill = "3") {
   return Array.from({ length: height }, () => Array.from({ length: width }, () => fill));
@@ -16,6 +22,32 @@ function grid(width, height, fill = "3") {
 
 function pkg(id, value, confidence = 1, decayRate = 0) {
   return { id, value, reward: value, confidence, spawnTime: 0, decayRate };
+}
+
+function routePlanToSinglePoint(point) {
+  const start = { id: "START", type: "start", position: { x: 0, y: 0 } };
+  return {
+    sequence: ["START", point.id],
+    path: [start.position, point.position],
+    oracle: {
+      entries: new Map([
+        [
+          `START->${point.id}`,
+          {
+            fromId: "START",
+            toId: point.id,
+            cost: 1,
+            path: [start.position, point.position]
+          }
+        ]
+      ]),
+      points: [start, point],
+      pointsById: new Map([
+        ["START", start],
+        [point.id, point]
+      ])
+    }
+  };
 }
 
 function abcState(overrides = {}) {
@@ -126,6 +158,209 @@ test("green without package does not enter pickup candidates even with future sc
   assert.equal(plan.sequence.includes("EMPTY"), false);
 });
 
+test("future green value is zero when maxPackages is already reached", () => {
+  const map = grid(5, 1);
+  map[0][1] = "1";
+  map[0][2] = "1";
+  map[0][4] = "2";
+  const state = parseMap({
+    width: 5,
+    height: 1,
+    grid: map,
+    me: { id: "ME", position: { x: 0, y: 0 } },
+    greens: [
+      { id: "EMPTY", position: { x: 1, y: 0 }, package: null },
+      { id: "FULL", position: { x: 2, y: 0 }, package: pkg("pkg_full", 20) }
+    ],
+    reds: [{ id: "RED", position: { x: 4, y: 0 } }],
+    params: {
+      meanPackageValue: 100,
+      generationProbability: 1,
+      maxPackages: 1
+    }
+  });
+  const config = chooseConfig(buildMapProfile(state), state.params);
+
+  assert.equal(futureGreenValue(state, state.greens.find((green) => green.id === "EMPTY"), config), 0);
+});
+
+test("pseudo-green with a visible parcel on walkable tile produces candidates", () => {
+  const config = {
+    ...CONFIG,
+    planner: {
+      ...CONFIG.planner,
+      decayRate: 0,
+      moveWeight: 1,
+      betaCarry: 1,
+      minParcelConfidence: 0.3
+    }
+  };
+  const beliefs = new BeliefState(config);
+  beliefs.updateMap(4, 1, [
+    { x: 0, y: 0, type: "3" },
+    { x: 1, y: 0, type: "3" },
+    { x: 2, y: 0, type: "3" },
+    { x: 3, y: 0, type: "2" }
+  ]);
+  beliefs.updateSelf({ id: "ME", name: "me", x: 0, y: 0, score: 0, penalty: 0 });
+  beliefs.updateParcelsSensing([{ id: "P", x: 1, y: 0, reward: 25 }], [{ x: 1, y: 0 }]);
+
+  const plan = replan(buildPlannerState(beliefs, config));
+
+  assert.ok(plan.candidateGreens.length > 0);
+  assert.ok(plan.sequence.length > 1);
+});
+
+test("no visible parcels with known greens produces a scout move without pickup", () => {
+  const map = grid(4, 1);
+  map[0][2] = "1";
+  map[0][3] = "2";
+  const plan = replan(
+    parseMap({
+      width: 4,
+      height: 1,
+      grid: map,
+      me: { id: "ME", position: { x: 0, y: 0 } },
+      params: { decayRate: 0, moveWeight: 1, betaCarry: 1 }
+    })
+  );
+  const actions = buildExecutablePlan(plan);
+
+  assert.equal(plan.mode, "SCOUT");
+  assert.equal(plan.sequence[0], "START");
+  assert.match(plan.sequence[1], /^SCOUT_/);
+  assert.ok(actions.some((action) => action.type === "move"));
+  assert.equal(actions.some((action) => action.type === "pick_up"), false);
+});
+
+test("no parcels and no known greens explores an adjacent walkable tile", () => {
+  const plan = replan(
+    parseMap({
+      width: 2,
+      height: 1,
+      grid: [["3", "3"]],
+      me: { id: "ME", position: { x: 0, y: 0 } },
+      params: { decayRate: 0 }
+    })
+  );
+  const actions = buildExecutablePlan(plan);
+
+  assert.equal(plan.mode, "LOCAL_EXPLORE");
+  assert.deepEqual(plan.sequence, ["START", "EXPLORE"]);
+  assert.deepEqual(actions.map((action) => action.type), ["move"]);
+});
+
+test("no parcels, no greens, and no adjacent walkable tiles returns idle", () => {
+  const map = grid(3, 3, "0");
+  map[1][1] = "3";
+  const plan = replan(
+    parseMap({
+      width: 3,
+      height: 3,
+      grid: map,
+      me: { id: "ME", position: { x: 1, y: 1 } },
+      params: { decayRate: 0 }
+    })
+  );
+  const actions = buildExecutablePlan(plan);
+
+  assert.equal(plan.mode, "IDLE");
+  assert.deepEqual(plan.sequence, ["START"]);
+  assert.equal(actions.length, 0);
+});
+
+test("visible parcel uses pickup delivery mode with explicit pickup and putdown", () => {
+  const config = {
+    ...CONFIG,
+    planner: {
+      ...CONFIG.planner,
+      decayRate: 0,
+      moveWeight: 1,
+      betaCarry: 1,
+      minParcelConfidence: 0.3
+    }
+  };
+  const beliefs = new BeliefState(config);
+  beliefs.updateMap(4, 1, [
+    { x: 0, y: 0, type: "3" },
+    { x: 1, y: 0, type: "3" },
+    { x: 2, y: 0, type: "3" },
+    { x: 3, y: 0, type: "2" }
+  ]);
+  beliefs.updateSelf({ id: "ME", name: "me", x: 0, y: 0, score: 0, penalty: 0 });
+  beliefs.updateParcelsSensing([{ id: "P", x: 1, y: 0, reward: 25 }], [{ x: 1, y: 0 }]);
+
+  const plan = replan(buildPlannerState(beliefs, config));
+  const actions = buildExecutablePlan(plan);
+
+  assert.equal(plan.mode, "PICKUP_DELIVERY");
+  assert.ok(plan.sequence.some((id) => id === "P_P" || id.startsWith("G_")));
+  assert.ok(actions.some((action) => action.type === "pick_up"));
+  assert.ok(actions.some((action) => action.type === "put_down"));
+});
+
+test("carried parcel without visible parcels produces delivery only mode", () => {
+  const plan = replan(
+    parseMap({
+      width: 3,
+      height: 1,
+      grid: [["3", "3", "2"]],
+      me: { id: "ME", position: { x: 0, y: 0 } },
+      carriedPackages: [
+        {
+          packageId: "CARRIED",
+          valueAtPickup: 20,
+          pickupTime: 0,
+          decayRate: 0,
+          confidence: 1
+        }
+      ],
+      params: { decayRate: 0, moveWeight: 1, betaCarry: 1 }
+    })
+  );
+  const actions = buildExecutablePlan(plan);
+
+  assert.equal(plan.mode, "DELIVERY_ONLY");
+  assert.deepEqual(plan.sequence, ["START", "R_2_0"]);
+  assert.ok(actions.some((action) => action.type === "put_down"));
+});
+
+test("executable plan does not pick up scout targets", () => {
+  const routePlan = routePlanToSinglePoint({
+    id: "SCOUT_G_1_0",
+    type: "scout",
+    position: { x: 1, y: 0 },
+    noPickup: true
+  });
+  const actions = buildExecutablePlan(routePlan);
+
+  assert.deepEqual(actions.map((action) => action.type), ["move"]);
+});
+
+test("executable plan does not pick up green targets without package", () => {
+  const routePlan = routePlanToSinglePoint({
+    id: "G_1_0",
+    type: "green",
+    position: { x: 1, y: 0 },
+    package: null
+  });
+  const actions = buildExecutablePlan(routePlan);
+
+  assert.deepEqual(actions.map((action) => action.type), ["move"]);
+});
+
+test("executable plan picks up green targets with package", () => {
+  const routePlan = routePlanToSinglePoint({
+    id: "G_1_0",
+    type: "green",
+    position: { x: 1, y: 0 },
+    package: pkg("P", 10)
+  });
+  const actions = buildExecutablePlan(routePlan);
+
+  assert.deepEqual(actions.map((action) => action.type), ["move", "pick_up"]);
+});
+
 test("100 green and 10 red map uses topK and beamWidth", () => {
   const width = 20;
   const height = 6;
@@ -186,6 +421,24 @@ test("paths never cross non-walkable tiles and use BFS cost when obstacles exist
   assert.equal(plan.profile.hasObstacles, true);
   assert.equal(plan.path.some((p) => p.x === 1 && p.y === 1), false);
   assert.deepEqual(plan.sequence, ["START", "G", "R"]);
+});
+
+test("shortestGridPath rejects stale Manhattan paths that would cross walls", () => {
+  const map = grid(5, 3);
+  map[1][1] = "0";
+  const state = parseMap({
+    width: 5,
+    height: 3,
+    grid: map,
+    me: { id: "ME", position: { x: 0, y: 1 } }
+  });
+  const staleProfile = { hasObstacles: false, hasUniformCosts: true };
+
+  const path = shortestGridPath(state, { x: 0, y: 1 }, { x: 2, y: 1 }, staleProfile);
+
+  assert.equal(path.cost, 4);
+  assert.equal(path.path.some((position) => position.x === 1 && position.y === 1), false);
+  assert.ok(path.path.every((position) => isWalkable(state, position)));
 });
 
 test("when already carrying parcels, direct delivery can beat another pickup", () => {

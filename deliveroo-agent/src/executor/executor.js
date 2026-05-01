@@ -1,5 +1,3 @@
-import { setTimeout as sleep } from "node:timers/promises";
-
 export class Executor {
   constructor(socket, beliefs, config) {
     this.socket = socket;
@@ -19,9 +17,6 @@ export class Executor {
       return false;
     } finally {
       this.busy = false;
-      if (this.config.actionDelayMs > 0) {
-        await sleep(this.config.actionDelayMs);
-      }
     }
   }
 
@@ -52,8 +47,12 @@ export class Executor {
         for (const picked of result) {
           const parcel = this.beliefs.parcels.get(picked.id);
           const fallbackValue = Number(this.config.planner.meanPackageValue ?? 0);
+          const serverReward = Number(picked.reward ?? picked.value ?? fallbackValue);
+          const pickedReward = Number.isFinite(serverReward) ? serverReward : fallbackValue;
           if (parcel) {
-            const rewardNow = this.beliefs.estimateParcelReward(parcel);
+            const rewardNow = Number.isFinite(Number(picked.reward ?? picked.value))
+              ? pickedReward
+              : this.beliefs.estimateParcelReward(parcel);
             this.beliefs.carriedParcels.set(picked.id, {
               id: picked.id,
               greenId: action?.targetId,
@@ -70,7 +69,7 @@ export class Executor {
             this.beliefs.carriedParcels.set(picked.id, {
               id: picked.id,
               greenId: action?.targetId,
-              valueAtPickup: fallbackValue,
+              valueAtPickup: pickedReward,
               pickupTime: this.beliefs.time,
               decayRate: this.config.planner.decayRate,
               confidence: this.config.planner.minParcelConfidence,

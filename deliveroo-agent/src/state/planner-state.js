@@ -26,13 +26,30 @@ function bestParcelAt(beliefs, parcels, config) {
   return best;
 }
 
+function inferBoundsFromTiles(beliefs) {
+  let maxX = Math.max(0, beliefs.width - 1);
+  let maxY = Math.max(0, beliefs.height - 1);
+
+  for (const tile of beliefs.tiles.values()) {
+    maxX = Math.max(maxX, Number(tile.x));
+    maxY = Math.max(maxY, Number(tile.y));
+  }
+
+  return {
+    width: maxX + 1,
+    height: maxY + 1
+  };
+}
+
 export function buildPlannerState(beliefs, config) {
-  const width = beliefs.width;
-  const height = beliefs.height;
+  const bounds = inferBoundsFromTiles(beliefs);
+  const width = bounds.width;
+  const height = bounds.height;
   const grid = [];
   const greens = [];
   const reds = [];
   const parcelsByPosition = new Map();
+  const greenPositions = new Set();
 
   for (const parcel of beliefs.parcels.values()) {
     const key = positionKey(parcel);
@@ -50,6 +67,7 @@ export function buildPlannerState(beliefs, config) {
       if (type === "1") {
         const position = { x, y };
         const best = bestParcelAt(beliefs, parcelsByPosition.get(positionKey(position)) ?? [], config);
+        greenPositions.add(positionKey(position));
         greens.push({
           id: `G_${x}_${y}`,
           position,
@@ -72,6 +90,31 @@ export function buildPlannerState(beliefs, config) {
       }
     }
     grid.push(row);
+  }
+
+  for (const parcel of beliefs.parcels.values()) {
+    if (!parcelAvailableForPlanning(beliefs, parcel, config)) continue;
+
+    const position = { x: Number(parcel.x), y: Number(parcel.y) };
+    const key = positionKey(position);
+    if (greenPositions.has(key)) continue;
+    if (tileAt(beliefs, position.x, position.y) === "0") continue;
+
+    const reward = beliefs.estimateParcelReward(parcel);
+    greens.push({
+      id: `P_${parcel.id}`,
+      position,
+      package: {
+        id: parcel.id,
+        value: reward,
+        reward,
+        carriedBy: parcel.carriedBy,
+        decayRate: config.planner.decayRate,
+        confidence: parcel.confidence,
+        lastSeenTime: parcel.lastSeenTime
+      }
+    });
+    greenPositions.add(key);
   }
 
   const mePosition = roundTilePosition(beliefs.me ?? { x: 0, y: 0 });

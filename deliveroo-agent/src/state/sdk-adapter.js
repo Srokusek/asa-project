@@ -10,8 +10,17 @@ function normalizeYouArgs(args) {
 
 function normalizeTileArgs(args) {
   if (args.length === 1 && typeof args[0] === "object") return args[0];
-  const [x, y, type] = args;
-  return { x, y, type };
+  const [x, y, third] = args;
+
+  if (typeof third === "boolean") {
+    return {
+      x,
+      y,
+      type: third ? "2" : "3"
+    };
+  }
+
+  return { x, y, type: third };
 }
 
 export function registerSdkListeners(socket, beliefs, _loop = null) {
@@ -40,7 +49,8 @@ export function registerSdkListeners(socket, beliefs, _loop = null) {
   });
 
   socket.on("parcelsSensing", (parcels = []) => {
-    beliefs.updateParcelsSensing(asArray(parcels));
+    const visible = beliefs.visiblePositionsFromSelf();
+    beliefs.updateParcelsSensing(asArray(parcels), visible);
   });
 
   socket.on("sensing", (sensing = {}) => {

@@ -43,6 +43,10 @@ function pairKey(fromId, toId) {
   return `${fromId}->${toId}`;
 }
 
+function mapToObject(map) {
+  return map instanceof Map ? Object.fromEntries(map) : map ?? {};
+}
+
 function copyPosition(position) {
   return { x: Math.round(asNumber(position?.x)), y: Math.round(asNumber(position?.y)) };
 }
@@ -111,8 +115,10 @@ function normalizeGrid(input, width, height) {
   }
 
   if (Array.isArray(input?.tiles)) {
-    const finalWidth = asNumber(width, input.width ?? 0);
-    const finalHeight = asNumber(height, input.height ?? 0);
+    const maxX = input.tiles.reduce((max, tile) => Math.max(max, asNumber(tile.x, -1)), -1);
+    const maxY = input.tiles.reduce((max, tile) => Math.max(max, asNumber(tile.y, -1)), -1);
+    const finalWidth = Math.max(asNumber(width, input.width ?? 0), maxX + 1);
+    const finalHeight = Math.max(asNumber(height, input.height ?? 0), maxY + 1);
     const grid = makeEmptyGrid(finalWidth, finalHeight, "wall");
 
     for (const tile of input.tiles) {
@@ -398,6 +404,10 @@ export function chooseConfig(profile, params = {}) {
     meanPackageValue: asNumber(params.meanPackageValue, DEFAULT_PARAMS.meanPackageValue),
     generationMeanTime: params.generationMeanTime ?? DEFAULT_PARAMS.generationMeanTime,
     generationProbability: params.generationProbability ?? DEFAULT_PARAMS.generationProbability,
+    maxPackages:
+      params.maxPackages === null || params.maxPackages === undefined
+        ? DEFAULT_PARAMS.maxPackages
+        : asNumber(params.maxPackages, DEFAULT_PARAMS.maxPackages),
     minParcelConfidence: asNumber(params.minParcelConfidence, DEFAULT_PARAMS.minParcelConfidence),
     enemySafetyMargin: asNumber(params.enemySafetyMargin, DEFAULT_PARAMS.enemySafetyMargin),
     maxPlanningTimeMs: asNumber(params.maxPlanningTimeMs, DEFAULT_PARAMS.maxPlanningTimeMs),
@@ -451,6 +461,12 @@ function expectedGenerationWait(config) {
   return 0;
 }
 
+function activePackageCount(state) {
+  const onMap = state.greens.filter((green) => green.package && !green.package.carriedBy).length;
+  const carried = state.carriedPackages?.length ?? 0;
+  return onMap + carried;
+}
+
 function packageConfidence(green) {
   return clamp(asNumber(green.package?.confidence, 1), 0, 1);
 }
@@ -488,14 +504,20 @@ export function currentGreenValue(state, green, config) {
 }
 
 export function futureGreenValue(state, green, config) {
+  if (activePackageCount(state) >= config.maxPackages) return 0;
+
   const etaMe = rankingDistance(state, state.me.position, green.position);
   if (!Number.isFinite(etaMe)) return 0;
-  const q = generationProbabilityForGreen(state, config);
+
+  const etaRed = nearestRedDistance(state, green.position);
+  if (!Number.isFinite(etaRed)) return 0;
+
   const wait = expectedGenerationWait(config);
   if (!Number.isFinite(wait)) return 0;
 
-  const tauNext = etaMe + wait;
-  const expectedValue = Math.max(0, config.meanPackageValue - config.decayRate * tauNext);
+  const travelAfterSpawn = etaMe + etaRed;
+  const expectedValue = Math.max(0, config.meanPackageValue - config.decayRate * travelAfterSpawn);
+  const q = generationProbabilityForGreen(state, config);
   return q * expectedValue * Math.exp(-config.rhoGeneration * wait);
 }
 
@@ -719,10 +741,20 @@ export function aStarGridPath(state, from, to) {
   return { cost: Infinity, path: [] };
 }
 
+function pathIsWalkable(state, path) {
+  return Array.isArray(path) && path.every((position) => isWalkable(state, position));
+}
+
 export function shortestGridPath(state, from, to, profile = null) {
   if (!isWalkable(state, from) || !isWalkable(state, to)) return { cost: Infinity, path: [] };
   const mapProfile = profile ?? buildMapProfile(state);
-  if (!mapProfile.hasObstacles && mapProfile.hasUniformCosts) return manhattanGridPath(from, to);
+
+  if (!mapProfile.hasObstacles && mapProfile.hasUniformCosts) {
+    const direct = manhattanGridPath(from, to);
+    if (pathIsWalkable(state, direct.path)) return direct;
+    return bfsGridPath(state, from, to);
+  }
+
   if (mapProfile.hasUniformCosts) return bfsGridPath(state, from, to);
   return aStarGridPath(state, from, to);
 }
@@ -963,6 +995,235 @@ export function reconstructGridPath(sequence, oracle) {
   return fullPath;
 }
 
+function baseRoutePlan({
+  mode,
+  sequence,
+  path,
+  value,
+  plan,
+  profile,
+  config,
+  greenScores,
+  candidateGreens = [],
+  oracle,
+  state,
+  scoutTarget = null
+}) {
+  return {
+    mode,
+    sequence,
+    path,
+    value,
+    plan,
+    profile,
+    config,
+    greenScores: mapToObject(greenScores),
+    candidateGreens,
+    scoutTarget,
+    oracle,
+    state,
+    generatedAtTime: asNumber(state.time, 0),
+    pathIndex: 0
+  };
+}
+
+function buildIdlePlan(state, profile, config, greenScores) {
+  const startPoint = { id: "START", type: "start", position: copyPosition(state.me.position) };
+  const oracle = {
+    entries: new Map(),
+    points: [startPoint],
+    pointsById: new Map([["START", startPoint]]),
+    profile
+  };
+
+  return baseRoutePlan({
+    mode: "IDLE",
+    sequence: ["START"],
+    path: [copyPosition(state.me.position)],
+    value: 0,
+    plan: initialPlan(state),
+    profile,
+    config,
+    greenScores,
+    oracle,
+    state
+  });
+}
+
+function buildDeliveryOnlyPlan(state, profile, config, greenScores) {
+  if (!state.reds || state.reds.length === 0 || (state.carriedPackages ?? []).length === 0) return null;
+
+  const points = buildPointsOfInterest(state, []);
+  const oracle = buildDistanceOracle(state, points);
+  const startPlan = initialPlan(state);
+  let bestPlan = null;
+
+  for (const red of points.filter((point) => point.type === "red")) {
+    const deliveredPlan = extendToRed(startPlan, red, state, oracle, config);
+    if (deliveredPlan) {
+      bestPlan = betterPlan(bestPlan, deliveredPlan, state, oracle, config);
+    }
+  }
+
+  if (!bestPlan) return null;
+  const path = reconstructGridPath(bestPlan.sequence, oracle);
+
+  return baseRoutePlan({
+    mode: "DELIVERY_ONLY",
+    sequence: bestPlan.sequence,
+    path,
+    value: planValue(bestPlan, state, oracle, config),
+    plan: bestPlan,
+    profile,
+    config,
+    greenScores,
+    oracle,
+    state
+  });
+}
+
+function buildPickupDeliveryPlan(state, profile, config, greenScores, candidateGreens) {
+  const points = buildPointsOfInterest(state, candidateGreens);
+  const oracle = buildDistanceOracle(state, points);
+  const bestPlan = findBestSequence(state, points, oracle, greenScores, config);
+  const path = reconstructGridPath(bestPlan.sequence, oracle);
+
+  return baseRoutePlan({
+    mode: "PICKUP_DELIVERY",
+    sequence: bestPlan.sequence,
+    path,
+    value: bestPlan.value,
+    plan: bestPlan,
+    profile,
+    config,
+    greenScores,
+    candidateGreens,
+    oracle,
+    state
+  });
+}
+
+function buildScoutPlan(state, profile, config, greenScores) {
+  let best = null;
+
+  for (const green of state.greens) {
+    if (!isWalkable(state, green.position)) continue;
+
+    const edge = shortestGridPath(state, state.me.position, green.position, profile);
+    if (!Number.isFinite(edge.cost) || edge.path.length === 0) continue;
+    if (edge.cost === 0) continue;
+
+    const distanceToNearestRed = nearestRedDistance(state, green.position);
+    const redDistance = Number.isFinite(distanceToNearestRed) ? distanceToNearestRed : 0;
+    const futureScore = greenScores.get(green.id) ?? 0;
+    const scoutPriority = (1 + futureScore) / (1 + edge.cost + 0.25 * redDistance);
+
+    if (!best || scoutPriority > best.scoutPriority) {
+      best = { green, edge, scoutPriority };
+    }
+  }
+
+  if (!best) return null;
+
+  const startPoint = { id: "START", type: "start", position: copyPosition(state.me.position) };
+  const scoutPoint = {
+    id: `SCOUT_${best.green.id}`,
+    type: "scout",
+    position: copyPosition(best.green.position),
+    sourceGreenId: best.green.id,
+    noPickup: true
+  };
+  const oracle = {
+    entries: new Map([
+      [
+        pairKey("START", scoutPoint.id),
+        {
+          fromId: "START",
+          toId: scoutPoint.id,
+          cost: best.edge.cost,
+          path: best.edge.path
+        }
+      ]
+    ]),
+    points: [startPoint, scoutPoint],
+    pointsById: new Map([
+      ["START", startPoint],
+      [scoutPoint.id, scoutPoint]
+    ]),
+    profile
+  };
+
+  return baseRoutePlan({
+    mode: "SCOUT",
+    sequence: ["START", scoutPoint.id],
+    path: best.edge.path.map(copyPosition),
+    value: best.scoutPriority,
+    plan: initialPlan(state),
+    profile,
+    config,
+    greenScores,
+    candidateGreens: [],
+    scoutTarget: best.green,
+    oracle,
+    state
+  });
+}
+
+function buildLocalExplorePlan(state, profile, config) {
+  const start = copyPosition(state.me.position);
+  const candidates = [
+    { x: start.x + 1, y: start.y },
+    { x: start.x - 1, y: start.y },
+    { x: start.x, y: start.y + 1 },
+    { x: start.x, y: start.y - 1 }
+  ];
+
+  for (const position of candidates) {
+    if (!isWalkable(state, position)) continue;
+
+    const edge = shortestGridPath(state, start, position, profile);
+    if (!Number.isFinite(edge.cost) || edge.path.length < 2) continue;
+
+    const startPoint = { id: "START", type: "start", position: start };
+    const explorePoint = { id: "EXPLORE", type: "explore", position: copyPosition(position), noPickup: true };
+    const oracle = {
+      entries: new Map([
+        [
+          pairKey("START", "EXPLORE"),
+          {
+            fromId: "START",
+            toId: "EXPLORE",
+            cost: edge.cost,
+            path: edge.path
+          }
+        ]
+      ]),
+      points: [startPoint, explorePoint],
+      pointsById: new Map([
+        ["START", startPoint],
+        ["EXPLORE", explorePoint]
+      ]),
+      profile
+    };
+
+    return baseRoutePlan({
+      mode: "LOCAL_EXPLORE",
+      sequence: ["START", "EXPLORE"],
+      path: edge.path.map(copyPosition),
+      value: 0,
+      plan: initialPlan(state),
+      profile,
+      config,
+      greenScores: {},
+      candidateGreens: [],
+      oracle,
+      state
+    });
+  }
+
+  return null;
+}
+
 export function replan(state) {
   const planningState = parseMap(state);
   const profile = buildMapProfile(planningState);
@@ -971,25 +1232,23 @@ export function replan(state) {
   const config = chooseConfig(profile, planningState.params);
   const greenScores = computeGreenScores(planningState, config);
   const candidateGreens = selectCandidateGreens(planningState, greenScores, config);
-  const points = buildPointsOfInterest(planningState, candidateGreens);
-  const oracle = buildDistanceOracle(planningState, points);
-  const bestPlan = findBestSequence(planningState, points, oracle, greenScores, config);
-  const path = reconstructGridPath(bestPlan.sequence, oracle);
 
-  return {
-    sequence: bestPlan.sequence,
-    path,
-    value: bestPlan.value,
-    plan: bestPlan,
-    profile,
-    config,
-    greenScores: Object.fromEntries(greenScores),
-    candidateGreens,
-    oracle,
-    state: planningState,
-    generatedAtTime: asNumber(planningState.time, 0),
-    pathIndex: 0
-  };
+  if ((planningState.carriedPackages ?? []).length > 0) {
+    const deliveryPlan = buildDeliveryOnlyPlan(planningState, profile, config, greenScores);
+    if (deliveryPlan) return deliveryPlan;
+  }
+
+  if ((planningState.carriedPackages ?? []).length === 0 && candidateGreens.length > 0) {
+    return buildPickupDeliveryPlan(planningState, profile, config, greenScores, candidateGreens);
+  }
+
+  const scoutPlan = buildScoutPlan(planningState, profile, config, greenScores);
+  if (scoutPlan) return scoutPlan;
+
+  const localExplorePlan = buildLocalExplorePlan(planningState, profile, config);
+  if (localExplorePlan) return localExplorePlan;
+
+  return buildIdlePlan(planningState, profile, config, greenScores);
 }
 
 export function directionFromPositions(from, to) {

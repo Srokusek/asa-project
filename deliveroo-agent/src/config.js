@@ -6,7 +6,7 @@ function numberFromEnv(name, fallback) {
 function normalizeHost(host) {
   const raw = String(host || "deliveroojs.azurewebsites.net").trim();
   if (/^https?:\/\//i.test(raw)) return raw;
-  return `https://${raw}`;
+  return `http://${raw}`;
 }
 
 export const CONFIG = {
@@ -28,9 +28,11 @@ export const CONFIG = {
     moveWeight: 1,
     betaCarry: 0.5,
     periodicReplanTicks: 2,
+    timeTickMs: 1000,
     minParcelConfidence: 0.3,
     enemySafetyMargin: 0,
     beliefDecayRate: 0.08,
+    sensingRange: 5,
     maxPlanningTimeMs: 30
   }
 };

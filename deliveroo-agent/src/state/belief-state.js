@@ -5,12 +5,32 @@ function nowTime(fallback) {
 }
 
 function normalizeTileType(type) {
-  const raw = String(type?.type ?? type ?? "0");
+  const candidate =
+    type && typeof type === "object"
+      ? type.type ?? type.kind ?? type.tile ?? (typeof type.delivery === "boolean" ? type.delivery : undefined)
+      : type;
+  if (typeof candidate === "boolean") return candidate ? "2" : "3";
+  const raw = String(candidate ?? "0");
   if (raw === "0" || raw === "1" || raw === "2" || raw === "3") return raw;
   if (raw === "green" || raw === "parcel" || raw === "spawner") return "1";
   if (raw === "red" || raw === "delivery") return "2";
   if (raw === "normal" || raw === "walkable" || raw === "white" || raw === "4") return "3";
   return "0";
+}
+
+function inferDimensions(width, height, tiles) {
+  let maxX = -1;
+  let maxY = -1;
+
+  for (const tile of tiles) {
+    maxX = Math.max(maxX, Number(tile.x ?? 0));
+    maxY = Math.max(maxY, Number(tile.y ?? 0));
+  }
+
+  return {
+    width: Math.max(Number(width) || 0, maxX + 1),
+    height: Math.max(Number(height) || 0, maxY + 1)
+  };
 }
 
 function eventPayload(type, payload) {
@@ -32,6 +52,7 @@ export class BeliefState {
     this.events = [];
     this.ready = false;
     this.dirty = true;
+    this.lastWallClock = null;
   }
 
   pushEvent(type, payload = {}) {
@@ -68,6 +89,27 @@ export class BeliefState {
     return this.time;
   }
 
+  advanceTimeFromClock() {
+    const now = Date.now();
+
+    if (!this.lastWallClock) {
+      this.lastWallClock = now;
+      return this.time;
+    }
+
+    const tickMs = Number(this.config.planner.timeTickMs ?? 1000);
+    const elapsedMs = now - this.lastWallClock;
+    const ticks = Math.floor(elapsedMs / Math.max(1, tickMs));
+
+    if (ticks > 0) {
+      this.time += ticks;
+      this.lastWallClock += ticks * Math.max(1, tickMs);
+      this.decayUnseenAgents();
+    }
+
+    return this.time;
+  }
+
   updateReady() {
     this.ready = !!this.me && this.width > 0 && this.height > 0 && this.tiles.size > 0;
   }
@@ -88,8 +130,9 @@ export class BeliefState {
   }
 
   updateMap(width, height, tiles = []) {
-    this.width = Number(width) || 0;
-    this.height = Number(height) || 0;
+    const dimensions = inferDimensions(width, height, tiles);
+    this.width = dimensions.width;
+    this.height = dimensions.height;
     this.tiles.clear();
 
     for (const tile of tiles) {
@@ -121,13 +164,32 @@ export class BeliefState {
       y: position.y,
       type: normalizeTileType(tile.type ?? typeOrDelivery)
     };
+    this.width = Math.max(this.width, normalized.x + 1);
+    this.height = Math.max(this.height, normalized.y + 1);
     this.tiles.set(positionKey(normalized), normalized);
+    this.updateReady();
     this.markDirty();
     this.pushEvent("TILE_UPDATED", normalized);
   }
 
   visiblePositionSet(visiblePositions = []) {
     return new Set(visiblePositions.map((position) => positionKey(position)));
+  }
+
+  visiblePositionsFromSelf() {
+    const range = Number(this.config.planner.sensingRange ?? 5);
+
+    if (!this.me || !Number.isFinite(range)) return [];
+
+    const visible = [];
+    for (let y = 0; y < this.height; y += 1) {
+      for (let x = 0; x < this.width; x += 1) {
+        const distance = Math.abs(x - this.me.x) + Math.abs(y - this.me.y);
+        if (distance <= range) visible.push({ x, y });
+      }
+    }
+
+    return visible;
   }
 
   estimateParcelReward(parcel, time = this.time) {
@@ -142,9 +204,13 @@ export class BeliefState {
     );
   }
 
-  updateParcelsSensing(parcels = [], visiblePositions = []) {
+  updateParcelsSensing(parcels = [], visiblePositions = null) {
+    const actualVisiblePositions =
+      Array.isArray(visiblePositions) && visiblePositions.length > 0
+        ? visiblePositions
+        : this.visiblePositionsFromSelf();
     const seenIds = new Set();
-    const visible = this.visiblePositionSet(visiblePositions);
+    const visible = this.visiblePositionSet(actualVisiblePositions);
     let invalidated = false;
 
     for (const parcel of parcels) {
@@ -176,6 +242,10 @@ export class BeliefState {
 
     for (const [id, parcel] of this.parcels) {
       if (seenIds.has(id)) continue;
+      if (parcel.carriedBy) {
+        parcel.confidence = 0;
+        continue;
+      }
       const key = positionKey(parcel);
       if (visible.has(key)) {
         parcel.confidence = 0;

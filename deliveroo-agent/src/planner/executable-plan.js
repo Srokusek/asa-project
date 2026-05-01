@@ -29,6 +29,10 @@ function moveActionsForPath(path) {
   return actions;
 }
 
+function shouldPickUp(point) {
+  return point?.type === "green" && point.package && !point.noPickup;
+}
+
 function actionsFromOracle(routePlan) {
   const actions = [];
   const picked = new Set();
@@ -43,7 +47,7 @@ function actionsFromOracle(routePlan) {
     if (!edge || !edge.path || edge.path.length === 0 || !toPoint) continue;
     actions.push(...moveActionsForPath(edge.path));
 
-    if (toPoint.type === "green" && !picked.has(toPoint.id)) {
+    if (shouldPickUp(toPoint) && !picked.has(toPoint.id)) {
       picked.add(toPoint.id);
       actions.push({
         type: "pick_up",
@@ -71,7 +75,7 @@ function actionsFromFlatPath(routePlan) {
   const picked = new Set();
   const sequencePoints = (routePlan.sequence ?? []).map((id) => getPoint(routePlan, id)).filter(Boolean);
   const greenByPosition = new Map(
-    sequencePoints.filter((point) => point.type === "green").map((point) => [positionKey(point.position), point])
+    sequencePoints.filter(shouldPickUp).map((point) => [positionKey(point.position), point])
   );
   const redPoint = [...sequencePoints].reverse().find((point) => point.type === "red");
 
