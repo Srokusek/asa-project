@@ -15,12 +15,15 @@ function normalizeHost(host) {
   return `http://${raw}`;
 }
 
+const fastCloudMode = booleanFromEnv("FAST_CLOUD_MODE", false);
+
 export const CONFIG = {
   host: normalizeHost(process.env.HOST),
   token: process.env.TOKEN ?? "",
   agentName: process.env.AGENT_NAME ?? "PlannerAgent",
   logLevel: process.env.LOG_LEVEL ?? "info",
   actionDelayMs: numberFromEnv("ACTION_DELAY_MS", 100),
+  fastCloudMode,
   telemetryEnabled: booleanFromEnv("TELEMETRY_ENABLED", false),
   telemetryFile: process.env.TELEMETRY_FILE ?? "telemetry.jsonl",
   telemetry: {
@@ -28,6 +31,7 @@ export const CONFIG = {
     file: process.env.TELEMETRY_FILE ?? "telemetry.jsonl"
   },
   planner: {
+    fastCloudMode,
     meanPackageValue: 10,
     packageVariance: 0,
     decayRate: 1,
@@ -39,7 +43,7 @@ export const CONFIG = {
     rhoGeneration: 0.1,
     moveWeight: 1,
     betaCarry: 0.5,
-    periodicReplanTicks: 20,
+    periodicReplanTicks: fastCloudMode ? 30 : 20,
     timeTickMs: 1000,
     minParcelConfidence: 0.3,
     enemySafetyMargin: 0,
@@ -68,20 +72,20 @@ export const CONFIG = {
     explorationDebtThreshold: 25,
     explorationDebtBonus: 30,
     localCandidateRadius: 4,
-    localCandidateLimit: 4,
+    localCandidateLimit: fastCloudMode ? 3 : 4,
     clusterExpansionRadius: 3,
-    clusterExpansionLimit: 6,
-    maxCandidateGreens: 16,
+    clusterExpansionLimit: fastCloudMode ? 3 : 6,
+    maxCandidateGreens: fastCloudMode ? 8 : 16,
     localExploreReversePenalty: 20,
     localExploreInfoWeight: 1,
     denseGreenThreshold: 0.65,
     denseGreenMinGreens: 100,
     denseScoutRadius: 6,
-    denseScoutMaxWaypoints: 12,
+    denseScoutMaxWaypoints: fastCloudMode ? 6 : 12,
     denseScoutMinDistanceFromLastDelivery: 2,
-    greenExposureDepth: 6,
-    greenExposureBeamWidth: 16,
-    greenExposureMaxExpanded: 48,
+    greenExposureDepth: fastCloudMode ? 4 : 6,
+    greenExposureBeamWidth: fastCloudMode ? 8 : 16,
+    greenExposureMaxExpanded: fastCloudMode ? 24 : 48,
     greenExposureMinPlanLength: 3,
     greenExposureStaleWeight: 2,
     greenExposureNewTileWeight: 1,
@@ -100,8 +104,8 @@ export const CONFIG = {
     coverageSectorSize: 5,
     returnToRedWeight: 0.5,
     trapPenalty: 10000,
-    planningBudgetMs: 30,
-    hardPlanningBudgetMs: 100,
+    planningBudgetMs: fastCloudMode ? 25 : 30,
+    hardPlanningBudgetMs: fastCloudMode ? 60 : 100,
     mazeObstacleDensityThreshold: 0.25,
     enableEdgeTemporaryBlocks: true,
     temporaryEdgeBlockTtlTicks: 2,
@@ -113,6 +117,12 @@ export const CONFIG = {
     opportunisticCongestionPenalty: 8,
     targetCongestionPenalty: 0,
     deliveryUrgencyWeight: 0,
-    maxPlanningTimeMs: 30
+    maxPlanningTimeMs: fastCloudMode ? 60 : 30,
+    beamWidth: fastCloudMode ? 12 : undefined,
+    topK: fastCloudMode ? 8 : undefined,
+    maxPickupsBeforeDelivery: fastCloudMode ? 3 : undefined,
+    candidateDiagnosticsLimit: fastCloudMode ? 5 : 10,
+    ignoredVisiblePackagesLimit: fastCloudMode ? 5 : 10,
+    compactLogging: fastCloudMode
   }
 };

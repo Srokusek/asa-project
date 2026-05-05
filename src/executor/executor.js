@@ -1,10 +1,21 @@
 export class Executor {
-  constructor(socket, beliefs, config, telemetry = null) {
+  constructor(socket, beliefs, config, telemetry = null, logger = null) {
     this.socket = socket;
     this.beliefs = beliefs;
     this.config = config;
     this.telemetry = telemetry;
+    this.logger = logger;
     this.busy = false;
+  }
+
+  logEmitTiming(message, payload) {
+    this.logger?.info?.(message, payload);
+    const slowThreshold = Number(this.config.planner?.hardPlanningBudgetMs ?? 100);
+    const elapsed =
+      payload.emitMoveMs ?? payload.emitPickupMs ?? payload.emitPutdownMs ?? payload.elapsedMs ?? 0;
+    if (elapsed > slowThreshold) {
+      this.logger?.warn?.("executor_emit_slow", payload);
+    }
   }
 
   async execute(action) {
@@ -40,8 +51,16 @@ export class Executor {
     const edgeBlocksEnabled = this.config.planner.enableEdgeTemporaryBlocks !== false;
     const edgeTtl = Number(this.config.planner.temporaryEdgeBlockTtlTicks ?? 2);
 
+    const t0 = Date.now();
     try {
       const result = await this.socket.emitMove(direction);
+      const emitMoveMs = Date.now() - t0;
+      this.logEmitTiming("executor_emit", {
+        action: "move",
+        direction,
+        emitMoveMs,
+        result
+      });
       if (result === false) {
         this.beliefs.pushEvent("MOVE_FAILED", { direction, blockedCell });
         this.beliefs.pushEvent("PATH_BLOCKED", { direction, blockedCell });
@@ -54,6 +73,7 @@ export class Executor {
         this.telemetry?.record("move_failed", {
           action: actionOrDirection,
           result: false,
+          emitMoveMs,
           currentPosition: this.beliefs.me ? { x: this.beliefs.me.x, y: this.beliefs.me.y } : null,
           temporaryBlockedCells: this.beliefs.temporaryBlockedCells?.size ?? 0
         });
@@ -66,6 +86,7 @@ export class Executor {
       this.telemetry?.record("move", {
         action: actionOrDirection,
         result,
+        emitMoveMs,
         currentPosition: result
       });
       return result;
@@ -81,6 +102,7 @@ export class Executor {
       this.telemetry?.record("move_failed", {
         action: actionOrDirection,
         result: false,
+        emitMoveMs: Date.now() - t0,
         error: error.message,
         temporaryBlockedCells: this.beliefs.temporaryBlockedCells?.size ?? 0
       });
@@ -89,8 +111,15 @@ export class Executor {
   }
 
   async pickUp(action = null) {
+    const t0 = Date.now();
     try {
       const result = await this.socket.emitPickup();
+      const emitPickupMs = Date.now() - t0;
+      this.logEmitTiming("executor_emit", {
+        action: "pick_up",
+        emitPickupMs,
+        result
+      });
       if (Array.isArray(result) && result.length > 0) {
         for (const picked of result) {
           const parcel = this.beliefs.parcels.get(picked.id);
@@ -130,6 +159,7 @@ export class Executor {
         this.telemetry?.record("pick_up", {
           action,
           result,
+          emitPickupMs,
           carriedCount: this.beliefs.carriedParcels.size
         });
         return result;
@@ -137,18 +167,30 @@ export class Executor {
 
       this.beliefs.pushEvent("TARGET_NOT_FOUND", { action: "pick_up" });
       this.beliefs.pushEvent("PICKUP_FAILED", { reason: "empty_pickup" });
-      this.telemetry?.record("pickup_failed", { action, result: false, reason: "empty_pickup" });
+      this.telemetry?.record("pickup_failed", { action, result: false, reason: "empty_pickup", emitPickupMs });
       return false;
     } catch (error) {
       this.beliefs.pushEvent("PICKUP_FAILED", { error: error.message });
-      this.telemetry?.record("pickup_failed", { action, result: false, error: error.message });
+      this.telemetry?.record("pickup_failed", {
+        action,
+        result: false,
+        emitPickupMs: Date.now() - t0,
+        error: error.message
+      });
       return false;
     }
   }
 
   async putDown(selected) {
+    const t0 = Date.now();
     try {
       const result = selected ? await this.socket.emitPutdown(selected) : await this.socket.emitPutdown();
+      const emitPutdownMs = Date.now() - t0;
+      this.logEmitTiming("executor_emit", {
+        action: "put_down",
+        emitPutdownMs,
+        result
+      });
       if (Array.isArray(result) && result.length > 0) {
         for (const delivered of result) {
           this.beliefs.parcels.delete(delivered.id);
@@ -161,6 +203,7 @@ export class Executor {
         this.telemetry?.record("put_down", {
           action: { type: "put_down", parcels: selected ?? "all" },
           result,
+          emitPutdownMs,
           carriedCount: this.beliefs.carriedParcels.size,
           score: this.beliefs.me?.score
         });
@@ -171,6 +214,7 @@ export class Executor {
       this.telemetry?.record("putdown_failed", {
         action: { type: "put_down", parcels: selected ?? "all" },
         result: false,
+        emitPutdownMs,
         reason: "empty_putdown"
       });
       return false;
@@ -179,6 +223,7 @@ export class Executor {
       this.telemetry?.record("putdown_failed", {
         action: { type: "put_down", parcels: selected ?? "all" },
         result: false,
+        emitPutdownMs: Date.now() - t0,
         error: error.message
       });
       return false;

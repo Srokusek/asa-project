@@ -20,6 +20,7 @@ export const DEFAULT_PARAMS = Object.freeze({
   rhoGeneration: 0,
   moveWeight: 1,
   betaCarry: 0.5,
+  fastCloudMode: false,
   periodicReplanTicks: 20,
   minParcelConfidence: 0.3,
   enemySafetyMargin: 0,
@@ -92,7 +93,10 @@ export const DEFAULT_PARAMS = Object.freeze({
   opportunisticMinGain: 5,
   opportunisticCongestionPenalty: 8,
   targetCongestionPenalty: 0,
-  deliveryUrgencyWeight: 0
+  deliveryUrgencyWeight: 0,
+  candidateDiagnosticsLimit: 10,
+  ignoredVisiblePackagesLimit: 10,
+  compactLogging: false
 });
 
 function asNumber(value, fallback = 0) {
@@ -127,6 +131,34 @@ function normalizeId(prefix, id, position) {
 
 function normalizeParams(params = {}) {
   return { ...DEFAULT_PARAMS, ...params };
+}
+
+function applyFastCloudLimits(config) {
+  if (!config.fastCloudMode) return config;
+  return {
+    ...config,
+    maxCandidateGreens: Math.min(config.maxCandidateGreens, 8),
+    localCandidateLimit: Math.min(config.localCandidateLimit, 3),
+    clusterExpansionLimit: Math.min(config.clusterExpansionLimit, 3),
+    denseScoutMaxWaypoints: Math.min(config.denseScoutMaxWaypoints, 6),
+    greenExposureDepth: Math.min(config.greenExposureDepth, 4),
+    greenExposureBeamWidth: Math.min(config.greenExposureBeamWidth, 8),
+    greenExposureMaxExpanded: Math.min(config.greenExposureMaxExpanded, 24),
+    greenExposureMinPlanLength: Math.min(Math.max(config.greenExposureMinPlanLength, 3), 4),
+    beamWidth: Math.min(config.beamWidth, 12),
+    topK: Math.min(config.topK, 8),
+    maxPickupsBeforeDelivery: Math.min(config.maxPickupsBeforeDelivery, 3),
+    planningBudgetMs: Math.min(config.planningBudgetMs, 25),
+    hardPlanningBudgetMs: Math.min(config.hardPlanningBudgetMs, 60),
+    maxPlanningTimeMs: Math.min(
+      config.maxPlanningTimeMs === DEFAULT_PARAMS.maxPlanningTimeMs ? 60 : config.maxPlanningTimeMs,
+      60
+    ),
+    periodicReplanTicks: config.periodicReplanTicks > 0 ? Math.max(config.periodicReplanTicks, 30) : 30,
+    candidateDiagnosticsLimit: Math.min(config.candidateDiagnosticsLimit, 5),
+    ignoredVisiblePackagesLimit: Math.min(config.ignoredVisiblePackagesLimit, 5),
+    compactLogging: true
+  };
 }
 
 function normalizeVisitedGreenAt(value) {
@@ -612,8 +644,9 @@ export function chooseConfig(profile, params = {}) {
   const periodicReplanTicks =
     profile.hasDecay && periodicBase > 1 ? Math.max(1, Math.floor(periodicBase / 2)) : periodicBase;
 
-  return {
+  const selected = {
     mode: params.mode ?? mode,
+    fastCloudMode: Boolean(params.fastCloudMode ?? DEFAULT_PARAMS.fastCloudMode),
     topK: Math.max(0, Math.min(profile.greenCount, asNumber(params.topK, topK))),
     beamWidth: Math.max(1, Math.round(asNumber(params.beamWidth, beamWidth))),
     maxPickupsBeforeDelivery: Math.max(
@@ -764,8 +797,18 @@ export function chooseConfig(profile, params = {}) {
     ),
     targetCongestionPenalty: asNumber(params.targetCongestionPenalty, DEFAULT_PARAMS.targetCongestionPenalty),
     deliveryUrgencyWeight: asNumber(params.deliveryUrgencyWeight, DEFAULT_PARAMS.deliveryUrgencyWeight),
+    candidateDiagnosticsLimit: Math.max(
+      1,
+      Math.round(asNumber(params.candidateDiagnosticsLimit, DEFAULT_PARAMS.candidateDiagnosticsLimit))
+    ),
+    ignoredVisiblePackagesLimit: Math.max(
+      1,
+      Math.round(asNumber(params.ignoredVisiblePackagesLimit, DEFAULT_PARAMS.ignoredVisiblePackagesLimit))
+    ),
+    compactLogging: Boolean(params.compactLogging ?? DEFAULT_PARAMS.compactLogging),
     periodicReplanTicks
   };
+  return applyFastCloudLimits(selected);
 }
 
 export function sigmoid(x) {
@@ -2827,7 +2870,282 @@ function buildLocalExplorePlan(state, profile, config) {
   return null;
 }
 
+function definePlannerCache(state, key, valueFactory) {
+  if (Object.prototype.hasOwnProperty.call(state, key)) return;
+  Object.defineProperty(state, key, { value: valueFactory(), enumerable: false });
+}
+
+function prepareFastPlanningState(state, configOverride = null) {
+  const planningState = state?.grid && state?.me?.position && Array.isArray(state.greens)
+    ? state
+    : parseMap(state);
+  definePlannerCache(planningState, "__mapProfile", () => buildMapProfile(planningState));
+  definePlannerCache(planningState, "__rankingDistanceCache", () => new Map());
+  definePlannerCache(planningState, "__directedDistanceFields", () => buildDirectedDistanceFields(planningState));
+  definePlannerCache(planningState, "__redDistanceMap", () =>
+    buildNearestRedDistanceMap(planningState, planningState.__mapProfile)
+  );
+  const config = configOverride
+    ? applyFastCloudLimits({ ...chooseConfig(planningState.__mapProfile, planningState.params), ...configOverride })
+    : chooseConfig(planningState.__mapProfile, planningState.params);
+  return { planningState, profile: planningState.__mapProfile, config };
+}
+
+function buildFastDeliveryPlan(state, profile, config, greenScores) {
+  if ((state.carriedPackages ?? []).length === 0 || state.reds.length === 0) return null;
+  const start = copyPosition(state.me.position);
+  const startPlan = initialPlan(state);
+  let best = null;
+
+  for (const red of state.reds) {
+    const edge = shortestGridPath(state, start, red.position, profile);
+    if (!Number.isFinite(edge.cost) || edge.path.length <= 1) continue;
+    const deliveryTime = asNumber(state.time, 0) + edge.cost;
+    const deliveredScore = computeDeliveredValue(startPlan.pickedPackages, deliveryTime);
+    const value = deliveredScore - config.moveWeight * edge.cost;
+    if (!best || value > best.value + EPSILON || (Math.abs(value - best.value) <= EPSILON && edge.cost < best.edge.cost)) {
+      best = { red, edge, value, deliveredScore, deliveryTime };
+    }
+  }
+
+  if (!best) return null;
+  const redPoint = { id: best.red.id, type: "red", position: copyPosition(best.red.position) };
+  const startPoint = { id: "START", type: "start", position: start };
+  const oracle = {
+    entries: new Map([
+      [
+        pairKey("START", redPoint.id),
+        {
+          fromId: "START",
+          toId: redPoint.id,
+          cost: best.edge.cost,
+          path: best.edge.path
+        }
+      ]
+    ]),
+    points: [startPoint, redPoint],
+    pointsById: new Map([
+      ["START", startPoint],
+      [redPoint.id, redPoint]
+    ]),
+    profile
+  };
+  const plan = {
+    ...startPlan,
+    sequence: ["START", redPoint.id],
+    currentId: redPoint.id,
+    currentPosition: copyPosition(redPoint.position),
+    time: best.deliveryTime,
+    moveCost: best.edge.cost,
+    pickedPackages: [],
+    deliveredScore: best.deliveredScore,
+    value: best.value
+  };
+
+  return baseRoutePlan({
+    mode: "DELIVERY_ONLY",
+    sequence: plan.sequence,
+    path: best.edge.path.map(copyPosition),
+    value: best.value,
+    plan,
+    profile,
+    config,
+    greenScores,
+    oracle,
+    state,
+    fallbackStage: "fast_fallback"
+  });
+}
+
+function buildFastPickupPlan(state, profile, config, greenScores, candidateGreens = []) {
+  const visibleIds = new Set(visibleAvailablePackages(state, config).map((green) => green.id));
+  const candidateIds = new Set(candidateGreens.map((green) => green.id));
+  const pool = state.greens.filter((green) => visibleIds.has(green.id) || candidateIds.has(green.id));
+  let best = null;
+
+  for (const green of pool) {
+    if (!hasAvailablePackage(green, config)) continue;
+    const pickupDistance = distanceFromMe(state, green.position);
+    const deliveryDistance = nearestRedDistance(state, green.position);
+    if (!Number.isFinite(pickupDistance) || !Number.isFinite(deliveryDistance)) continue;
+
+    const reward = packageReward(green, config.meanPackageValue);
+    const estimatedDeliveredValue =
+      reward - packageDecayRate(green, config.decayRate) * (pickupDistance + deliveryDistance);
+    const priority = estimatedDeliveredValue / (1 + pickupDistance + deliveryDistance);
+    const edge = shortestGridPath(state, state.me.position, green.position, profile);
+    if (!Number.isFinite(edge.cost) || edge.path.length <= 1) continue;
+    const valueAtPickup = packageValueAtPickup(state, green, asNumber(state.time, 0) + edge.cost, config);
+    if (valueAtPickup <= EPSILON) continue;
+    const value = priority + valueAtPickup - config.moveWeight * edge.cost;
+    if (!best || value > best.value + EPSILON || (Math.abs(value - best.value) <= EPSILON && edge.cost < best.edge.cost)) {
+      best = { green, edge, value, priority, estimatedDeliveredValue };
+    }
+  }
+
+  if (!best) return null;
+  const startPoint = { id: "START", type: "start", position: copyPosition(state.me.position) };
+  const greenPoint = {
+    id: best.green.id,
+    type: "green",
+    position: copyPosition(best.green.position),
+    package: best.green.package
+  };
+  const oracle = {
+    entries: new Map([
+      [
+        pairKey("START", greenPoint.id),
+        {
+          fromId: "START",
+          toId: greenPoint.id,
+          cost: best.edge.cost,
+          path: best.edge.path
+        }
+      ]
+    ]),
+    points: [startPoint, greenPoint],
+    pointsById: new Map([
+      ["START", startPoint],
+      [greenPoint.id, greenPoint]
+    ]),
+    profile
+  };
+
+  return baseRoutePlan({
+    mode: "PICKUP_ONLY",
+    sequence: ["START", greenPoint.id],
+    path: best.edge.path.map(copyPosition),
+    value: best.value,
+    plan: {
+      ...initialPlan(state),
+      sequence: ["START", greenPoint.id],
+      currentId: greenPoint.id,
+      currentPosition: copyPosition(greenPoint.position),
+      time: asNumber(state.time, 0) + best.edge.cost,
+      moveCost: best.edge.cost,
+      pickedGreenIds: new Set([greenPoint.id]),
+      incomplete: true,
+      needsDeliveryAfterPickup: true
+    },
+    profile,
+    config,
+    greenScores,
+    candidateGreens: [best.green],
+    oracle,
+    state,
+    fallbackStage: "fast_fallback"
+  });
+}
+
+function fastScoutScore(state, path, config) {
+  let score = 0;
+  const now = asNumber(state.time, 0);
+  const positionCooldown = asNumber(config.positionCooldownTicks, DEFAULT_PARAMS.positionCooldownTicks);
+  const edgeCooldown = asNumber(config.edgeCooldownTicks, DEFAULT_PARAMS.edgeCooldownTicks);
+
+  for (let i = 1; i < path.length; i += 1) {
+    const position = path[i];
+    const previous = path[i - 1];
+    const key = positionKey(position);
+    const edge = edgeKey(previous, position);
+    const positionLast = asNumber(state.visitedPositions?.[key], -Infinity);
+    const edgeLast = asNumber(state.visitedEdges?.[edge], -Infinity);
+    const recentlyVisited = Number.isFinite(positionLast) && now - positionLast <= positionCooldown;
+    const recentlyTraversed = Number.isFinite(edgeLast) && now - edgeLast <= edgeCooldown;
+    score += tileInformationValue(state, position, config);
+    if (getCell(state, position)?.type === "green") score += 2;
+    if (!recentlyVisited) score += 2;
+    if (!recentlyTraversed) score += 3;
+    if (recentlyVisited) score -= config.positionRevisitPenalty;
+    if (recentlyTraversed) score -= config.edgeRevisitPenalty;
+  }
+
+  const endpoint = path.at(-1);
+  const returnPenalty = returnToRedPenalty(state, endpoint, config);
+  return score - (path.length - 1) * config.greenExposureDistanceWeight - returnPenalty.penalty;
+}
+
+function buildFastScoutPlan(state, profile, config, greenScores) {
+  const start = copyPosition(state.me.position);
+  let beam = [{ path: [start], visited: new Set([positionKey(start)]), score: 0 }];
+  let best = null;
+  let bestShort = null;
+  const maxDepth = Math.max(1, Math.min(3, asNumber(config.greenExposureDepth, 3)));
+
+  for (let depth = 0; depth < maxDepth; depth += 1) {
+    const nextBeam = [];
+    for (const item of beam) {
+      const current = item.path.at(-1);
+      for (const next of getDirectedNeighbors(state, current)) {
+        const key = positionKey(next);
+        if (item.visited.has(key)) continue;
+        const path = [...item.path, copyPosition(next)];
+        const score = fastScoutScore(state, path, config);
+        const candidate = {
+          path,
+          visited: new Set([...item.visited, key]),
+          score
+        };
+        if (path.length >= 3) {
+          if (!best || candidate.score > best.score) best = candidate;
+        } else if (!bestShort || candidate.score > bestShort.score) {
+          bestShort = candidate;
+        }
+        nextBeam.push(candidate);
+      }
+    }
+    if (nextBeam.length === 0) break;
+    nextBeam.sort((a, b) => b.score - a.score || b.path.length - a.path.length);
+    beam = nextBeam.slice(0, Math.min(8, config.greenExposureBeamWidth));
+  }
+
+  const selected = best ?? bestShort;
+  if (!selected || selected.path.length <= 1) return null;
+  const target = selected.path.at(-1);
+  const id = `FAST_SCOUT_${target.x}_${target.y}`;
+  return routePlanForScoutPoint({
+    mode: "LOCAL_EXPLORE",
+    state,
+    profile,
+    config,
+    greenScores,
+    pointId: id,
+    point: target,
+    edge: { cost: selected.path.length - 1, path: selected.path },
+    value: selected.score,
+    scoutTarget: {
+      id,
+      position: copyPosition(target),
+      score: selected.score,
+      distanceFromMe: selected.path.length - 1,
+      distanceToNearestRed: distanceToNearestReachableRed(state, target)
+    }
+  });
+}
+
+export function fallbackFastPlan(state, configOverride = null, options = {}) {
+  const { planningState, profile, config } = prepareFastPlanningState(state, configOverride);
+  const greenScores = options.greenScores ?? computeGreenScores(planningState, config);
+  const fallbackStage = options.fallbackStage ?? "fast_fallback";
+
+  const withStage = (plan) => plan ? { ...plan, fallbackStage } : null;
+
+  if ((planningState.carriedPackages ?? []).length > 0) {
+    const delivery = buildFastDeliveryPlan(planningState, profile, config, greenScores);
+    if (delivery) return withStage(delivery);
+  }
+
+  const pickup = buildFastPickupPlan(planningState, profile, config, greenScores, options.candidateGreens ?? []);
+  if (pickup) return withStage(pickup);
+
+  const scout = buildFastScoutPlan(planningState, profile, config, greenScores);
+  if (scout) return withStage(scout);
+
+  return withStage(buildIdlePlan(planningState, profile, config, greenScores));
+}
+
 export function replan(state) {
+  const planningStartedAt = Date.now();
   const planningState = parseMap(state);
   const profile = buildMapProfile(planningState);
   Object.defineProperty(planningState, "__mapProfile", { value: profile, enumerable: false });
@@ -2841,19 +3159,35 @@ export function replan(state) {
     enumerable: false
   });
   const config = chooseConfig(profile, planningState.params);
+  const budgetExceeded = () =>
+    config.fastCloudMode && Date.now() - planningStartedAt > asNumber(config.hardPlanningBudgetMs, 60);
+  const hardBudgetFallback = (candidateGreens = [], greenScores = new Map()) => ({
+    ...fallbackFastPlan(planningState, config, {
+      candidateGreens,
+      greenScores,
+      fallbackStage: "hard_budget_fallback"
+    }),
+    invalidPlanDetected: true
+  });
+
+  if (budgetExceeded()) return hardBudgetFallback();
   const greenScores = computeGreenScores(planningState, config);
+  if (budgetExceeded()) return hardBudgetFallback([], greenScores);
   const candidateGreens = selectCandidateGreens(planningState, greenScores, config);
+  if (budgetExceeded()) return hardBudgetFallback(candidateGreens, greenScores);
   const selectionDiagnostics = planningState.__candidateSelectionDiagnostics ?? [];
   const visiblePackages = visibleAvailablePackages(planningState, config);
   let invalidPlanDetected = false;
   let candidateDiagnostics = selectionDiagnostics;
 
   if ((planningState.carriedPackages ?? []).length > 0) {
+    if (budgetExceeded()) return hardBudgetFallback(candidateGreens, greenScores);
     const deliveryPlan = buildDeliveryOnlyPlan(planningState, profile, config, greenScores);
     if (deliveryPlan) return deliveryPlan;
   }
 
   if ((planningState.carriedPackages ?? []).length === 0 && candidateGreens.length > 0) {
+    if (budgetExceeded()) return hardBudgetFallback(candidateGreens, greenScores);
     const fullPlan = buildPickupDeliveryPlan(planningState, profile, config, greenScores, candidateGreens);
     if (fullPlan && !fullPlan.invalidPlanDetected && !isInvalidNonIdleRoutePlan(fullPlan)) {
       return {
@@ -2891,6 +3225,7 @@ export function replan(state) {
     visiblePackages.length === 0 &&
     profile.isDenseGreen
   ) {
+    if (budgetExceeded()) return hardBudgetFallback(candidateGreens, greenScores);
     const denseScoutPlan = buildDenseGreenScoutPlan(planningState, profile, config, greenScores);
     if (denseScoutPlan) {
       return {
@@ -2923,6 +3258,7 @@ export function replan(state) {
     visiblePackages.length === 0 &&
     (config.sensingRange <= 1 || profile.isMazeLike)
   ) {
+    if (budgetExceeded()) return hardBudgetFallback(candidateGreens, greenScores);
     const exposurePlan = buildGreenExposureScoutPlan(planningState, profile, config, greenScores);
     if (exposurePlan) {
       return {
@@ -2933,6 +3269,7 @@ export function replan(state) {
     }
   }
 
+  if (budgetExceeded()) return hardBudgetFallback(candidateGreens, greenScores);
   const scoutPlan = buildScoutPlan(planningState, profile, config, greenScores);
   if (scoutPlan) {
     return {

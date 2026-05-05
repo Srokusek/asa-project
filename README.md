@@ -22,6 +22,16 @@ ACTION_DELAY_MS=100
 
 For competition runs, set `ACTION_DELAY_MS` around `20`-`30` for a smoother action loop. The loop still enforces a `20ms` minimum.
 
+For cloud diagnostics and lighter planning:
+
+```env
+FAST_CLOUD_MODE=true
+LOG_LEVEL=warn
+ACTION_DELAY_MS=30
+```
+
+When `FAST_CLOUD_MODE=true`, the planner uses smaller candidate/beam/scout budgets, compact logging, and a hard planning fallback. Timing logs split local planning from SDK/server latency: `buildPlannerStateMs`, `replanMs`, `buildExecutablePlanMs`, `totalPlanningMs`, `emitMoveMs`, `emitPickupMs`, and `emitPutdownMs`.
+
 Alternative hosts:
 
 ```env

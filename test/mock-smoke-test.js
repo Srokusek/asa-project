@@ -138,6 +138,26 @@ test("move false marks the target cell as temporarily blocked", async () => {
   assert.ok(beliefs.events.some((event) => event.type === "MOVE_FAILED" && event.payload.blockedCell));
 });
 
+test("executor records emit timing for move pickup and putdown", async () => {
+  const socket = new MockSocket();
+  socket.position = { x: 0, y: 0 };
+  const beliefs = new BeliefState(config());
+  beliefs.updateSelf({ id: "ME", name: "me", x: 0, y: 0, score: 0, penalty: 0 });
+  beliefs.parcels.set("P", { id: "P", x: 1, y: 0, reward: 10, confidence: 1 });
+  const records = [];
+  const telemetry = { record: (event, payload) => records.push({ event, payload }) };
+  const executor = new Executor(socket, beliefs, config(), telemetry, { info: () => {}, warn: () => {} });
+
+  await executor.execute({ type: "move", direction: "right", from: { x: 0, y: 0 }, to: { x: 1, y: 0 } });
+  await executor.execute({ type: "pick_up", at: { x: 1, y: 0 }, targetId: "G" });
+  await executor.execute({ type: "move", direction: "right", from: { x: 1, y: 0 }, to: { x: 2, y: 0 } });
+  await executor.execute({ type: "put_down", parcels: "all" });
+
+  assert.equal(typeof records.find((record) => record.event === "move")?.payload.emitMoveMs, "number");
+  assert.equal(typeof records.find((record) => record.event === "pick_up")?.payload.emitPickupMs, "number");
+  assert.equal(typeof records.find((record) => record.event === "put_down")?.payload.emitPutdownMs, "number");
+});
+
 test("repeated move failures escalate and leave a sidestep option", () => {
   const socket = new MockSocket();
   const beliefs = new BeliefState(config());
@@ -497,6 +517,10 @@ test("replan log separates events seen from the replan cause", () => {
 
   assert.equal(replanPayload.eventsSeen, "MAP_READYx1");
   assert.equal(replanPayload.replanCause, "missing_plan");
+  assert.equal(typeof replanPayload.buildPlannerStateMs, "number");
+  assert.equal(typeof replanPayload.replanMs, "number");
+  assert.equal(typeof replanPayload.buildExecutablePlanMs, "number");
+  assert.equal(typeof replanPayload.totalPlanningMs, "number");
 });
 
 test("replan log includes candidate diagnostics when full pickup plan fails", () => {

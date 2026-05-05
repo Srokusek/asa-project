@@ -3,6 +3,7 @@ import { buildExecutablePlan } from "../planner/executable-plan.js";
 import {
   buildMapProfile,
   directionFromPositions,
+  fallbackFastPlan,
   getDirectedNeighbors,
   isMoveAllowed,
   isWalkable,
@@ -137,10 +138,11 @@ export function compactSequence(sequence = []) {
   };
 }
 
-function compactCandidateDiagnostics(diagnostics = []) {
+function compactCandidateDiagnostics(diagnostics = [], limit = 10) {
   if (!Array.isArray(diagnostics)) return [];
-  const compact = diagnostics.slice(0, 10);
-  if (diagnostics.length <= 10) return compact;
+  const max = Math.max(1, Math.round(Number(limit) || 10));
+  const compact = diagnostics.slice(0, max);
+  if (diagnostics.length <= max) return compact;
   return [...compact, { truncated: true, total: diagnostics.length }];
 }
 
@@ -170,7 +172,7 @@ export class AgentLoop {
     this.config = config;
     this.logger = createLogger(config.logLevel);
     this.telemetry = createTelemetry(config);
-    this.executor = new Executor(socket, beliefs, config, this.telemetry);
+    this.executor = new Executor(socket, beliefs, config, this.telemetry, this.logger);
     this.currentRoutePlan = null;
     this.currentExecutablePlan = null;
     this.actionIndex = 0;
@@ -340,6 +342,7 @@ export class AgentLoop {
         .map(String)
     );
     const ignoredVisiblePackages = [];
+    const ignoredLimit = Math.max(1, Math.round(Number(this.config.planner.ignoredVisiblePackagesLimit ?? 10)));
     let visiblePackagesCount = 0;
 
     for (const parcel of this.beliefs.parcels.values()) {
@@ -352,7 +355,7 @@ export class AgentLoop {
 
       visiblePackagesCount += 1;
       if (candidatePackageIds.has(String(parcel.id))) continue;
-      if (ignoredVisiblePackages.length >= 10) continue;
+      if (ignoredVisiblePackages.length >= ignoredLimit) continue;
 
       ignoredVisiblePackages.push({
         id: String(parcel.id),
@@ -712,8 +715,10 @@ export class AgentLoop {
   }
 
   makePlan(events = []) {
-    const start = Date.now();
+    const planningStartedAt = Date.now();
+    const plannerStateStartedAt = Date.now();
     const plannerState = buildPlannerState(this.beliefs, this.config);
+    const plannerStateFinishedAt = Date.now();
     const plannerSummary = {
       width: plannerState.width,
       height: plannerState.height,
@@ -725,9 +730,29 @@ export class AgentLoop {
       temporaryBlockedCells: this.beliefs.temporaryBlockedCells?.size ?? 0,
       me: this.beliefs.me
     };
-    const routePlan = replan(plannerState);
+    const replanStartedAt = Date.now();
+    let routePlan = replan(plannerState);
+    let replanFinishedAt = Date.now();
+    let replanMs = replanFinishedAt - replanStartedAt;
+    if (
+      this.config.planner.fastCloudMode &&
+      routePlan?.fallbackStage !== "hard_budget_fallback" &&
+      replanMs > Number(this.config.planner.hardPlanningBudgetMs ?? 60)
+    ) {
+      const fallbackStartedAt = Date.now();
+      routePlan = fallbackFastPlan(plannerState, this.config.planner, {
+        fallbackStage: "hard_budget_fallback"
+      });
+      replanFinishedAt = Date.now();
+      replanMs += replanFinishedAt - fallbackStartedAt;
+    }
+    const executableStartedAt = Date.now();
     let executablePlan = routePathIsExecutable(routePlan) ? buildExecutablePlan(routePlan) : [];
-    const elapsed = Date.now() - start;
+    const executableFinishedAt = Date.now();
+    const buildPlannerStateMs = plannerStateFinishedAt - plannerStateStartedAt;
+    const buildExecutablePlanMs = executableFinishedAt - executableStartedAt;
+    const totalPlanningMs = executableFinishedAt - planningStartedAt;
+    const elapsed = totalPlanningMs;
     this.logger.debug("planner state summary", { ...plannerSummary, mode: routePlan.mode });
 
     if (routePlan.mode !== "IDLE" && executablePlan.length === 0) {
@@ -780,14 +805,26 @@ export class AgentLoop {
 
     const eventsSeen = summarizeEvents(events);
     const replanCause = this.lastReplanCause ?? "missing_plan";
-    const candidates = (routePlan.candidateGreens ?? []).map((green) => green.id).join(",");
+    const candidateIds = (routePlan.candidateGreens ?? []).map((green) => green.id);
+    const candidateLimit = Math.max(1, Math.round(Number(routePlan.config?.candidateDiagnosticsLimit ?? 10)));
+    const candidates =
+      candidateIds.length > candidateLimit
+        ? `${candidateIds.slice(0, candidateLimit).join(",")},...(${candidateIds.length})`
+        : candidateIds.join(",");
     const scoutTarget = summarizeScoutTarget(routePlan.scoutTarget);
     const sequenceSummary = compactSequence(routePlan.sequence);
-    const candidateDiagnostics = compactCandidateDiagnostics(routePlan.candidateDiagnostics);
+    const candidateDiagnostics = compactCandidateDiagnostics(
+      routePlan.candidateDiagnostics,
+      routePlan.config?.candidateDiagnosticsLimit ?? this.config.planner.candidateDiagnosticsLimit
+    );
     const visiblePackageSummary = this.summarizeVisiblePackages(routePlan);
     this.logger.info("replan", {
       eventsSeen,
       replanCause,
+      buildPlannerStateMs,
+      replanMs,
+      buildExecutablePlanMs,
+      totalPlanningMs,
       mode: routePlan.mode,
       sequence: sequenceSummary.text,
       sequenceLength: sequenceSummary.sequenceLength,
@@ -827,6 +864,10 @@ export class AgentLoop {
       parcelsInBelief: this.beliefs.parcels.size,
       greensWithPackage: plannerSummary.greensWithPackage,
       carriedCount: this.beliefs.carriedParcels.size,
+      buildPlannerStateMs,
+      replanMs,
+      buildExecutablePlanMs,
+      totalPlanningMs,
       planningTimeMs: elapsed,
       temporaryBlockedCells: this.beliefs.temporaryBlockedCells?.size ?? 0,
       scoutTarget: compactScoutTargetId(routePlan.scoutTarget?.id),
@@ -848,8 +889,24 @@ export class AgentLoop {
       reason: replanCause
     });
 
-    if (elapsed > this.config.planner.maxPlanningTimeMs) {
-      this.logger.warn("planning exceeded budget", { elapsedMs: elapsed, budgetMs: this.config.planner.maxPlanningTimeMs });
+    if (elapsed > Number(this.config.planner.planningBudgetMs ?? this.config.planner.maxPlanningTimeMs ?? 30)) {
+      this.logger.warn("planning_exceeded_budget", {
+        buildPlannerStateMs,
+        replanMs,
+        buildExecutablePlanMs,
+        totalPlanningMs: elapsed,
+        budgetMs: this.config.planner.planningBudgetMs
+      });
+    }
+    if (elapsed > Number(this.config.planner.hardPlanningBudgetMs ?? 100)) {
+      this.logger.warn("hard_planning_budget_exceeded", {
+        buildPlannerStateMs,
+        replanMs,
+        buildExecutablePlanMs,
+        totalPlanningMs: elapsed,
+        budgetMs: this.config.planner.hardPlanningBudgetMs,
+        fallbackStage: routePlan.fallbackStage
+      });
     }
   }
 

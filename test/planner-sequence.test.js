@@ -10,6 +10,7 @@ import {
   buildPointsOfInterest,
   buildPickupOnlyPlan,
   chooseConfig,
+  fallbackFastPlan,
   futureGreenValue,
   getOracleEdge,
   getDirectedNeighbors,
@@ -1630,4 +1631,109 @@ test("ranking distance cache is attached to the normalized planning state", () =
 
   assert.ok(plan.state.__rankingDistanceCache instanceof Map);
   assert.ok(plan.state.__rankingDistanceCache.size > 0);
+});
+
+test("fast cloud config clamps expensive planner knobs", () => {
+  const state = parseMap({
+    width: 12,
+    height: 1,
+    grid: [Array.from({ length: 12 }, (_, index) => (index === 11 ? "2" : "1"))],
+    me: { id: "ME", position: { x: 0, y: 0 } },
+    params: { fastCloudMode: true }
+  });
+  const cfg = chooseConfig(buildMapProfile(state), state.params);
+
+  assert.equal(cfg.fastCloudMode, true);
+  assert.ok(cfg.maxCandidateGreens <= 8);
+  assert.ok(cfg.greenExposureDepth <= 4);
+  assert.ok(cfg.greenExposureMaxExpanded <= 24);
+  assert.ok(cfg.hardPlanningBudgetMs <= 60);
+});
+
+test("hard budget uses fallbackFastPlan in fast cloud mode", () => {
+  const originalNow = Date.now;
+  let now = 0;
+  Date.now = () => {
+    now += 100;
+    return now;
+  };
+
+  try {
+    const plan = replan(
+      parseMap({
+        width: 3,
+        height: 1,
+        grid: [["3", "1", "2"]],
+        me: { id: "ME", position: { x: 0, y: 0 } },
+        greens: [{ id: "G", position: { x: 1, y: 0 }, package: pkg("P", 10) }],
+        reds: [{ id: "R", position: { x: 2, y: 0 } }],
+        params: { fastCloudMode: true, hardPlanningBudgetMs: 60, decayRate: 0 }
+      })
+    );
+
+    assert.equal(plan.fallbackStage, "hard_budget_fallback");
+    assert.ok(["PICKUP_ONLY", "LOCAL_EXPLORE", "IDLE"].includes(plan.mode));
+  } finally {
+    Date.now = originalNow;
+  }
+});
+
+test("fallbackFastPlan delivers carried packages with a directed red path", () => {
+  const plan = fallbackFastPlan(
+    parseMap({
+      width: 3,
+      height: 1,
+      grid: [["3", "3", "2"]],
+      me: { id: "ME", position: { x: 0, y: 0 } },
+      carriedPackages: [{ id: "C", valueAtPickup: 20, pickupTime: 0, decayRate: 0, confidence: 1 }],
+      reds: [{ id: "R", position: { x: 2, y: 0 } }],
+      params: { fastCloudMode: true, decayRate: 0 }
+    }),
+    { fastCloudMode: true, decayRate: 0 }
+  );
+  const actions = buildExecutablePlan(plan);
+
+  assert.equal(plan.mode, "DELIVERY_ONLY");
+  assert.deepEqual(plan.sequence, ["START", "R"]);
+  assert.equal(actions.at(-1).type, "put_down");
+});
+
+test("fallbackFastPlan picks a visible reachable package without full beam search", () => {
+  const plan = fallbackFastPlan(
+    parseMap({
+      width: 3,
+      height: 1,
+      grid: [["3", "1", "2"]],
+      me: { id: "ME", position: { x: 0, y: 0 } },
+      greens: [{ id: "G", position: { x: 1, y: 0 }, package: { ...pkg("P", 20), lastSeenTime: 0 } }],
+      reds: [{ id: "R", position: { x: 2, y: 0 } }],
+      params: { fastCloudMode: true, decayRate: 0 }
+    }),
+    { fastCloudMode: true, decayRate: 0 }
+  );
+  const actions = buildExecutablePlan(plan);
+
+  assert.equal(plan.mode, "PICKUP_ONLY");
+  assert.deepEqual(plan.sequence, ["START", "G"]);
+  assert.ok(actions.some((action) => action.type === "pick_up"));
+});
+
+test("fallbackFastPlan scout is short and respects arrow constraints", () => {
+  const state = parseMap({
+    width: 5,
+    height: 1,
+    grid: [["3", "\u2192", "\u2192", "3", "2"]],
+    me: { id: "ME", position: { x: 0, y: 0 } },
+    reds: [{ id: "R", position: { x: 4, y: 0 } }],
+    params: { fastCloudMode: true, sensingRange: 1, decayRate: 0 }
+  });
+  const plan = fallbackFastPlan(state, { fastCloudMode: true, sensingRange: 1, decayRate: 0 });
+  const actions = buildExecutablePlan(plan);
+
+  assert.equal(plan.mode, "LOCAL_EXPLORE");
+  assert.ok(actions.length >= 2);
+  assert.ok(actions.length <= 3);
+  for (const action of actions) {
+    if (action.type === "move") assert.equal(isMoveAllowed(plan.state, action.from, action.to), true);
+  }
 });
