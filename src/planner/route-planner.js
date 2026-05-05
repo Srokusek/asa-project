@@ -22,6 +22,9 @@ export const DEFAULT_PARAMS = Object.freeze({
   betaCarry: 0.5,
   fastCloudMode: false,
   periodicReplanTicks: 20,
+  eventCoalesceMs: 0,
+  minReplanIntervalMs: 0,
+  minScoutReplanIntervalMs: 0,
   minParcelConfidence: 0.3,
   enemySafetyMargin: 0,
   maxPlanningTimeMs: 30,
@@ -53,6 +56,10 @@ export const DEFAULT_PARAMS = Object.freeze({
   clusterExpansionRadius: 3,
   clusterExpansionLimit: 6,
   maxCandidateGreens: 16,
+  maxVisiblePackageCandidates: 24,
+  maxBeliefPackageCandidates: 32,
+  maxGreenCandidates: 32,
+  maxOraclePoints: 64,
   localExploreReversePenalty: 20,
   localExploreInfoWeight: 1,
   denseGreenThreshold: 0.65,
@@ -91,11 +98,18 @@ export const DEFAULT_PARAMS = Object.freeze({
   opportunisticPathRadius: 2,
   opportunisticCheckIntervalTicks: 2,
   opportunisticMinGain: 5,
+  enableImmediateNearbyPickup: true,
+  nearbyPickupMaxDistance: 3,
+  nearbyPickupMaxCandidates: 8,
+  nearbyPickupMinEstimatedValue: 1,
+  opportunisticMaxExtraCost: 3,
+  opportunisticMinValue: 5,
   opportunisticCongestionPenalty: 8,
   targetCongestionPenalty: 0,
   deliveryUrgencyWeight: 0,
   candidateDiagnosticsLimit: 10,
   ignoredVisiblePackagesLimit: 10,
+  diagnosticsLimit: 10,
   compactLogging: false
 });
 
@@ -138,6 +152,10 @@ function applyFastCloudLimits(config) {
   return {
     ...config,
     maxCandidateGreens: Math.min(config.maxCandidateGreens, 8),
+    maxVisiblePackageCandidates: Math.min(config.maxVisiblePackageCandidates, 12),
+    maxBeliefPackageCandidates: Math.min(config.maxBeliefPackageCandidates, 16),
+    maxGreenCandidates: Math.min(config.maxGreenCandidates, 12),
+    maxOraclePoints: Math.min(config.maxOraclePoints, 20),
     localCandidateLimit: Math.min(config.localCandidateLimit, 3),
     clusterExpansionLimit: Math.min(config.clusterExpansionLimit, 3),
     denseScoutMaxWaypoints: Math.min(config.denseScoutMaxWaypoints, 6),
@@ -157,6 +175,7 @@ function applyFastCloudLimits(config) {
     periodicReplanTicks: config.periodicReplanTicks > 0 ? Math.max(config.periodicReplanTicks, 30) : 30,
     candidateDiagnosticsLimit: Math.min(config.candidateDiagnosticsLimit, 5),
     ignoredVisiblePackagesLimit: Math.min(config.ignoredVisiblePackagesLimit, 5),
+    diagnosticsLimit: Math.min(config.diagnosticsLimit, 5),
     compactLogging: true
   };
 }
@@ -647,6 +666,9 @@ export function chooseConfig(profile, params = {}) {
   const selected = {
     mode: params.mode ?? mode,
     fastCloudMode: Boolean(params.fastCloudMode ?? DEFAULT_PARAMS.fastCloudMode),
+    eventCoalesceMs: asNumber(params.eventCoalesceMs, DEFAULT_PARAMS.eventCoalesceMs),
+    minReplanIntervalMs: asNumber(params.minReplanIntervalMs, DEFAULT_PARAMS.minReplanIntervalMs),
+    minScoutReplanIntervalMs: asNumber(params.minScoutReplanIntervalMs, DEFAULT_PARAMS.minScoutReplanIntervalMs),
     topK: Math.max(0, Math.min(profile.greenCount, asNumber(params.topK, topK))),
     beamWidth: Math.max(1, Math.round(asNumber(params.beamWidth, beamWidth))),
     maxPickupsBeforeDelivery: Math.max(
@@ -709,6 +731,19 @@ export function chooseConfig(profile, params = {}) {
       0,
       Math.round(asNumber(params.maxCandidateGreens, DEFAULT_PARAMS.maxCandidateGreens))
     ),
+    maxVisiblePackageCandidates: Math.max(
+      1,
+      Math.round(asNumber(params.maxVisiblePackageCandidates, DEFAULT_PARAMS.maxVisiblePackageCandidates))
+    ),
+    maxBeliefPackageCandidates: Math.max(
+      1,
+      Math.round(asNumber(params.maxBeliefPackageCandidates, DEFAULT_PARAMS.maxBeliefPackageCandidates))
+    ),
+    maxGreenCandidates: Math.max(
+      1,
+      Math.round(asNumber(params.maxGreenCandidates, DEFAULT_PARAMS.maxGreenCandidates))
+    ),
+    maxOraclePoints: Math.max(1, Math.round(asNumber(params.maxOraclePoints, DEFAULT_PARAMS.maxOraclePoints))),
     localExploreReversePenalty: asNumber(
       params.localExploreReversePenalty,
       DEFAULT_PARAMS.localExploreReversePenalty
@@ -791,6 +826,18 @@ export function chooseConfig(profile, params = {}) {
       Math.round(asNumber(params.opportunisticCheckIntervalTicks, DEFAULT_PARAMS.opportunisticCheckIntervalTicks))
     ),
     opportunisticMinGain: asNumber(params.opportunisticMinGain, DEFAULT_PARAMS.opportunisticMinGain),
+    enableImmediateNearbyPickup: params.enableImmediateNearbyPickup ?? DEFAULT_PARAMS.enableImmediateNearbyPickup,
+    nearbyPickupMaxDistance: asNumber(params.nearbyPickupMaxDistance, DEFAULT_PARAMS.nearbyPickupMaxDistance),
+    nearbyPickupMaxCandidates: Math.max(
+      1,
+      Math.round(asNumber(params.nearbyPickupMaxCandidates, DEFAULT_PARAMS.nearbyPickupMaxCandidates))
+    ),
+    nearbyPickupMinEstimatedValue: asNumber(
+      params.nearbyPickupMinEstimatedValue,
+      DEFAULT_PARAMS.nearbyPickupMinEstimatedValue
+    ),
+    opportunisticMaxExtraCost: asNumber(params.opportunisticMaxExtraCost, DEFAULT_PARAMS.opportunisticMaxExtraCost),
+    opportunisticMinValue: asNumber(params.opportunisticMinValue, DEFAULT_PARAMS.opportunisticMinValue),
     opportunisticCongestionPenalty: asNumber(
       params.opportunisticCongestionPenalty,
       DEFAULT_PARAMS.opportunisticCongestionPenalty
@@ -805,6 +852,7 @@ export function chooseConfig(profile, params = {}) {
       1,
       Math.round(asNumber(params.ignoredVisiblePackagesLimit, DEFAULT_PARAMS.ignoredVisiblePackagesLimit))
     ),
+    diagnosticsLimit: Math.max(1, Math.round(asNumber(params.diagnosticsLimit, DEFAULT_PARAMS.diagnosticsLimit))),
     compactLogging: Boolean(params.compactLogging ?? DEFAULT_PARAMS.compactLogging),
     periodicReplanTicks
   };
@@ -1539,19 +1587,34 @@ function pathFromBfsAll(result, targetPosition) {
 
 export function buildDistanceOracle(state, points) {
   const profile = buildMapProfile(state);
+  const maxOraclePoints = Math.max(1, Math.round(asNumber(state.params?.maxOraclePoints, Infinity)));
+  const oraclePoints =
+    Number.isFinite(maxOraclePoints) && points.length > maxOraclePoints
+      ? [...points]
+          .sort((a, b) => {
+            if (a.id === "START") return -1;
+            if (b.id === "START") return 1;
+            if (a.type === "red" && b.type !== "red") return -1;
+            if (b.type === "red" && a.type !== "red") return 1;
+            return manhattan(state.me.position, a.position) - manhattan(state.me.position, b.position);
+          })
+          .slice(0, maxOraclePoints)
+      : points;
   const entries = new Map();
-  const pointsById = new Map(points.map((point) => [point.id, point]));
+  const pointsById = new Map(oraclePoints.map((point) => [point.id, point]));
   const stats = {
-    points: points.length,
+    points: oraclePoints.length,
+    originalPoints: points.length,
+    truncated: oraclePoints.length < points.length,
     pathfindingCalls: 0,
     singleSourceBfsRuns: 0
   };
 
   if (profile.hasUniformCosts) {
-    for (const from of points) {
+    for (const from of oraclePoints) {
       const all = bfsAllDistancesFrom(state, from.position);
       stats.singleSourceBfsRuns += 1;
-      for (const to of points) {
+      for (const to of oraclePoints) {
         if (from.id === to.id) continue;
         const edge = pathFromBfsAll(all, to.position);
         entries.set(pairKey(from.id, to.id), {
@@ -1563,8 +1626,8 @@ export function buildDistanceOracle(state, points) {
       }
     }
   } else {
-    for (const from of points) {
-      for (const to of points) {
+    for (const from of oraclePoints) {
+      for (const to of oraclePoints) {
         if (from.id === to.id) continue;
         stats.pathfindingCalls += 1;
         const edge = shortestGridPath(state, from.position, to.position, profile);
@@ -1578,7 +1641,7 @@ export function buildDistanceOracle(state, points) {
     }
   }
 
-  return { entries, points, pointsById, profile, stats };
+  return { entries, points: oraclePoints, pointsById, profile, stats };
 }
 
 export function getOracleEdge(oracle, fromId, toId) {
@@ -3104,7 +3167,7 @@ function buildFastScoutPlan(state, profile, config, greenScores) {
   const target = selected.path.at(-1);
   const id = `FAST_SCOUT_${target.x}_${target.y}`;
   return routePlanForScoutPoint({
-    mode: "LOCAL_EXPLORE",
+    mode: "LOCAL_EXPLORE_FAST",
     state,
     profile,
     config,
@@ -3148,6 +3211,9 @@ export function replan(state) {
   const planningStartedAt = Date.now();
   const planningState = parseMap(state);
   const profile = buildMapProfile(planningState);
+  const config = chooseConfig(profile, planningState.params);
+  const budgetExceeded = () =>
+    config.fastCloudMode && Date.now() - planningStartedAt > asNumber(config.hardPlanningBudgetMs, 60);
   Object.defineProperty(planningState, "__mapProfile", { value: profile, enumerable: false });
   Object.defineProperty(planningState, "__rankingDistanceCache", { value: new Map(), enumerable: false });
   Object.defineProperty(planningState, "__directedDistanceFields", {
@@ -3158,9 +3224,6 @@ export function replan(state) {
     value: buildNearestRedDistanceMap(planningState, profile),
     enumerable: false
   });
-  const config = chooseConfig(profile, planningState.params);
-  const budgetExceeded = () =>
-    config.fastCloudMode && Date.now() - planningStartedAt > asNumber(config.hardPlanningBudgetMs, 60);
   const hardBudgetFallback = (candidateGreens = [], greenScores = new Map()) => ({
     ...fallbackFastPlan(planningState, config, {
       candidateGreens,
@@ -3197,6 +3260,7 @@ export function replan(state) {
     }
 
     invalidPlanDetected = true;
+    if (budgetExceeded()) return hardBudgetFallback(candidateGreens, greenScores);
     candidateDiagnostics = [
       ...selectionDiagnostics,
       ...diagnoseCandidateGreens(planningState, candidateGreens, fullPlan.oracle, config)

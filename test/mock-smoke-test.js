@@ -354,6 +354,51 @@ test("GREEN_EXPOSURE_SCOUT commitment ignores empty soft updates", () => {
   assert.equal(loop.lastReplanCause, "scout_commitment_keep_plan");
 });
 
+test("event coalescing compacts repeated soft events into one batch", () => {
+  const socket = new MockSocket();
+  const cfg = {
+    ...config(),
+    planner: { ...config().planner, eventCoalesceMs: 50 }
+  };
+  const beliefs = new BeliefState(cfg);
+  const loop = new AgentLoop(socket, beliefs, cfg);
+  const events = [];
+  for (let i = 0; i < 4; i += 1) events.push({ type: "AGENTS_SENSING", payload: { count: 1 } });
+  for (let i = 0; i < 4; i += 1) events.push({ type: "PARCELS_SENSING", payload: { count: 0 } });
+  for (let i = 0; i < 2; i += 1) events.push({ type: "YOU_UPDATED" });
+
+  loop.queueEvents(events);
+  const batch = loop.flushPendingEvents({ force: true });
+
+  assert.equal(batch.length, 3);
+  assert.equal(batch.find((event) => event.type === "AGENTS_SENSING").count, 4);
+  assert.equal(batch.find((event) => event.type === "PARCELS_SENSING").count, 4);
+  assert.equal(batch.find((event) => event.type === "YOU_UPDATED").count, 2);
+});
+
+test("replan throttling keeps a valid plan through repeated YOU_UPDATED events", () => {
+  const socket = new MockSocket();
+  const cfg = {
+    ...config(),
+    planner: { ...config().planner, minReplanIntervalMs: 1000 }
+  };
+  const beliefs = new BeliefState(cfg);
+  const loop = new AgentLoop(socket, beliefs, cfg);
+  loop.currentRoutePlan = {
+    mode: "PICKUP_ONLY",
+    sequence: ["START", "G"],
+    path: [{ x: 0, y: 0 }, { x: 1, y: 0 }]
+  };
+  loop.currentExecutablePlan = [
+    { type: "move", direction: "right", from: { x: 0, y: 0 }, to: { x: 1, y: 0 } }
+  ];
+  loop.actionIndex = 0;
+  loop.lastReplanWallClockMs = Date.now();
+
+  assert.equal(loop.mustReplan([{ type: "YOU_UPDATED", count: 10 }]), false);
+  assert.equal(loop.lastReplanCause, "replan_throttled");
+});
+
 test("routePathIsExecutable rejects walkable paths with illegal arrow edges", () => {
   const state = {
     grid: [[
@@ -372,6 +417,79 @@ test("routePathIsExecutable rejects walkable paths with illegal arrow edges", ()
     }),
     false
   );
+});
+
+test("immediate nearby pickup chooses a visible package before scout planning", () => {
+  const socket = new MockSocket();
+  const cfg = config();
+  const beliefs = new BeliefState(cfg);
+  const loop = new AgentLoop(socket, beliefs, cfg);
+  beliefs.updateMap(3, 1, [
+    { x: 0, y: 0, type: "3" },
+    { x: 1, y: 0, type: "1" },
+    { x: 2, y: 0, type: "2" }
+  ]);
+  beliefs.updateSelf({ id: "ME", name: "me", x: 0, y: 0, score: 0, penalty: 0 });
+  beliefs.updateParcelsSensing([{ id: "P", x: 1, y: 0, reward: 20 }], [{ x: 1, y: 0 }]);
+
+  const immediate = loop.tryImmediateNearbyPickup();
+
+  assert.equal(immediate.routePlan.mode, "PICKUP_DELIVERY");
+  assert.equal(immediate.routePlan.fallbackStage, "immediate_nearby_pickup");
+  assert.ok(immediate.executablePlan.some((action) => action.type === "pick_up"));
+});
+
+test("nearby pickup preempts GREEN_EXPOSURE_SCOUT in tick", async () => {
+  const socket = new MockSocket();
+  const cfg = config();
+  const beliefs = new BeliefState(cfg);
+  const loop = new AgentLoop(socket, beliefs, cfg);
+  registerSdkListeners(socket, beliefs, loop);
+  socket.emit("you", { id: "ME", name: "me", x: 0, y: 0, score: 0, penalty: 0 });
+  socket.emit("map", 3, 1, [
+    { x: 0, y: 0, type: "3" },
+    { x: 1, y: 0, type: "1" },
+    { x: 2, y: 0, type: "2" }
+  ]);
+  beliefs.consumeEvents();
+  loop.currentRoutePlan = {
+    mode: "GREEN_EXPOSURE_SCOUT",
+    sequence: ["START", "GREEN_EXPOSURE_2_0"],
+    path: [{ x: 0, y: 0 }, { x: 1, y: 0 }, { x: 2, y: 0 }],
+    state: null,
+    config: { periodicReplanTicks: 100 }
+  };
+  loop.currentExecutablePlan = [
+    { type: "move", direction: "right", from: { x: 0, y: 0 }, to: { x: 1, y: 0 } },
+    { type: "move", direction: "right", from: { x: 1, y: 0 }, to: { x: 2, y: 0 } }
+  ];
+  socket.emit("parcelsSensing", [{ id: "P", x: 1, y: 0, reward: 20 }]);
+
+  await loop.tick();
+
+  assert.equal(loop.currentRoutePlan.mode, "PICKUP_DELIVERY");
+  assert.equal(loop.currentRoutePlan.fallbackStage, "immediate_nearby_pickup");
+  assert.deepEqual(socket.records.map((record) => record.type), ["move"]);
+});
+
+test("delivery-only is not interrupted by a low value nearby package", () => {
+  const socket = new MockSocket();
+  const cfg = config();
+  const beliefs = new BeliefState(cfg);
+  const loop = new AgentLoop(socket, beliefs, cfg);
+  beliefs.updateMap(4, 1, [
+    { x: 0, y: 0, type: "3" },
+    { x: 1, y: 0, type: "1" },
+    { x: 2, y: 0, type: "3" },
+    { x: 3, y: 0, type: "2" }
+  ]);
+  beliefs.updateSelf({ id: "ME", name: "me", x: 0, y: 0, score: 0, penalty: 0 });
+  beliefs.carriedParcels.set("C", { id: "C", valueAtPickup: 30, pickupTime: 0, decayRate: 0, confidence: 1 });
+  beliefs.updateParcelsSensing([{ id: "LOW", x: 1, y: 0, reward: 1 }], [{ x: 1, y: 0 }]);
+  loop.currentRoutePlan = { mode: "DELIVERY_ONLY" };
+  loop.currentExecutablePlan = [{ type: "move", direction: "right", from: { x: 0, y: 0 }, to: { x: 1, y: 0 } }];
+
+  assert.equal(loop.tryImmediateNearbyPickup(), null);
 });
 
 test("enemy in next cell prevents emitMove and marks a temporary block", async () => {

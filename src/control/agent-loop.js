@@ -22,7 +22,8 @@ const HARD_REPLAN_EVENTS = new Set([
   "BELIEF_INVALIDATED",
   "PICKUP_FAILED",
   "PUTDOWN_FAILED",
-  "TEMPORARY_BLOCKED_CELL"
+  "TEMPORARY_BLOCKED_CELL",
+  "TEMPORARY_BLOCKED_EDGE"
 ]);
 
 const PACKAGE_REPLAN_EVENTS = new Set([
@@ -40,11 +41,16 @@ const SCOUT_PLAN_MODES = new Set([
   "DENSE_SCOUT",
   "GREEN_EXPOSURE_SCOUT",
   "LOW_VISIBILITY_COVERAGE_SCOUT",
-  "LOCAL_EXPLORE"
+  "LOCAL_EXPLORE",
+  "LOCAL_EXPLORE_FAST"
 ]);
 
 function eventType(event) {
   return typeof event === "string" ? event : event?.type;
+}
+
+function eventCount(event) {
+  return Math.max(1, Math.round(Number(typeof event === "object" ? event.count ?? 1 : 1)));
 }
 
 function eventPayloadCount(event) {
@@ -84,7 +90,7 @@ function summarizeEvents(events = []) {
   for (const event of events) {
     const type = eventType(event);
     if (!type) continue;
-    counts.set(type, (counts.get(type) ?? 0) + 1);
+    counts.set(type, (counts.get(type) ?? 0) + eventCount(event));
   }
 
   if (counts.size === 0) return "missing_or_periodic_plan";
@@ -187,6 +193,11 @@ export class AgentLoop {
     this.lastOpportunisticCheckTick = -Infinity;
     this.lastReplanCause = "missing_plan";
     this.invalidNonIdleZeroActionCount = 0;
+    this.pendingEvents = new Map();
+    this.pendingEventsSinceMs = null;
+    this.lastEventBatchMs = -Infinity;
+    this.lastReplanWallClockMs = -Infinity;
+    this.lastImmediatePickupMs = 0;
   }
 
   start() {
@@ -373,6 +384,167 @@ export class AgentLoop {
     };
   }
 
+  queueEvents(events = []) {
+    const now = Date.now();
+    for (const event of events) {
+      const type = eventType(event);
+      if (!type) continue;
+      const current = this.pendingEvents.get(type) ?? {
+        type,
+        count: 0,
+        payload: {},
+        firstCreatedAt: event?.createdAt ?? now,
+        lastCreatedAt: event?.createdAt ?? now
+      };
+      current.count += eventCount(event);
+      current.lastCreatedAt = event?.createdAt ?? now;
+      const payload = typeof event === "object" ? event.payload ?? {} : {};
+      current.payload = {
+        ...current.payload,
+        ...payload,
+        count: Math.max(Number(current.payload.count ?? 0), Number(payload.count ?? 0))
+      };
+      this.pendingEvents.set(type, current);
+    }
+    if (events.length > 0 && this.pendingEventsSinceMs === null) {
+      this.pendingEventsSinceMs = now;
+    }
+  }
+
+  hasPendingHardEvent() {
+    for (const type of this.pendingEvents.keys()) {
+      if (HARD_REPLAN_EVENTS.has(type) || type === "NEW_PACKAGE_SPAWN") return true;
+    }
+    return false;
+  }
+
+  flushPendingEvents({ force = false } = {}) {
+    if (this.pendingEvents.size === 0) return [];
+    const now = Date.now();
+    const coalesceMs = Math.max(0, Number(this.config.planner.eventCoalesceMs ?? 0));
+    const elapsed = this.pendingEventsSinceMs === null ? Infinity : now - this.pendingEventsSinceMs;
+    if (!force && coalesceMs > 0 && elapsed < coalesceMs && !this.hasPendingHardEvent()) {
+      return [];
+    }
+
+    const batch = [...this.pendingEvents.values()].map((entry) => ({
+      type: entry.type,
+      count: entry.count,
+      payload: { ...entry.payload },
+      createdAt: entry.firstCreatedAt,
+      lastCreatedAt: entry.lastCreatedAt,
+      batched: true
+    }));
+    this.pendingEvents.clear();
+    this.pendingEventsSinceMs = null;
+    this.lastEventBatchMs = now;
+    return batch;
+  }
+
+  currentPlanIsUsable() {
+    if (!this.currentRoutePlan || !this.currentExecutablePlan) return false;
+    if (this.actionIndex >= this.currentExecutablePlan.length) return false;
+    if (!routePathIsExecutable(this.currentRoutePlan)) return false;
+    return Boolean(this.currentExecutablePlan[this.actionIndex]);
+  }
+
+  replanThrottleActive(events = []) {
+    if (!this.currentPlanIsUsable()) return false;
+    if (hasEvent(events, HARD_REPLAN_EVENTS)) return false;
+    if (this.hasRelevantPackageEvent(events)) return false;
+
+    const interval = SCOUT_PLAN_MODES.has(this.currentRoutePlan?.mode)
+      ? Number(this.config.planner.minScoutReplanIntervalMs ?? 0)
+      : Number(this.config.planner.minReplanIntervalMs ?? 0);
+    if (interval <= 0) return false;
+    return Date.now() - this.lastReplanWallClockMs < interval;
+  }
+
+  hasNearbyVisiblePackageCheap() {
+    if (!this.beliefs.me) return false;
+    const current = copyPosition(this.beliefs.me);
+    const maxDistance = Number(this.config.planner.nearbyPickupMaxDistance ?? 3);
+    const minConfidence = Number(this.config.planner.minParcelConfidence ?? 0.3);
+    const minValue = Number(this.config.planner.nearbyPickupMinEstimatedValue ?? 1);
+
+    for (const parcel of this.beliefs.parcels.values()) {
+      if (parcel.carriedBy) continue;
+      const confidence = Number(parcel.confidence ?? 0);
+      const lastSeenTime = Number(parcel.lastSeenTime ?? -Infinity);
+      const visible = confidence >= 1 || lastSeenTime >= Number(this.beliefs.time ?? 0);
+      if (!visible || confidence < minConfidence) continue;
+      if (this.beliefs.estimateParcelReward(parcel) < minValue) continue;
+      if (manhattan(current, parcel) <= maxDistance) return true;
+    }
+
+    return false;
+  }
+
+  hasRelevantPackageEvent(events = []) {
+    if (hasVisibleParcelEvent(events) && this.hasNearbyVisiblePackageCheap()) return true;
+    if (events.some((event) => eventType(event) === "NEW_PACKAGE_SPAWN" && !Number.isFinite(Number(event?.payload?.x)))) {
+      return true;
+    }
+    if (!this.beliefs.me) return false;
+    const current = copyPosition(this.beliefs.me);
+    const maxDistance = Number(this.config.planner.nearbyPickupMaxDistance ?? 3);
+
+    return events.some((event) => {
+      if (eventType(event) !== "NEW_PACKAGE_SPAWN") return false;
+      const payload = event?.payload ?? {};
+      const hasCoordinates = Number.isFinite(Number(payload.x)) && Number.isFinite(Number(payload.y));
+      if (!hasCoordinates) return true;
+      return manhattan(current, { x: Number(payload.x), y: Number(payload.y) }) <= maxDistance;
+    });
+  }
+
+  boundPlannerStateForFastMode(plannerState) {
+    if (!this.config.planner.fastCloudMode) return plannerState;
+    const config = this.config.planner;
+    const maxVisible = Math.max(1, Math.round(Number(config.maxVisiblePackageCandidates ?? 12)));
+    const maxBelief = Math.max(1, Math.round(Number(config.maxBeliefPackageCandidates ?? 16)));
+    const maxGreen = Math.max(1, Math.round(Number(config.maxGreenCandidates ?? 12)));
+    const me = plannerState.me?.position ?? { x: 0, y: 0 };
+
+    const withPackage = [];
+    const withoutPackage = [];
+    for (const green of plannerState.greens ?? []) {
+      if (green.package && !green.package.carriedBy) withPackage.push(green);
+      else withoutPackage.push(green);
+    }
+
+    const visible = withPackage
+      .filter((green) => Number(green.package?.confidence ?? 0) >= 1 || Number(green.package?.lastSeenTime ?? -Infinity) >= Number(plannerState.time ?? 0))
+      .sort((a, b) => manhattan(me, a.position) - manhattan(me, b.position));
+    const visibleIds = new Set(visible.slice(0, maxVisible).map((green) => green.id));
+    const belief = withPackage
+      .filter((green) => !visibleIds.has(green.id))
+      .sort((a, b) => {
+        const rewardDelta = Number(b.package?.reward ?? b.package?.value ?? 0) - Number(a.package?.reward ?? a.package?.value ?? 0);
+        return rewardDelta || manhattan(me, a.position) - manhattan(me, b.position);
+      })
+      .slice(0, maxBelief);
+    const scoutGreens = withoutPackage
+      .sort((a, b) => manhattan(me, a.position) - manhattan(me, b.position))
+      .slice(0, maxGreen);
+    const selected = [...visible.slice(0, maxVisible), ...belief, ...scoutGreens];
+    const selectedById = new Map(selected.map((green) => [green.id, green]));
+
+    return {
+      ...plannerState,
+      greens: [...selectedById.values()],
+      params: {
+        ...plannerState.params,
+        maxCandidateGreens: Math.min(Number(plannerState.params?.maxCandidateGreens ?? maxVisible), maxVisible),
+        topK: Math.min(Number(plannerState.params?.topK ?? maxVisible), maxVisible),
+        beamWidth: Math.min(Number(plannerState.params?.beamWidth ?? 12), 12),
+        maxPickupsBeforeDelivery: Math.min(Number(plannerState.params?.maxPickupsBeforeDelivery ?? 3), 3)
+      },
+      boundedInput: true,
+      originalGreenCount: plannerState.greens?.length ?? 0
+    };
+  }
+
   resetMoveFailures() {
     this.lastFailedMoveKey = null;
     this.consecutiveMoveFailures = 0;
@@ -415,7 +587,9 @@ export class AgentLoop {
   }
 
   canUseFallbackExploration(routePlan = this.currentRoutePlan) {
-    if (routePlan?.mode === "IDLE" || routePlan?.mode === "LOCAL_EXPLORE") return true;
+    if (routePlan?.mode === "IDLE" || routePlan?.mode === "LOCAL_EXPLORE" || routePlan?.mode === "LOCAL_EXPLORE_FAST") {
+      return true;
+    }
     if (TARGET_PLAN_MODES.has(routePlan?.mode)) return false;
     const hasCandidates = (routePlan?.candidateGreens ?? []).length > 0;
     const hasCarried = this.beliefs.carriedParcels.size > 0;
@@ -668,6 +842,158 @@ export class AgentLoop {
     return { routePlan, executablePlan };
   }
 
+  tryImmediateNearbyPickup(plannerState = null) {
+    const config = this.config.planner;
+    if (config.enableImmediateNearbyPickup === false || !this.beliefs.me) return null;
+    if (!this.hasNearbyVisiblePackageCheap()) return null;
+
+    const startedAt = Date.now();
+    const state = plannerState ?? buildPlannerState(this.beliefs, this.config);
+    const profile = buildMapProfile(state);
+    const currentPosition = copyPosition(state.me.position);
+    const maxDistance = Number(config.nearbyPickupMaxDistance ?? 3);
+    const maxCandidates = Math.max(1, Math.round(Number(config.nearbyPickupMaxCandidates ?? 8)));
+    const minConfidence = Number(config.minParcelConfidence ?? 0.3);
+    const normalMinValue = Number(config.nearbyPickupMinEstimatedValue ?? 1);
+    const deliveryPreemptMinValue = Number(config.opportunisticMinValue ?? 5);
+    const deliveryPreemptMaxExtra = Number(config.opportunisticMaxExtraCost ?? 3);
+    const carrying = (state.carriedPackages ?? []).length > 0;
+    const deliveryOnly = this.currentRoutePlan?.mode === "DELIVERY_ONLY";
+    let best = null;
+
+    const candidates = (state.greens ?? [])
+      .filter((green) => {
+        if (!green.package || green.package.carriedBy) return false;
+        const confidence = Number(green.package.confidence ?? 0);
+        const lastSeenTime = Number(green.package.lastSeenTime ?? -Infinity);
+        const visible = confidence >= 1 || lastSeenTime >= Number(state.time ?? 0);
+        if (!visible || confidence < minConfidence) return false;
+        return Number(green.package.reward ?? green.package.value ?? 0) > 0;
+      })
+      .sort((a, b) => manhattan(currentPosition, a.position) - manhattan(currentPosition, b.position))
+      .slice(0, maxCandidates);
+
+    for (const green of candidates) {
+      if (manhattan(currentPosition, green.position) > maxDistance) continue;
+      const edgeToGreen = shortestGridPath(state, currentPosition, green.position, profile);
+      if (!Number.isFinite(edgeToGreen.cost) || edgeToGreen.cost > maxDistance) continue;
+
+      let bestRed = null;
+      let bestRedEdge = null;
+      let bestRedDistance = state.reds?.length > 0 ? Infinity : 0;
+      for (const red of state.reds ?? []) {
+        const redEdge = shortestGridPath(state, green.position, red.position, profile);
+        if (Number.isFinite(redEdge.cost) && redEdge.cost < bestRedDistance) {
+          bestRedDistance = redEdge.cost;
+          bestRed = red;
+          bestRedEdge = redEdge;
+        }
+      }
+      if (!Number.isFinite(bestRedDistance)) continue;
+
+      const reward = Number(green.package.reward ?? green.package.value ?? config.meanPackageValue ?? 0);
+      const decayRate = Number(green.package.decayRate ?? config.decayRate ?? 0);
+      const enemyPenalty = this.enemyRacePenalty(green.position, edgeToGreen.cost, config);
+      if (!Number.isFinite(enemyPenalty)) continue;
+      const estimatedDeliveredValue = reward - decayRate * (edgeToGreen.cost + bestRedDistance) - enemyPenalty;
+      const priority = estimatedDeliveredValue / (1 + edgeToGreen.cost + bestRedDistance);
+      const requiredValue = deliveryOnly && carrying ? deliveryPreemptMinValue : normalMinValue;
+      if (estimatedDeliveredValue < requiredValue) continue;
+      if (deliveryOnly && carrying && edgeToGreen.cost > deliveryPreemptMaxExtra) continue;
+
+      const score = priority + estimatedDeliveredValue;
+      if (!best || score > best.score || (Math.abs(score - best.score) <= 1e-9 && edgeToGreen.cost < best.edge.cost)) {
+        best = { green, edge: edgeToGreen, red: bestRed, redEdge: bestRedEdge, reward, estimatedDeliveredValue, priority, score };
+      }
+    }
+
+    if (!best) {
+      this.lastImmediatePickupMs = Date.now() - startedAt;
+      return null;
+    }
+
+    const targetId = best.green.id;
+    const startPoint = { id: "START", type: "start", position: currentPosition };
+    const greenPoint = {
+      id: targetId,
+      type: "green",
+      position: copyPosition(best.green.position),
+      package: best.green.package
+    };
+    const allowImmediateDeliveryContinuation = Number(config.maxPickupsBeforeDelivery ?? 1) > 0;
+    const hasRedContinuation =
+      allowImmediateDeliveryContinuation && best.red && best.redEdge && Number.isFinite(best.redEdge.cost);
+    const redId = hasRedContinuation ? best.red.id : null;
+    const sequence = hasRedContinuation ? ["START", targetId, redId] : ["START", targetId];
+    const path = hasRedContinuation
+      ? [...best.edge.path, ...best.redEdge.path.slice(1)].map(copyPosition)
+      : best.edge.path.map(copyPosition);
+    const redPoint = hasRedContinuation
+      ? { id: redId, type: "red", position: copyPosition(best.red.position) }
+      : null;
+    const entries = new Map([
+      [
+        `START->${targetId}`,
+        {
+          fromId: "START",
+          toId: targetId,
+          cost: best.edge.cost,
+          path: best.edge.path
+        }
+      ]
+    ]);
+    if (hasRedContinuation) {
+      entries.set(`${targetId}->${redId}`, {
+        fromId: targetId,
+        toId: redId,
+        cost: best.redEdge.cost,
+        path: best.redEdge.path
+      });
+    }
+    const points = hasRedContinuation ? [startPoint, greenPoint, redPoint] : [startPoint, greenPoint];
+    const pointsById = new Map(points.map((point) => [point.id, point]));
+    const routePlan = {
+      mode: hasRedContinuation ? "PICKUP_DELIVERY" : "PICKUP_ONLY",
+      sequence,
+      path,
+      value: best.estimatedDeliveredValue,
+      profile,
+      config: { ...state.params, ...config },
+      candidateGreens: [greenPoint],
+      scoutTarget: null,
+      oracle: {
+        entries,
+        points,
+        pointsById,
+        profile
+      },
+      state,
+      generatedAtTime: this.beliefs.time,
+      fallbackStage: "immediate_nearby_pickup",
+      nearbyPickup: {
+        parcelId: best.green.package.id,
+        reward: best.reward,
+        pickupDistance: best.edge.cost,
+        estimatedDeliveredValue: best.estimatedDeliveredValue,
+        priority: best.priority
+      }
+    };
+    const executablePlan = routePathIsExecutable(routePlan) ? buildExecutablePlan(routePlan) : [];
+    this.lastImmediatePickupMs = Date.now() - startedAt;
+    if (executablePlan.length === 0) return null;
+
+    this.logger.info("immediate nearby pickup chosen", routePlan.nearbyPickup);
+    this.telemetry.record("immediate_nearby_pickup", {
+      mode: routePlan.mode,
+      target: best.green.position,
+      actionCount: executablePlan.length,
+      immediatePickupMs: this.lastImmediatePickupMs,
+      ...routePlan.nearbyPickup
+    });
+
+    return { routePlan, executablePlan };
+  }
+
   mustReplan(events = []) {
     const decide = (should, cause) => {
       this.lastReplanCause = cause;
@@ -676,11 +1002,12 @@ export class AgentLoop {
 
     if (!this.currentRoutePlan || !this.currentExecutablePlan) return decide(true, "missing_plan");
 
+    if (this.replanThrottleActive(events)) return decide(false, "replan_throttled");
+
     if (this.actionIndex >= this.currentExecutablePlan.length) {
       if (isStartOnlyPlan(this.currentRoutePlan, this.currentExecutablePlan)) {
         if (hasEvent(events, HARD_REPLAN_EVENTS)) return decide(true, "hard_event");
-        if (hasEvent(events, PACKAGE_REPLAN_EVENTS)) return decide(true, "new_package");
-        if (hasVisibleParcelEvent(events)) return decide(true, "parcel_visible");
+        if (this.hasRelevantPackageEvent(events)) return decide(true, hasVisibleParcelEvent(events) ? "parcel_visible" : "new_package");
         if (events.some((event) => IDLE_REPLAN_EVENTS.has(eventType(event)))) return decide(true, "missing_plan");
         const periodicIdle = Number(
           this.currentRoutePlan.config?.periodicReplanTicks ?? this.config.planner.periodicReplanTicks
@@ -698,15 +1025,14 @@ export class AgentLoop {
     if (SCOUT_PLAN_MODES.has(this.currentRoutePlan?.mode)) {
       if (!routePathIsExecutable(this.currentRoutePlan)) return decide(true, "scout_path_not_executable");
       if (hasEvent(events, HARD_REPLAN_EVENTS)) return decide(true, "hard_event");
-      if (hasEvent(events, PACKAGE_REPLAN_EVENTS)) return decide(true, "new_package");
-      if (hasVisibleParcelEvent(events)) return decide(true, "parcel_visible");
+      if (this.hasRelevantPackageEvent(events)) return decide(true, hasVisibleParcelEvent(events) ? "parcel_visible" : "new_package");
       if (hasAgentSensing && this.enemyRelevantToCurrentPlan()) return decide(true, "enemy_relevant");
       return decide(false, "scout_commitment_keep_plan");
     }
 
     if (hasAgentSensing && this.enemyRelevantToCurrentPlan()) return decide(true, "enemy_relevant");
     if (hasEvent(events, HARD_REPLAN_EVENTS)) return decide(true, "hard_event");
-    if (hasEvent(events, PACKAGE_REPLAN_EVENTS)) return decide(true, "new_package");
+    if (this.hasRelevantPackageEvent(events)) return decide(true, hasVisibleParcelEvent(events) ? "parcel_visible" : "new_package");
 
     const periodic = Number(this.currentRoutePlan.config?.periodicReplanTicks ?? this.config.planner.periodicReplanTicks);
     if (periodic > 0 && this.beliefs.time - this.lastPlanTime >= periodic) return decide(true, "periodic");
@@ -717,8 +1043,13 @@ export class AgentLoop {
   makePlan(events = []) {
     const planningStartedAt = Date.now();
     const plannerStateStartedAt = Date.now();
-    const plannerState = buildPlannerState(this.beliefs, this.config);
+    const rawPlannerState = buildPlannerState(this.beliefs, this.config);
     const plannerStateFinishedAt = Date.now();
+    const immediatePickupStartedAt = Date.now();
+    const immediatePickup = this.tryImmediateNearbyPickup(rawPlannerState);
+    const immediatePickupFinishedAt = Date.now();
+    const immediatePickupMs = immediatePickupFinishedAt - immediatePickupStartedAt;
+    const plannerState = immediatePickup ? rawPlannerState : this.boundPlannerStateForFastMode(rawPlannerState);
     const plannerSummary = {
       width: plannerState.width,
       height: plannerState.height,
@@ -731,10 +1062,12 @@ export class AgentLoop {
       me: this.beliefs.me
     };
     const replanStartedAt = Date.now();
-    let routePlan = replan(plannerState);
+    let routePlan = immediatePickup?.routePlan ?? replan(plannerState);
+    if (immediatePickup) this.lastReplanCause = "immediate_nearby_pickup";
     let replanFinishedAt = Date.now();
-    let replanMs = replanFinishedAt - replanStartedAt;
+    let replanMs = immediatePickup ? 0 : replanFinishedAt - replanStartedAt;
     if (
+      !immediatePickup &&
       this.config.planner.fastCloudMode &&
       routePlan?.fallbackStage !== "hard_budget_fallback" &&
       replanMs > Number(this.config.planner.hardPlanningBudgetMs ?? 60)
@@ -747,7 +1080,7 @@ export class AgentLoop {
       replanMs += replanFinishedAt - fallbackStartedAt;
     }
     const executableStartedAt = Date.now();
-    let executablePlan = routePathIsExecutable(routePlan) ? buildExecutablePlan(routePlan) : [];
+    let executablePlan = immediatePickup?.executablePlan ?? (routePathIsExecutable(routePlan) ? buildExecutablePlan(routePlan) : []);
     const executableFinishedAt = Date.now();
     const buildPlannerStateMs = plannerStateFinishedAt - plannerStateStartedAt;
     const buildExecutablePlanMs = executableFinishedAt - executableStartedAt;
@@ -797,6 +1130,7 @@ export class AgentLoop {
     this.currentExecutablePlan = executablePlan;
     this.actionIndex = 0;
     this.lastPlanTime = this.beliefs.time;
+    this.lastReplanWallClockMs = Date.now();
     if (executablePlan.length > 0) this.invalidNonIdleZeroActionCount = 0;
     this.beliefs.clearDirty();
     if (SCOUT_PLAN_MODES.has(routePlan.mode) && routePlan.scoutTarget?.id) {
@@ -822,6 +1156,7 @@ export class AgentLoop {
       eventsSeen,
       replanCause,
       buildPlannerStateMs,
+      immediatePickupMs,
       replanMs,
       buildExecutablePlanMs,
       totalPlanningMs,
@@ -831,6 +1166,7 @@ export class AgentLoop {
       sequenceTruncated: sequenceSummary.truncated,
       value: routePlan.value,
       actions: executablePlan.length,
+      nearbyPickupChosen: Boolean(immediatePickup),
       candidates,
       invalidPlanDetected: Boolean(routePlan.invalidPlanDetected),
       fallbackStage: routePlan.fallbackStage ?? "full_plan",
@@ -865,6 +1201,7 @@ export class AgentLoop {
       greensWithPackage: plannerSummary.greensWithPackage,
       carriedCount: this.beliefs.carriedParcels.size,
       buildPlannerStateMs,
+      immediatePickupMs,
       replanMs,
       buildExecutablePlanMs,
       totalPlanningMs,
@@ -884,6 +1221,7 @@ export class AgentLoop {
       oraclePathfindingCalls: routePlan.oracle?.stats?.pathfindingCalls ?? 0,
       oracleSingleSourceBfsRuns: routePlan.oracle?.stats?.singleSourceBfsRuns ?? 0,
       actionCount: executablePlan.length,
+      nearbyPickupChosen: Boolean(immediatePickup),
       eventsSeen,
       replanCause,
       reason: replanCause
@@ -892,6 +1230,7 @@ export class AgentLoop {
     if (elapsed > Number(this.config.planner.planningBudgetMs ?? this.config.planner.maxPlanningTimeMs ?? 30)) {
       this.logger.warn("planning_exceeded_budget", {
         buildPlannerStateMs,
+        immediatePickupMs,
         replanMs,
         buildExecutablePlanMs,
         totalPlanningMs: elapsed,
@@ -901,6 +1240,7 @@ export class AgentLoop {
     if (elapsed > Number(this.config.planner.hardPlanningBudgetMs ?? 100)) {
       this.logger.warn("hard_planning_budget_exceeded", {
         buildPlannerStateMs,
+        immediatePickupMs,
         replanMs,
         buildExecutablePlanMs,
         totalPlanningMs: elapsed,
@@ -928,10 +1268,26 @@ export class AgentLoop {
       } else {
         this.beliefs.advanceTime();
       }
-      const events = this.beliefs.consumeEvents();
+      const rawEvents = this.beliefs.consumeEvents();
+      this.queueEvents(rawEvents);
       if (!this.beliefs.ready) return;
+      const forceEventBatch =
+        !this.currentRoutePlan ||
+        this.hasPendingHardEvent() ||
+        this.hasNearbyVisiblePackageCheap();
+      const events = this.flushPendingEvents({ force: forceEventBatch });
 
-      if (this.mustReplan(events)) {
+      const immediatePickup = this.tryImmediateNearbyPickup();
+      if (immediatePickup) {
+        this.currentRoutePlan = immediatePickup.routePlan;
+        this.currentExecutablePlan = immediatePickup.executablePlan;
+        this.actionIndex = 0;
+        this.lastPlanTime = this.beliefs.time;
+        this.lastReplanWallClockMs = Date.now();
+        this.lastReplanCause = "immediate_nearby_pickup";
+      }
+
+      if (!immediatePickup && this.mustReplan(events)) {
         this.makePlan(events);
       }
 

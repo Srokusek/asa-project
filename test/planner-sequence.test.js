@@ -1672,10 +1672,27 @@ test("hard budget uses fallbackFastPlan in fast cloud mode", () => {
     );
 
     assert.equal(plan.fallbackStage, "hard_budget_fallback");
-    assert.ok(["PICKUP_ONLY", "LOCAL_EXPLORE", "IDLE"].includes(plan.mode));
+    assert.ok(["PICKUP_ONLY", "LOCAL_EXPLORE_FAST", "LOCAL_EXPLORE", "IDLE"].includes(plan.mode));
   } finally {
     Date.now = originalNow;
   }
+});
+
+test("fast cloud mode keeps large-map planning under a small wall-clock budget", () => {
+  const state = denseGreenState({
+    params: {
+      fastCloudMode: true,
+      sensingRange: 1,
+      hardPlanningBudgetMs: 60,
+      planningBudgetMs: 25
+    }
+  });
+  const started = performance.now();
+  const plan = replan(state);
+  const elapsed = performance.now() - started;
+
+  assert.ok(elapsed < 100, `expected fast cloud planning under 100ms, got ${elapsed}`);
+  assert.notEqual(plan.mode, "SCOUT");
 });
 
 test("fallbackFastPlan delivers carried packages with a directed red path", () => {
@@ -1730,7 +1747,7 @@ test("fallbackFastPlan scout is short and respects arrow constraints", () => {
   const plan = fallbackFastPlan(state, { fastCloudMode: true, sensingRange: 1, decayRate: 0 });
   const actions = buildExecutablePlan(plan);
 
-  assert.equal(plan.mode, "LOCAL_EXPLORE");
+  assert.equal(plan.mode, "LOCAL_EXPLORE_FAST");
   assert.ok(actions.length >= 2);
   assert.ok(actions.length <= 3);
   for (const action of actions) {

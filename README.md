@@ -28,6 +28,8 @@ For cloud diagnostics and lighter planning:
 FAST_CLOUD_MODE=true
 LOG_LEVEL=warn
 ACTION_DELAY_MS=30
+EVENT_COALESCE_MS=50
+MIN_REPLAN_INTERVAL_MS=80
 ```
 
 When `FAST_CLOUD_MODE=true`, the planner uses smaller candidate/beam/scout budgets, compact logging, and a hard planning fallback. Timing logs split local planning from SDK/server latency: `buildPlannerStateMs`, `replanMs`, `buildExecutablePlanMs`, `totalPlanningMs`, `emitMoveMs`, `emitPickupMs`, and `emitPutdownMs`.
