@@ -31,12 +31,23 @@ export class Executor {
       actionOrDirection && typeof actionOrDirection === "object"
         ? actionOrDirection.to
         : null;
+    const fromCell =
+      actionOrDirection && typeof actionOrDirection === "object"
+        ? actionOrDirection.from
+        : this.beliefs.me
+          ? { x: this.beliefs.me.x, y: this.beliefs.me.y }
+          : null;
+    const edgeBlocksEnabled = this.config.planner.enableEdgeTemporaryBlocks !== false;
+    const edgeTtl = Number(this.config.planner.temporaryEdgeBlockTtlTicks ?? 2);
 
     try {
       const result = await this.socket.emitMove(direction);
       if (result === false) {
         this.beliefs.pushEvent("MOVE_FAILED", { direction, blockedCell });
         this.beliefs.pushEvent("PATH_BLOCKED", { direction, blockedCell });
+        if (edgeBlocksEnabled && fromCell && blockedCell) {
+          this.beliefs.markTemporaryBlockedEdge(fromCell, blockedCell, edgeTtl, "move_failed");
+        }
         if (blockedCell) {
           this.beliefs.markTemporaryBlocked(blockedCell, 3, "move_failed");
         }
@@ -61,6 +72,9 @@ export class Executor {
     } catch (error) {
       this.beliefs.pushEvent("MOVE_FAILED", { direction, blockedCell, error: error.message });
       this.beliefs.pushEvent("PATH_BLOCKED", { direction, blockedCell, error: error.message });
+      if (edgeBlocksEnabled && fromCell && blockedCell) {
+        this.beliefs.markTemporaryBlockedEdge(fromCell, blockedCell, edgeTtl, "move_failed_error");
+      }
       if (blockedCell) {
         this.beliefs.markTemporaryBlocked(blockedCell, 3, "move_failed_error");
       }
@@ -139,6 +153,9 @@ export class Executor {
         for (const delivered of result) {
           this.beliefs.parcels.delete(delivered.id);
           this.beliefs.carriedParcels.delete(delivered.id);
+        }
+        if (this.beliefs.me) {
+          this.beliefs.lastDeliveryPosition = { x: this.beliefs.me.x, y: this.beliefs.me.y };
         }
         this.beliefs.pushEvent("DELIVER_PACKAGES", { parcels: result });
         this.telemetry?.record("put_down", {

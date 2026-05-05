@@ -2,7 +2,12 @@ import { positionKey, roundTilePosition } from "../utils/geometry.js";
 import { parseMap } from "../planner/route-planner.js";
 
 function tileAt(beliefs, x, y) {
-  return beliefs.tiles.get(`${x},${y}`)?.type ?? "0";
+  const tile = beliefs.tiles.get(`${x},${y}`);
+  return tile ? { ...tile } : "0";
+}
+
+function tileType(tile) {
+  return String(tile && typeof tile === "object" ? tile.type ?? "0" : tile ?? "0");
 }
 
 function parcelAvailableForPlanning(beliefs, parcel, config) {
@@ -61,8 +66,9 @@ export function buildPlannerState(beliefs, config) {
   for (let y = 0; y < height; y += 1) {
     const row = [];
     for (let x = 0; x < width; x += 1) {
-      const type = beliefs.isTemporarilyBlocked?.({ x, y }) ? "0" : tileAt(beliefs, x, y);
-      row.push(type);
+      const tile = beliefs.isTemporarilyBlocked?.({ x, y }) ? "0" : tileAt(beliefs, x, y);
+      const type = tileType(tile);
+      row.push(tile);
 
       if (type === "1") {
         const position = { x, y };
@@ -99,7 +105,7 @@ export function buildPlannerState(beliefs, config) {
     const key = positionKey(position);
     if (greenPositions.has(key)) continue;
     if (beliefs.isTemporarilyBlocked?.(position)) continue;
-    if (tileAt(beliefs, position.x, position.y) === "0") continue;
+    if (tileType(tileAt(beliefs, position.x, position.y)) === "0") continue;
 
     const reward = beliefs.estimateParcelReward(parcel);
     greens.push({
@@ -161,6 +167,15 @@ export function buildPlannerState(beliefs, config) {
     reds,
     visitedGreenAt: Object.fromEntries(beliefs.visitedGreenAt ?? []),
     lastScoutTargetId: beliefs.lastScoutTargetId,
+    lastPosition: beliefs.lastPosition,
+    recentPositions: beliefs.recentPositions,
+    temporaryBlockedCells: Object.fromEntries(beliefs.temporaryBlockedCells ?? []),
+    temporaryBlockedEdges: Object.fromEntries(beliefs.temporaryBlockedEdges ?? []),
+    visitedPositions: Object.fromEntries(beliefs.visitedPositions ?? []),
+    visitedEdges: Object.fromEntries(beliefs.visitedEdges ?? []),
+    scoutTargetAttempts: Object.fromEntries(beliefs.scoutTargetAttempts ?? []),
+    recentScoutTargets: beliefs.recentScoutTargets,
+    lastDeliveryPosition: beliefs.lastDeliveryPosition,
     lastObservedAtByTile: Object.fromEntries(beliefs.lastObservedAtByTile ?? []),
     lastObservedAtByGreen: Object.fromEntries(beliefs.lastObservedAtByGreen ?? []),
     sensingRange: config.planner.sensingRange,

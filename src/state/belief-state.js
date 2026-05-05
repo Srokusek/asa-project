@@ -19,6 +19,19 @@ function normalizeTileType(type) {
   return raw;
 }
 
+function normalizeTileRecord(tileOrType, fallbackType = undefined) {
+  const rawTile = tileOrType && typeof tileOrType === "object" ? tileOrType : { type: tileOrType ?? fallbackType };
+  const normalized = {
+    type: normalizeTileType(rawTile.type ?? rawTile.kind ?? rawTile.tile ?? fallbackType)
+  };
+
+  for (const key of ["directionConstraint", "entryConstraint", "blocked", "walkable", "cost", "moveCost"]) {
+    if (rawTile[key] !== undefined) normalized[key] = rawTile[key];
+  }
+
+  return normalized;
+}
+
 function inferDimensions(width, height, tiles) {
   let maxX = -1;
   let maxY = -1;
@@ -51,9 +64,17 @@ export class BeliefState {
     this.carriedParcels = new Map();
     this.agents = new Map();
     this.temporaryBlockedCells = new Map();
+    this.temporaryBlockedEdges = new Map();
+    this.visitedPositions = new Map();
+    this.visitedEdges = new Map();
+    this.scoutTargetAttempts = new Map();
+    this.recentScoutTargets = [];
     this.temporaryBlockVersion = 0;
     this.visitedGreenAt = new Map();
     this.lastScoutTargetId = null;
+    this.lastDeliveryPosition = null;
+    this.lastPosition = null;
+    this.recentPositions = [];
     this.lastObservedAtByTile = new Map();
     this.lastObservedAtByGreen = new Map();
     this.events = [];
@@ -87,6 +108,7 @@ export class BeliefState {
     this.time = serverTime;
     this.decayUnseenAgents();
     this.clearExpiredTemporaryBlocks();
+    this.clearExpiredTemporaryBlockedEdges();
     return this.time;
   }
 
@@ -95,6 +117,7 @@ export class BeliefState {
     this.time += step;
     this.decayUnseenAgents();
     this.clearExpiredTemporaryBlocks();
+    this.clearExpiredTemporaryBlockedEdges();
     return this.time;
   }
 
@@ -115,6 +138,7 @@ export class BeliefState {
       this.lastWallClock += ticks * Math.max(1, tickMs);
       this.decayUnseenAgents();
       this.clearExpiredTemporaryBlocks();
+      this.clearExpiredTemporaryBlockedEdges();
     }
 
     return this.time;
@@ -136,6 +160,29 @@ export class BeliefState {
     this.markDirty();
   }
 
+  edgeKey(from, to) {
+    return `${positionKey(from)}->${positionKey(to)}`;
+  }
+
+  markTemporaryBlockedEdge(from, to, ttlTicks = 2, reason = "move_failed") {
+    if (!from || !to) return;
+    const fromCell = roundTilePosition(from);
+    const toCell = roundTilePosition(to);
+    const key = this.edgeKey(fromCell, toCell);
+    const current = this.temporaryBlockedEdges.get(key);
+    this.temporaryBlockedEdges.set(key, {
+      key,
+      from: fromCell,
+      to: toCell,
+      expiresAt: this.time + Math.max(1, Number(ttlTicks) || 1),
+      reason,
+      count: (current?.count ?? 0) + 1
+    });
+    this.temporaryBlockVersion += 1;
+    this.pushEvent("TEMPORARY_BLOCKED_EDGE", { from: fromCell, to: toCell, reason });
+    this.markDirty();
+  }
+
   clearExpiredTemporaryBlocks() {
     let removed = false;
     for (const [key, block] of this.temporaryBlockedCells) {
@@ -150,10 +197,52 @@ export class BeliefState {
     }
   }
 
+  clearExpiredTemporaryBlockedEdges() {
+    let removed = false;
+    for (const [key, block] of this.temporaryBlockedEdges) {
+      if (block.expiresAt <= this.time) {
+        this.temporaryBlockedEdges.delete(key);
+        removed = true;
+      }
+    }
+    if (removed) {
+      this.temporaryBlockVersion += 1;
+      this.markDirty();
+    }
+  }
+
   isTemporarilyBlocked(position) {
     const key = positionKey(position);
     const block = this.temporaryBlockedCells.get(key);
     return !!block && block.expiresAt > this.time;
+  }
+
+  isTemporarilyBlockedEdge(from, to) {
+    const block = this.temporaryBlockedEdges.get(this.edgeKey(from, to));
+    return !!block && block.expiresAt > this.time;
+  }
+
+  markVisitedPosition(position, tick = this.time) {
+    if (!position) return;
+    this.visitedPositions.set(positionKey(roundTilePosition(position)), tick);
+  }
+
+  markVisitedEdge(from, to, tick = this.time) {
+    if (!from || !to) return;
+    this.visitedEdges.set(this.edgeKey(roundTilePosition(from), roundTilePosition(to)), tick);
+  }
+
+  markScoutTargetAttempt(targetId, tick = this.time) {
+    if (!targetId) return;
+    const id = String(targetId);
+    const current = this.scoutTargetAttempts.get(id);
+    this.scoutTargetAttempts.set(id, {
+      count: (current?.count ?? 0) + 1,
+      lastAttemptTick: tick
+    });
+    this.recentScoutTargets.push(id);
+    this.recentScoutTargets = this.recentScoutTargets.slice(-8);
+    this.markDirty();
   }
 
   markScoutVisited(targetId, position = null) {
@@ -175,6 +264,14 @@ export class BeliefState {
 
   updateSelf(payload = {}) {
     const position = roundTilePosition(payload.position ?? payload);
+    const previousPosition = this.me ? { x: this.me.x, y: this.me.y } : null;
+    if (previousPosition && positionKey(previousPosition) !== positionKey(position)) {
+      this.lastPosition = previousPosition;
+      this.recentPositions.push(previousPosition);
+      this.recentPositions = this.recentPositions.slice(-6);
+      this.markVisitedEdge(previousPosition, position);
+    }
+    this.markVisitedPosition(position);
     this.me = {
       id: String(payload.id ?? this.me?.id ?? ""),
       name: String(payload.name ?? this.me?.name ?? ""),
@@ -196,10 +293,11 @@ export class BeliefState {
 
     for (const tile of tiles) {
       const position = roundTilePosition(tile);
+      const normalizedTile = normalizeTileRecord(tile);
       this.tiles.set(positionKey(position), {
         x: position.x,
         y: position.y,
-        type: normalizeTileType(tile.type ?? tile)
+        ...normalizedTile
       });
     }
 
@@ -218,10 +316,11 @@ export class BeliefState {
             type: typeOrDelivery
           };
     const position = roundTilePosition(tile);
+    const normalizedTile = normalizeTileRecord(tile, typeOrDelivery);
     const normalized = {
       x: position.x,
       y: position.y,
-      type: normalizeTileType(tile.type ?? typeOrDelivery)
+      ...normalizedTile
     };
     this.width = Math.max(this.width, normalized.x + 1);
     this.height = Math.max(this.height, normalized.y + 1);

@@ -1,38 +1,70 @@
 import { Executor } from "../executor/executor.js";
 import { buildExecutablePlan } from "../planner/executable-plan.js";
-import { buildMapProfile, isWalkable, replan, shortestGridPath } from "../planner/route-planner.js";
+import {
+  buildMapProfile,
+  directionFromPositions,
+  getDirectedNeighbors,
+  isMoveAllowed,
+  isWalkable,
+  replan,
+  shortestGridPath
+} from "../planner/route-planner.js";
 import { buildPlannerState } from "../state/planner-state.js";
 import { createTelemetry } from "../telemetry/telemetry.js";
 import { createLogger } from "../utils/logger.js";
 
-const REPLAN_EVENTS = new Set([
-  "MAP_READY",
-  "TILE_UPDATED",
-  "NEW_PACKAGE_SPAWN",
+const HARD_REPLAN_EVENTS = new Set([
   "MOVE_FAILED",
   "PATH_BLOCKED",
   "PACKAGE_STOLEN",
   "TARGET_NOT_FOUND",
   "BELIEF_INVALIDATED",
   "PICKUP_FAILED",
-  "PUTDOWN_FAILED"
+  "PUTDOWN_FAILED",
+  "TEMPORARY_BLOCKED_CELL"
+]);
+
+const PACKAGE_REPLAN_EVENTS = new Set([
+  "NEW_PACKAGE_SPAWN"
 ]);
 
 const IDLE_REPLAN_EVENTS = new Set([
-  "PARCELS_SENSING",
-  "NEW_PACKAGE_SPAWN",
-  "MAP_READY",
-  "BELIEF_INVALIDATED",
-  "TILE_UPDATED"
+  "MAP_READY"
+]);
+
+const TARGET_PLAN_MODES = new Set(["PICKUP_DELIVERY", "DELIVERY_ONLY", "PICKUP_ONLY", "OPPORTUNISTIC_PICKUP"]);
+const INVALID_TARGET_PLAN_LIMIT = 3;
+const SCOUT_PLAN_MODES = new Set([
+  "SCOUT",
+  "DENSE_SCOUT",
+  "GREEN_EXPOSURE_SCOUT",
+  "LOW_VISIBILITY_COVERAGE_SCOUT",
+  "LOCAL_EXPLORE"
 ]);
 
 function eventType(event) {
   return typeof event === "string" ? event : event?.type;
 }
 
-function routePathIsWalkable(routePlan) {
+function eventPayloadCount(event) {
+  return Number(typeof event === "object" ? event.payload?.count ?? 0 : 0);
+}
+
+function hasEvent(events, eventSet) {
+  return events.some((event) => eventSet.has(eventType(event)));
+}
+
+function hasVisibleParcelEvent(events) {
+  return events.some((event) => eventType(event) === "PARCELS_SENSING" && eventPayloadCount(event) > 0);
+}
+
+export function routePathIsExecutable(routePlan) {
   if (!routePlan?.state || !Array.isArray(routePlan.path)) return true;
-  return routePlan.path.every((position) => isWalkable(routePlan.state, position));
+  if (!routePlan.path.every((position) => isWalkable(routePlan.state, position))) return false;
+  for (let i = 0; i < routePlan.path.length - 1; i += 1) {
+    if (!isMoveAllowed(routePlan.state, routePlan.path[i], routePlan.path[i + 1])) return false;
+  }
+  return true;
 }
 
 function isStartOnlyPlan(routePlan, executablePlan) {
@@ -60,6 +92,62 @@ function summarizeEvents(events = []) {
     .sort((a, b) => a[0].localeCompare(b[0]))
     .map(([type, count]) => `${type}x${count}`)
     .join(",");
+}
+
+function summarizeScoutTarget(target) {
+  if (!target) return null;
+  const rawId = String(target.id ?? "");
+  const compactId =
+    rawId.length > 80 && target.size
+      ? `CLUSTER_size_${target.size}_centroid_${target.centroid?.x ?? "?"}_${target.centroid?.y ?? "?"}`
+      : rawId.length > 80
+        ? `${rawId.slice(0, 60)}...`
+        : rawId;
+  return {
+    id: compactId,
+    size: target.size,
+    centroid: target.centroid,
+    staleness: target.staleness,
+    infoValue: target.infoValue,
+    scoutScore: target.scoutScore ?? target.score,
+    score: target.score,
+    position: target.position,
+    distanceFromMe: target.distanceFromMe,
+    distanceToNearestRed: target.distanceToNearestRed ?? target.redDistance,
+    trapPenaltyApplied: target.trapPenaltyApplied,
+    sampleGreenIds: Array.isArray(target.greenIds) ? target.greenIds.slice(0, 5) : undefined,
+    clusterBonus: target.clusterBonus,
+    debtBonus: target.debtBonus,
+    redPenalty: target.redPenalty,
+    congestionPenalty: target.congestionPenalty,
+    recentlyVisitedPenalty: target.recentlyVisitedPenalty,
+    sameTargetPenalty: target.sameTargetPenalty
+  };
+}
+
+export function compactSequence(sequence = []) {
+  if (!Array.isArray(sequence)) return { text: "", sequenceLength: 0, truncated: false };
+  if (sequence.length <= 8) {
+    return { text: sequence.join(" -> "), sequenceLength: sequence.length, truncated: false };
+  }
+  return {
+    text: `${sequence[0]} -> ${sequence[1]} -> ${sequence[2]} -> ... -> ${sequence.at(-1)}`,
+    sequenceLength: sequence.length,
+    truncated: true
+  };
+}
+
+function compactCandidateDiagnostics(diagnostics = []) {
+  if (!Array.isArray(diagnostics)) return [];
+  const compact = diagnostics.slice(0, 10);
+  if (diagnostics.length <= 10) return compact;
+  return [...compact, { truncated: true, total: diagnostics.length }];
+}
+
+function compactScoutTargetId(id) {
+  const rawId = String(id ?? "");
+  if (rawId.length <= 80) return rawId;
+  return `${rawId.slice(0, 60)}...`;
 }
 
 function copyPosition(position) {
@@ -92,13 +180,18 @@ export class AgentLoop {
     this.started = false;
     this.lastFailedMoveKey = null;
     this.consecutiveMoveFailures = 0;
+    this.lastBlockedMoveKey = null;
+    this.sameBlockedMoveCount = 0;
+    this.lastOpportunisticCheckTick = -Infinity;
+    this.lastReplanCause = "missing_plan";
+    this.invalidNonIdleZeroActionCount = 0;
   }
 
   start() {
     if (this.started) return;
     this.started = true;
     this.logger.info("agent loop started");
-    const interval = Math.max(50, Number(this.config.actionDelayMs ?? 100));
+    const interval = Math.max(20, Number(this.config.actionDelayMs ?? 30));
     this.timer = setInterval(() => {
       void this.tick();
     }, interval);
@@ -136,29 +229,34 @@ export class AgentLoop {
 
     const x = Math.round(Number(this.beliefs.me.x));
     const y = Math.round(Number(this.beliefs.me.y));
-    const candidates = [
-      { direction: "right", to: { x: x + 1, y } },
-      { direction: "left", to: { x: x - 1, y } },
-      { direction: "up", to: { x, y: y + 1 } },
-      { direction: "down", to: { x, y: y - 1 } }
-    ];
+    const previousPosition = this.beliefs.lastPosition ?? this.beliefs.recentPositions?.at?.(-1) ?? null;
+    const previousKey = previousPosition ? positionKey(previousPosition) : null;
+    const plannerState = buildPlannerState(this.beliefs, this.config);
+    const candidates = getDirectedNeighbors(plannerState, { x, y }).map((to) => ({
+      direction: directionFromPositions({ x, y }, to),
+      to
+    }));
+    const available = [];
 
     for (const candidate of candidates) {
-      const tile = this.beliefs.tiles.get(`${candidate.to.x},${candidate.to.y}`);
-      if (!tile) continue;
-      if (String(tile.type) === "0") continue;
-      if (this.beliefs.isTemporarilyBlocked?.(candidate.to)) continue;
-
-      return {
+      const reversePenalty = previousKey && positionKey(candidate.to) === previousKey ? 20 : 0;
+      const rawStaleness = Number(this.beliefs.tileStaleness?.(candidate.to) ?? 0);
+      const staleness = Number.isFinite(rawStaleness) ? rawStaleness : 100;
+      available.push({
         type: "move",
         direction: candidate.direction,
         from: { x, y },
         to: candidate.to,
-        reason: "agent-loop-fallback-exploration"
-      };
+        reason: "agent-loop-fallback-exploration",
+        score: staleness - reversePenalty
+      });
     }
 
-    return null;
+    if (available.length === 0) return null;
+    available.sort((a, b) => b.score - a.score || a.direction.localeCompare(b.direction));
+    const chosen = available[0];
+    delete chosen.score;
+    return chosen;
   }
 
   enemyOccupies(position) {
@@ -169,6 +267,20 @@ export class AgentLoop {
       }
     }
     return false;
+  }
+
+  markScoutTargetVisitedIfInRange() {
+    if (this.currentRoutePlan?.mode !== "SCOUT") return;
+    const scoutTarget = this.currentRoutePlan.scoutTarget;
+    const target = scoutTarget?.position;
+    if (!target || !this.beliefs.me) return;
+
+    const sensingRange = Number(this.config.planner.sensingRange ?? 0);
+    const currentPosition = copyPosition(this.beliefs.me);
+    if (manhattan(currentPosition, target) > sensingRange) return;
+    if (this.beliefs.greenRecentlyVisited?.(scoutTarget.id, this.config.planner.scoutCooldownTicks ?? 8)) return;
+
+    this.beliefs.markScoutVisited(scoutTarget.id, target);
   }
 
   recordMoveFailure(action) {
@@ -185,18 +297,84 @@ export class AgentLoop {
       this.beliefs.markTemporaryBlocked(action.to, 4, "repeated_move_failed");
     }
 
+    this.recordBlockedMove(action, "move_failed");
+
     this.logger.warn("move failed", {
       blockedCell: action.to,
       consecutiveMoveFailures: this.consecutiveMoveFailures,
+      sameBlockedMoveCount: this.sameBlockedMoveCount,
       temporaryBlockedCells: this.beliefs.temporaryBlockedCells?.size ?? 0
     });
 
     return this.consecutiveMoveFailures;
   }
 
+  recordBlockedMove(action, reason) {
+    if (!action?.from || !action?.to) return 0;
+    const key = `${action.from.x},${action.from.y}->${action.to.x},${action.to.y}`;
+    if (key === this.lastBlockedMoveKey) {
+      this.sameBlockedMoveCount += 1;
+    } else {
+      this.lastBlockedMoveKey = key;
+      this.sameBlockedMoveCount = 1;
+    }
+
+    if (this.config.planner.enableEdgeTemporaryBlocks !== false) {
+      this.beliefs.markTemporaryBlockedEdge?.(
+        action.from,
+        action.to,
+        this.config.planner.temporaryEdgeBlockTtlTicks ?? 2,
+        reason
+      );
+    }
+
+    return this.sameBlockedMoveCount;
+  }
+
+  summarizeVisiblePackages(routePlan) {
+    const minConfidence = Number(this.config.planner.minParcelConfidence ?? 0.3);
+    const candidatePackageIds = new Set(
+      (routePlan?.candidateGreens ?? [])
+        .map((green) => green.package?.id)
+        .filter((id) => id !== undefined && id !== null)
+        .map(String)
+    );
+    const ignoredVisiblePackages = [];
+    let visiblePackagesCount = 0;
+
+    for (const parcel of this.beliefs.parcels.values()) {
+      if (parcel.carriedBy) continue;
+      const reward = this.beliefs.estimateParcelReward?.(parcel) ?? Number(parcel.reward ?? 0);
+      const confidence = Number(parcel.confidence ?? 0);
+      const lastSeenTime = Number(parcel.lastSeenTime ?? -Infinity);
+      const isVisible = confidence >= 1 || lastSeenTime >= Number(this.beliefs.time ?? 0);
+      if (!isVisible || reward <= 0 || confidence < minConfidence) continue;
+
+      visiblePackagesCount += 1;
+      if (candidatePackageIds.has(String(parcel.id))) continue;
+      if (ignoredVisiblePackages.length >= 10) continue;
+
+      ignoredVisiblePackages.push({
+        id: String(parcel.id),
+        reward,
+        confidence,
+        distance: this.beliefs.me ? manhattan(this.beliefs.me, parcel) : null,
+        reason: "not_candidate"
+      });
+    }
+
+    return {
+      visiblePackagesCount,
+      candidatePackagesCount: candidatePackageIds.size,
+      ignoredVisiblePackages
+    };
+  }
+
   resetMoveFailures() {
     this.lastFailedMoveKey = null;
     this.consecutiveMoveFailures = 0;
+    this.lastBlockedMoveKey = null;
+    this.sameBlockedMoveCount = 0;
   }
 
   carriedValueEstimate() {
@@ -223,6 +401,45 @@ export class AgentLoop {
     return (this.currentRoutePlan?.candidateGreens ?? []).some((green) => String(green.package?.id) === id);
   }
 
+  hasValidParcelInBelief() {
+    const minConfidence = Number(this.config.planner.minParcelConfidence ?? 0.3);
+    for (const parcel of this.beliefs.parcels.values()) {
+      if (parcel.carriedBy) continue;
+      if (Number(parcel.confidence ?? 0) < minConfidence) continue;
+      if (this.beliefs.estimateParcelReward(parcel) > 0) return true;
+    }
+    return false;
+  }
+
+  canUseFallbackExploration(routePlan = this.currentRoutePlan) {
+    if (routePlan?.mode === "IDLE" || routePlan?.mode === "LOCAL_EXPLORE") return true;
+    if (TARGET_PLAN_MODES.has(routePlan?.mode)) return false;
+    const hasCandidates = (routePlan?.candidateGreens ?? []).length > 0;
+    const hasCarried = this.beliefs.carriedParcels.size > 0;
+    return !hasCandidates && !this.hasValidParcelInBelief() && !hasCarried;
+  }
+
+  isInvalidTargetZeroAction(routePlan = this.currentRoutePlan, executablePlan = this.currentExecutablePlan) {
+    if (!TARGET_PLAN_MODES.has(routePlan?.mode)) return false;
+    if (Array.isArray(executablePlan) && executablePlan.length > 0) return false;
+    return true;
+  }
+
+  rejectInvalidZeroActionPlan(routePlan, reason = "invalid_non_idle_zero_action") {
+    this.invalidNonIdleZeroActionCount += 1;
+    const sequenceSummary = compactSequence(routePlan?.sequence);
+    this.logger.warn("invalid non-idle zero-action plan", {
+      mode: routePlan?.mode,
+      sequence: sequenceSummary.text,
+      sequenceLength: sequenceSummary.sequenceLength,
+      sequenceTruncated: sequenceSummary.truncated,
+      invalidNonIdleZeroActionCount: this.invalidNonIdleZeroActionCount,
+      fallbackStage:
+        this.invalidNonIdleZeroActionCount >= INVALID_TARGET_PLAN_LIMIT ? "scout" : routePlan?.fallbackStage
+    });
+    this.invalidatePlan(reason);
+  }
+
   futurePathPoints() {
     const points = [];
     const currentPosition = this.beliefs.me ? { x: this.beliefs.me.x, y: this.beliefs.me.y } : null;
@@ -233,6 +450,43 @@ export class AgentLoop {
     }
 
     return points;
+  }
+
+  hasNearbyOpportunisticParcel(pathPoints = this.futurePathPoints()) {
+    if (!this.beliefs.me) return false;
+
+    const config = this.config.planner;
+    const currentPosition = copyPosition(this.beliefs.me);
+    const maxDistance = Number(config.opportunisticMaxDistance ?? 3);
+    const pathRadius = Number(config.opportunisticPathRadius ?? 2);
+    const minConfidence = Number(config.minParcelConfidence ?? 0.3);
+
+    for (const parcel of this.beliefs.parcels.values()) {
+      if (parcel.carriedBy) continue;
+      if (Number(parcel.confidence ?? 0) < minConfidence) continue;
+      if (this.beliefs.estimateParcelReward(parcel) <= 0) continue;
+      if (this.currentPlanTargetsParcel(parcel.id)) continue;
+
+      const parcelPosition = copyPosition(parcel);
+      if (manhattan(currentPosition, parcelPosition) <= maxDistance) return true;
+      if (pathPoints.some((point) => manhattan(point, parcelPosition) <= pathRadius)) return true;
+    }
+
+    return false;
+  }
+
+  shouldCheckOpportunisticPickup(events = [], pathPoints = this.futurePathPoints()) {
+    if (this.currentRoutePlan?.mode === "OPPORTUNISTIC_PICKUP") return false;
+    if (!this.hasNearbyOpportunisticParcel(pathPoints)) return false;
+
+    const tick = Number(this.telemetry.tick ?? 0);
+    const interval = Number(this.config.planner.opportunisticCheckIntervalTicks ?? 2);
+    const recentParcelEvent = events.some((event) => {
+      const type = eventType(event);
+      return type === "NEW_PACKAGE_SPAWN" || type === "PARCELS_SENSING";
+    });
+
+    return recentParcelEvent || tick - this.lastOpportunisticCheckTick >= interval;
   }
 
   enemyRacePenalty(parcelPosition, myDistance, config) {
@@ -247,7 +501,11 @@ export class AgentLoop {
     return penalty;
   }
 
-  findOpportunisticPickup(currentRoutePlan = this.currentRoutePlan, currentExecutablePlan = this.currentExecutablePlan) {
+  findOpportunisticPickup(
+    currentRoutePlan = this.currentRoutePlan,
+    currentExecutablePlan = this.currentExecutablePlan,
+    pathPoints = this.futurePathPoints()
+  ) {
     if (!this.beliefs.me || !currentRoutePlan || !currentExecutablePlan) return null;
     if (currentRoutePlan.mode === "OPPORTUNISTIC_PICKUP") return null;
 
@@ -255,7 +513,6 @@ export class AgentLoop {
     const currentPosition = copyPosition(this.beliefs.me);
     const plannerState = buildPlannerState(this.beliefs, this.config);
     const profile = buildMapProfile(plannerState);
-    const pathPoints = this.futurePathPoints();
     const futureRejoinPoints = pathPoints.slice(1);
     const carriedValue = this.carriedValueEstimate();
     const movesToPutDown = this.movesUntilPutDown();
@@ -409,28 +666,49 @@ export class AgentLoop {
   }
 
   mustReplan(events = []) {
-    if (!this.currentRoutePlan || !this.currentExecutablePlan) return true;
+    const decide = (should, cause) => {
+      this.lastReplanCause = cause;
+      return should;
+    };
+
+    if (!this.currentRoutePlan || !this.currentExecutablePlan) return decide(true, "missing_plan");
+
     if (this.actionIndex >= this.currentExecutablePlan.length) {
       if (isStartOnlyPlan(this.currentRoutePlan, this.currentExecutablePlan)) {
-        if (events.some((event) => IDLE_REPLAN_EVENTS.has(eventType(event)))) return true;
+        if (hasEvent(events, HARD_REPLAN_EVENTS)) return decide(true, "hard_event");
+        if (hasEvent(events, PACKAGE_REPLAN_EVENTS)) return decide(true, "new_package");
+        if (hasVisibleParcelEvent(events)) return decide(true, "parcel_visible");
+        if (events.some((event) => IDLE_REPLAN_EVENTS.has(eventType(event)))) return decide(true, "missing_plan");
         const periodicIdle = Number(
           this.currentRoutePlan.config?.periodicReplanTicks ?? this.config.planner.periodicReplanTicks
         );
-        return periodicIdle > 0 && this.beliefs.time - this.lastPlanTime >= periodicIdle;
+        if (periodicIdle > 0 && this.beliefs.time - this.lastPlanTime >= periodicIdle) {
+          return decide(true, "idle_periodic");
+        }
+        return decide(false, "no_replan");
       }
-      return true;
+      return decide(true, "plan_finished");
     }
 
-    if (events.some((event) => eventType(event) === "AGENTS_SENSING")) {
-      if (this.enemyRelevantToCurrentPlan()) return true;
+    const hasAgentSensing = events.some((event) => eventType(event) === "AGENTS_SENSING");
+
+    if (SCOUT_PLAN_MODES.has(this.currentRoutePlan?.mode)) {
+      if (!routePathIsExecutable(this.currentRoutePlan)) return decide(true, "scout_path_not_executable");
+      if (hasEvent(events, HARD_REPLAN_EVENTS)) return decide(true, "hard_event");
+      if (hasEvent(events, PACKAGE_REPLAN_EVENTS)) return decide(true, "new_package");
+      if (hasVisibleParcelEvent(events)) return decide(true, "parcel_visible");
+      if (hasAgentSensing && this.enemyRelevantToCurrentPlan()) return decide(true, "enemy_relevant");
+      return decide(false, "scout_commitment_keep_plan");
     }
 
-    if (events.some((event) => REPLAN_EVENTS.has(eventType(event)))) return true;
+    if (hasAgentSensing && this.enemyRelevantToCurrentPlan()) return decide(true, "enemy_relevant");
+    if (hasEvent(events, HARD_REPLAN_EVENTS)) return decide(true, "hard_event");
+    if (hasEvent(events, PACKAGE_REPLAN_EVENTS)) return decide(true, "new_package");
 
     const periodic = Number(this.currentRoutePlan.config?.periodicReplanTicks ?? this.config.planner.periodicReplanTicks);
-    if (periodic > 0 && this.beliefs.time - this.lastPlanTime >= periodic) return true;
+    if (periodic > 0 && this.beliefs.time - this.lastPlanTime >= periodic) return decide(true, "periodic");
 
-    return false;
+    return decide(false, "no_replan");
   }
 
   makePlan(events = []) {
@@ -448,15 +726,26 @@ export class AgentLoop {
       me: this.beliefs.me
     };
     const routePlan = replan(plannerState);
-    let executablePlan = routePathIsWalkable(routePlan) ? buildExecutablePlan(routePlan) : [];
+    let executablePlan = routePathIsExecutable(routePlan) ? buildExecutablePlan(routePlan) : [];
     const elapsed = Date.now() - start;
     this.logger.debug("planner state summary", { ...plannerSummary, mode: routePlan.mode });
 
     if (routePlan.mode !== "IDLE" && executablePlan.length === 0) {
+      const sequenceSummary = compactSequence(routePlan.sequence);
       this.logger.warn("non-idle plan produced zero actions", {
         mode: routePlan.mode,
-        sequence: routePlan.sequence?.join(" -> ")
+        sequence: sequenceSummary.text,
+        sequenceLength: sequenceSummary.sequenceLength,
+        sequenceTruncated: sequenceSummary.truncated
       });
+
+      if (!this.canUseFallbackExploration(routePlan)) {
+        this.currentRoutePlan = routePlan;
+        this.currentExecutablePlan = executablePlan;
+        this.actionIndex = 0;
+        this.rejectInvalidZeroActionPlan(routePlan);
+        return;
+      }
 
       const fallbackAction = this.explorationAction();
       if (fallbackAction) {
@@ -471,26 +760,48 @@ export class AgentLoop {
     }
 
     if (executablePlan.length === 0 && routePlan.sequence.length > 1) {
-      this.logger.warn("planner produced a non-executable path", { sequence: routePlan.sequence });
+      const sequenceSummary = compactSequence(routePlan.sequence);
+      this.logger.warn("planner produced a non-executable path", {
+        sequence: sequenceSummary.text,
+        sequenceLength: sequenceSummary.sequenceLength,
+        sequenceTruncated: sequenceSummary.truncated
+      });
     }
 
     this.currentRoutePlan = routePlan;
     this.currentExecutablePlan = executablePlan;
     this.actionIndex = 0;
     this.lastPlanTime = this.beliefs.time;
+    if (executablePlan.length > 0) this.invalidNonIdleZeroActionCount = 0;
     this.beliefs.clearDirty();
+    if (SCOUT_PLAN_MODES.has(routePlan.mode) && routePlan.scoutTarget?.id) {
+      this.beliefs.markScoutTargetAttempt?.(routePlan.scoutTarget.id, this.beliefs.time);
+    }
 
-    const reason = summarizeEvents(events);
+    const eventsSeen = summarizeEvents(events);
+    const replanCause = this.lastReplanCause ?? "missing_plan";
     const candidates = (routePlan.candidateGreens ?? []).map((green) => green.id).join(",");
+    const scoutTarget = summarizeScoutTarget(routePlan.scoutTarget);
+    const sequenceSummary = compactSequence(routePlan.sequence);
+    const candidateDiagnostics = compactCandidateDiagnostics(routePlan.candidateDiagnostics);
+    const visiblePackageSummary = this.summarizeVisiblePackages(routePlan);
     this.logger.info("replan", {
-      reason,
+      eventsSeen,
+      replanCause,
       mode: routePlan.mode,
-      sequence: routePlan.sequence.join(" -> "),
+      sequence: sequenceSummary.text,
+      sequenceLength: sequenceSummary.sequenceLength,
+      sequenceTruncated: sequenceSummary.truncated,
       value: routePlan.value,
       actions: executablePlan.length,
       candidates,
-      scoutTarget: routePlan.scoutTarget?.id,
-      scoutInfoValue: routePlan.scoutTarget?.infoValue,
+      invalidPlanDetected: Boolean(routePlan.invalidPlanDetected),
+      fallbackStage: routePlan.fallbackStage ?? "full_plan",
+      hasDirectionalTiles: Boolean(routePlan.hasDirectionalTiles ?? routePlan.profile?.hasDirectionalTiles),
+      directedDistanceFieldsBuilt: Boolean(routePlan.directedDistanceFieldsBuilt),
+      candidateDiagnostics,
+      ...visiblePackageSummary,
+      scoutTarget,
       oraclePoints: routePlan.oracle?.points?.length ?? 0,
       oraclePathfindingCalls: routePlan.oracle?.stats?.pathfindingCalls ?? 0,
       oracleSingleSourceBfsRuns: routePlan.oracle?.stats?.singleSourceBfsRuns ?? 0,
@@ -508,7 +819,9 @@ export class AgentLoop {
       mode: routePlan.mode,
       currentPosition: plannerState.me?.position,
       target: routePlan.scoutTarget?.position ?? routePlan.path?.at?.(-1) ?? null,
-      sequence: routePlan.sequence,
+      sequence: sequenceSummary.text,
+      sequenceLength: sequenceSummary.sequenceLength,
+      sequenceTruncated: sequenceSummary.truncated,
       expectedValue: routePlan.value,
       score: this.beliefs.me?.score,
       parcelsInBelief: this.beliefs.parcels.size,
@@ -516,14 +829,23 @@ export class AgentLoop {
       carriedCount: this.beliefs.carriedParcels.size,
       planningTimeMs: elapsed,
       temporaryBlockedCells: this.beliefs.temporaryBlockedCells?.size ?? 0,
-      scoutTarget: routePlan.scoutTarget?.id,
+      scoutTarget: compactScoutTargetId(routePlan.scoutTarget?.id),
+      scoutTargetDetails: scoutTarget,
       scoutInfoValue: routePlan.scoutTarget?.infoValue,
       candidateCount: routePlan.candidateGreens?.length ?? 0,
+      invalidPlanDetected: Boolean(routePlan.invalidPlanDetected),
+      fallbackStage: routePlan.fallbackStage ?? "full_plan",
+      hasDirectionalTiles: Boolean(routePlan.hasDirectionalTiles ?? routePlan.profile?.hasDirectionalTiles),
+      directedDistanceFieldsBuilt: Boolean(routePlan.directedDistanceFieldsBuilt),
+      candidateDiagnostics,
+      ...visiblePackageSummary,
       oraclePoints: routePlan.oracle?.points?.length ?? 0,
       oraclePathfindingCalls: routePlan.oracle?.stats?.pathfindingCalls ?? 0,
       oracleSingleSourceBfsRuns: routePlan.oracle?.stats?.singleSourceBfsRuns ?? 0,
       actionCount: executablePlan.length,
-      reason
+      eventsSeen,
+      replanCause,
+      reason: replanCause
     });
 
     if (elapsed > this.config.planner.maxPlanningTimeMs) {
@@ -558,16 +880,34 @@ export class AgentLoop {
 
       if (!this.currentRoutePlan || !this.currentExecutablePlan) return;
 
-      const opportunistic = this.findOpportunisticPickup(this.currentRoutePlan, this.currentExecutablePlan);
-      if (opportunistic) {
-        this.currentRoutePlan = opportunistic.routePlan;
-        this.currentExecutablePlan = opportunistic.executablePlan;
-        this.actionIndex = 0;
+      const pathPoints = this.futurePathPoints();
+      if (this.shouldCheckOpportunisticPickup(events, pathPoints)) {
+        this.lastOpportunisticCheckTick = Number(this.telemetry.tick ?? 0);
+        const opportunistic = this.findOpportunisticPickup(this.currentRoutePlan, this.currentExecutablePlan, pathPoints);
+        if (opportunistic) {
+          this.currentRoutePlan = opportunistic.routePlan;
+          this.currentExecutablePlan = opportunistic.executablePlan;
+          this.actionIndex = 0;
+        }
       }
 
       const action = this.currentExecutablePlan?.[this.actionIndex];
       if (!action) {
+        if (this.isInvalidTargetZeroAction(this.currentRoutePlan, this.currentExecutablePlan)) {
+          this.rejectInvalidZeroActionPlan(this.currentRoutePlan);
+          return;
+        }
         if (isStartOnlyPlan(this.currentRoutePlan, this.currentExecutablePlan)) {
+          return;
+        }
+        if (this.canUseFallbackExploration(this.currentRoutePlan)) {
+          const fallbackAction = this.explorationAction();
+          if (fallbackAction) {
+            this.currentExecutablePlan = [fallbackAction];
+            this.actionIndex = 0;
+          } else {
+            this.invalidatePlan("plan_finished_or_empty");
+          }
           return;
         }
         this.invalidatePlan("plan_finished_or_empty");
@@ -577,14 +917,16 @@ export class AgentLoop {
       this.logger.debug("execute action", {
         index: this.actionIndex,
         action,
-        sequence: this.currentRoutePlan?.sequence?.join(" -> ")
+        sequence: compactSequence(this.currentRoutePlan?.sequence).text
       });
 
       if (action.type === "move" && action.to && this.enemyOccupies(action.to)) {
         const blockedMode = this.currentRoutePlan?.mode;
+        const repeated = this.recordBlockedMove(action, "enemy_in_next_cell");
         this.beliefs.markTemporaryBlocked(action.to, 2, "enemy_in_next_cell");
         this.logger.warn("enemy_in_next_cell", {
           blockedCell: action.to,
+          repeatedBlockedMove: repeated,
           temporaryBlockedCells: this.beliefs.temporaryBlockedCells?.size ?? 0
         });
         this.telemetry.record("enemy_in_next_cell", {
@@ -594,6 +936,13 @@ export class AgentLoop {
           result: false,
           temporaryBlockedCells: this.beliefs.temporaryBlockedCells?.size ?? 0
         });
+        if (repeated >= Number(this.config.planner.maxRepeatedBlockedMovesBeforeReplan ?? 2)) {
+          this.logger.warn("repeatedBlockedMove", {
+            action,
+            sameBlockedMoveCount: repeated,
+            reason: "enemy_in_next_cell"
+          });
+        }
         this.invalidatePlan("enemy_in_next_cell");
         return;
       }
@@ -602,7 +951,7 @@ export class AgentLoop {
         mode: this.currentRoutePlan?.mode,
         currentPosition: this.beliefs.me ? { x: this.beliefs.me.x, y: this.beliefs.me.y } : null,
         target: this.currentRoutePlan?.path?.at?.(-1) ?? null,
-        sequence: this.currentRoutePlan?.sequence,
+        sequence: compactSequence(this.currentRoutePlan?.sequence).text,
         action,
         score: this.beliefs.me?.score,
         expectedValue: this.currentRoutePlan?.value,
@@ -618,7 +967,19 @@ export class AgentLoop {
       if (ok === false) {
         if (action.type === "move") {
           const failures = this.recordMoveFailure(action);
-          if (failures >= 3) {
+          const repeatedLimit = Number(this.config.planner.maxRepeatedBlockedMovesBeforeReplan ?? 2);
+          if (this.sameBlockedMoveCount >= repeatedLimit) {
+            this.logger.warn("repeatedBlockedMove", {
+              action,
+              sameBlockedMoveCount: this.sameBlockedMoveCount,
+              reason: "move_failed"
+            });
+            this.telemetry.record("repeated_blocked_move", {
+              mode: this.currentRoutePlan?.mode,
+              action,
+              sameBlockedMoveCount: this.sameBlockedMoveCount
+            });
+          } else if (failures >= 3) {
             const sidestep = this.explorationAction();
             if (sidestep) {
               this.logger.warn("forced sidestep after repeated move failure", {
@@ -642,6 +1003,7 @@ export class AgentLoop {
 
       if (action.type === "move") {
         this.resetMoveFailures();
+        this.markScoutTargetVisitedIfInRange();
       }
 
       this.actionIndex += 1;
@@ -654,8 +1016,8 @@ export class AgentLoop {
         }
         this.telemetry.record("plan_completed", {
           mode: this.currentRoutePlan?.mode,
-          sequence: this.currentRoutePlan?.sequence,
-          scoutTarget: this.currentRoutePlan?.scoutTarget?.id,
+          sequence: compactSequence(this.currentRoutePlan?.sequence).text,
+          scoutTarget: compactScoutTargetId(this.currentRoutePlan?.scoutTarget?.id),
           currentPosition: this.beliefs.me ? { x: this.beliefs.me.x, y: this.beliefs.me.y } : null
         });
         this.invalidatePlan("plan_completed");

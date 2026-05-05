@@ -20,15 +20,15 @@ export const DEFAULT_PARAMS = Object.freeze({
   rhoGeneration: 0,
   moveWeight: 1,
   betaCarry: 0.5,
-  periodicReplanTicks: 5,
+  periodicReplanTicks: 20,
   minParcelConfidence: 0.3,
   enemySafetyMargin: 0,
   maxPlanningTimeMs: 30,
   scoutCooldownTicks: 8,
   sameScoutTargetPenalty: 15,
   recentScoutPenalty: 10,
-  scoutDistanceWeight: 1,
-  scoutRedDistanceWeight: 0.2,
+  scoutDistanceWeight: 0.8,
+  scoutRedDistanceWeight: 0.1,
   scoutFutureWeight: 2,
   scoutCongestionDistance: 2,
   scoutEnemyDistance: 2,
@@ -44,11 +44,51 @@ export const DEFAULT_PARAMS = Object.freeze({
   clusterPickupBonusWeight: 0.6,
   minClusterPackageValue: 3,
   greenClusterDistance: 2,
-  clusterSizeWeight: 2,
+  clusterSizeWeight: 3,
   explorationDebtThreshold: 25,
-  explorationDebtBonus: 20,
+  explorationDebtBonus: 30,
+  localCandidateRadius: 4,
+  localCandidateLimit: 4,
+  clusterExpansionRadius: 3,
+  clusterExpansionLimit: 6,
+  maxCandidateGreens: 16,
+  localExploreReversePenalty: 20,
+  localExploreInfoWeight: 1,
+  denseGreenThreshold: 0.65,
+  denseGreenMinGreens: 100,
+  denseScoutRadius: 6,
+  denseScoutMaxWaypoints: 12,
+  denseScoutMinDistanceFromLastDelivery: 2,
+  greenExposureDepth: 6,
+  greenExposureBeamWidth: 16,
+  greenExposureMaxExpanded: 48,
+  greenExposureMinPlanLength: 3,
+  greenExposureStaleWeight: 2,
+  greenExposureNewTileWeight: 1,
+  greenExposureGreenWeight: 1,
+  greenExposureDistanceWeight: 1,
+  greenExposureBacktrackPenalty: 5,
+  minGreenExposureScore: 0,
+  positionRevisitPenalty: 4,
+  edgeRevisitPenalty: 6,
+  sameTargetPenalty: 30,
+  sameSectorPenalty: 20,
+  failedScoutTargetPenalty: 50,
+  failedScoutTargetCooldownTicks: 40,
+  edgeCooldownTicks: 20,
+  positionCooldownTicks: 20,
+  coverageSectorSize: 5,
+  returnToRedWeight: 0.5,
+  trapPenalty: 10000,
+  planningBudgetMs: 30,
+  hardPlanningBudgetMs: 100,
+  mazeObstacleDensityThreshold: 0.25,
+  enableEdgeTemporaryBlocks: true,
+  temporaryEdgeBlockTtlTicks: 2,
+  maxRepeatedBlockedMovesBeforeReplan: 2,
   opportunisticMaxDistance: 3,
   opportunisticPathRadius: 2,
+  opportunisticCheckIntervalTicks: 2,
   opportunisticMinGain: 5,
   opportunisticCongestionPenalty: 8,
   targetCongestionPenalty: 0,
@@ -103,6 +143,17 @@ function normalizeObservationMap(value) {
 
 function directionConstraintFromValue(value) {
   const normalized = String(value ?? "").toLowerCase().replace(/[\s-]+/g, "_");
+  const symbols = {
+    "\u2192": "right",
+    "\u2190": "left",
+    "\u2191": "up",
+    "\u2193": "down",
+    "\u27a1": "right",
+    "\u2b05": "left",
+    "\u2b06": "up",
+    "\u2b07": "down"
+  };
+  if (symbols[normalized]) return symbols[normalized];
   const match = normalized.match(/^(?:arrow|one_way|oneway|directional)_(up|down|left|right)$/);
   return match?.[1] ?? null;
 }
@@ -123,8 +174,16 @@ function normalizeCell(raw) {
       raw.enterDirection ??
       normalized.entryConstraint ??
       null;
-    const directionConstraint = directionConstraintFromValue(`arrow_${directionConstraintRaw}`) ?? directionConstraintRaw ?? null;
-    const entryConstraint = directionConstraintFromValue(`arrow_${entryConstraintRaw}`) ?? entryConstraintRaw ?? null;
+    const directionConstraint =
+      directionConstraintFromValue(directionConstraintRaw) ??
+      directionConstraintFromValue(`arrow_${directionConstraintRaw}`) ??
+      directionConstraintRaw ??
+      null;
+    const entryConstraint =
+      directionConstraintFromValue(entryConstraintRaw) ??
+      directionConstraintFromValue(`arrow_${entryConstraintRaw}`) ??
+      entryConstraintRaw ??
+      null;
     return {
       type: blocked ? "wall" : normalized.type,
       rawType: raw.type ?? normalized.rawType,
@@ -354,6 +413,15 @@ export function parseMap(json) {
     carriedPackages: (input.carriedPackages ?? []).map((pkg) => ({ ...pkg })),
     visitedGreenAt: normalizeVisitedGreenAt(input.visitedGreenAt),
     lastScoutTargetId: input.lastScoutTargetId ?? null,
+    lastPosition: input.lastPosition ? copyPosition(input.lastPosition) : null,
+    recentPositions: Array.isArray(input.recentPositions) ? input.recentPositions.map(copyPosition) : [],
+    temporaryBlockedCells: input.temporaryBlockedCells ?? null,
+    temporaryBlockedEdges: input.temporaryBlockedEdges ?? null,
+    visitedPositions: normalizeObservationMap(input.visitedPositions),
+    visitedEdges: normalizeObservationMap(input.visitedEdges),
+    scoutTargetAttempts: normalizeObservationMap(input.scoutTargetAttempts),
+    recentScoutTargets: Array.isArray(input.recentScoutTargets) ? input.recentScoutTargets.map(String) : [],
+    lastDeliveryPosition: input.lastDeliveryPosition ? copyPosition(input.lastDeliveryPosition) : null,
     lastObservedAtByTile: normalizeObservationMap(input.lastObservedAtByTile),
     lastObservedAtByGreen: normalizeObservationMap(input.lastObservedAtByGreen),
     sensingRange: asNumber(input.sensingRange, params.sensingRange),
@@ -383,13 +451,55 @@ export function getCell(state, position) {
 
 export function isWalkable(state, position) {
   const cell = getCell(state, position);
-  return !!cell && !cell.blocked;
+  return !!cell && !cell.blocked && !isTemporarilyBlockedCell(state, position);
+}
+
+function edgeKey(from, to) {
+  return `${positionKey(from)}->${positionKey(to)}`;
+}
+
+function isTemporarilyBlockedEdge(state, from, to) {
+  const key = edgeKey(from, to);
+  const blocks = state.temporaryBlockedEdges;
+  if (!blocks) return false;
+
+  const block =
+    blocks instanceof Map
+      ? blocks.get(key)
+      : Array.isArray(blocks)
+        ? blocks.find((entry) => entry.key === key || edgeKey(entry.from ?? entry, entry.to ?? entry) === key)
+        : blocks[key];
+  if (!block) return false;
+  if (typeof block === "object" && Number.isFinite(Number(block.expiresAt))) {
+    return Number(block.expiresAt) > asNumber(state.time, 0);
+  }
+  return true;
+}
+
+function isTemporarilyBlockedCell(state, position) {
+  const key = positionKey(position);
+  const blocks = state.temporaryBlockedCells;
+  if (!blocks) return false;
+
+  const block =
+    blocks instanceof Map
+      ? blocks.get(key)
+      : Array.isArray(blocks)
+        ? blocks.find((entry) => positionKey(entry.position ?? entry) === key)
+        : blocks[key];
+  if (!block) return false;
+  if (typeof block === "object" && Number.isFinite(Number(block.expiresAt))) {
+    return Number(block.expiresAt) > asNumber(state.time, 0);
+  }
+  return true;
 }
 
 export function isMoveAllowed(state, from, to) {
   const fromCell = getCell(state, from);
   const toCell = getCell(state, to);
   if (!fromCell || fromCell.blocked || !toCell || toCell.blocked) return false;
+  if (isTemporarilyBlockedCell(state, from) || isTemporarilyBlockedCell(state, to)) return false;
+  if (isTemporarilyBlockedEdge(state, from, to)) return false;
 
   const direction = directionFromPositions(from, to);
   if (!direction) return false;
@@ -412,9 +522,17 @@ function rankingDistance(state, from, to) {
   const cache = state.__rankingDistanceCache;
   if (cache?.has(key)) return cache.get(key);
 
+  if (positionKey(from) === positionKey(state.me.position)) {
+    const directed = distanceFromMe(state, to);
+    if (Number.isFinite(directed)) {
+      cache?.set(key, directed);
+      return directed;
+    }
+  }
+
   const profile = state.__mapProfile ?? buildMapProfile(state);
   let cost = manhattan(from, to);
-  if (!profile.hasObstacles && profile.hasUniformCosts) {
+  if (!profile.hasObstacles && !profile.hasDirectionalTiles && profile.hasUniformCosts) {
     cache?.set(key, cost);
     return cost;
   }
@@ -437,20 +555,33 @@ export function buildMapProfile(state) {
     }
   }
 
+  const totalWalkableCells = Math.max(0, totalCells - obstacleCount);
+  const greenDensity = totalWalkableCells > 0 ? state.greens.length / totalWalkableCells : 0;
+  const denseGreenThreshold = asNumber(state.params?.denseGreenThreshold, DEFAULT_PARAMS.denseGreenThreshold);
+  const denseGreenMinGreens = asNumber(state.params?.denseGreenMinGreens, DEFAULT_PARAMS.denseGreenMinGreens);
+  const obstacleDensity = totalCells > 0 ? obstacleCount / totalCells : 0;
+  const mazeObstacleDensityThreshold = asNumber(
+    state.params?.mazeObstacleDensityThreshold,
+    DEFAULT_PARAMS.mazeObstacleDensityThreshold
+  );
   const hasDecay =
     asNumber(state.params?.decayRate, 0) > 0 ||
     state.greens.some((green) => asNumber(green.package?.decayRate, 0) > 0);
 
   return {
     totalCells,
+    totalWalkableCells,
     greenCount: state.greens.length,
     redCount: state.reds.length,
     obstacleCount,
-    greenDensity: totalCells > 0 ? state.greens.length / totalCells : 0,
+    greenDensity,
     redDensity: totalCells > 0 ? state.reds.length / totalCells : 0,
-    obstacleDensity: totalCells > 0 ? obstacleCount / totalCells : 0,
+    obstacleDensity,
+    isDenseGreen: greenDensity >= denseGreenThreshold && state.greens.length >= denseGreenMinGreens,
+    isMazeLike: obstacleDensity >= mazeObstacleDensityThreshold || directionalConstraintCount > 0,
     hasDecay,
     hasObstacles: obstacleCount > 0,
+    hasDirectionalTiles: directionalConstraintCount > 0,
     hasDirectionalConstraints: directionalConstraintCount > 0,
     hasUniformCosts: nonUniformCostCount === 0
   };
@@ -531,8 +662,101 @@ export function chooseConfig(profile, params = {}) {
     clusterSizeWeight: asNumber(params.clusterSizeWeight, DEFAULT_PARAMS.clusterSizeWeight),
     explorationDebtThreshold: asNumber(params.explorationDebtThreshold, DEFAULT_PARAMS.explorationDebtThreshold),
     explorationDebtBonus: asNumber(params.explorationDebtBonus, DEFAULT_PARAMS.explorationDebtBonus),
+    localCandidateRadius: asNumber(params.localCandidateRadius, DEFAULT_PARAMS.localCandidateRadius),
+    localCandidateLimit: Math.max(
+      0,
+      Math.round(asNumber(params.localCandidateLimit, DEFAULT_PARAMS.localCandidateLimit))
+    ),
+    clusterExpansionRadius: asNumber(params.clusterExpansionRadius, DEFAULT_PARAMS.clusterExpansionRadius),
+    clusterExpansionLimit: Math.max(
+      0,
+      Math.round(asNumber(params.clusterExpansionLimit, DEFAULT_PARAMS.clusterExpansionLimit))
+    ),
+    maxCandidateGreens: Math.max(
+      0,
+      Math.round(asNumber(params.maxCandidateGreens, DEFAULT_PARAMS.maxCandidateGreens))
+    ),
+    localExploreReversePenalty: asNumber(
+      params.localExploreReversePenalty,
+      DEFAULT_PARAMS.localExploreReversePenalty
+    ),
+    localExploreInfoWeight: asNumber(params.localExploreInfoWeight, DEFAULT_PARAMS.localExploreInfoWeight),
+    denseGreenThreshold: asNumber(params.denseGreenThreshold, DEFAULT_PARAMS.denseGreenThreshold),
+    denseGreenMinGreens: asNumber(params.denseGreenMinGreens, DEFAULT_PARAMS.denseGreenMinGreens),
+    denseScoutRadius: asNumber(params.denseScoutRadius, DEFAULT_PARAMS.denseScoutRadius),
+    denseScoutMaxWaypoints: Math.max(
+      1,
+      Math.round(asNumber(params.denseScoutMaxWaypoints, DEFAULT_PARAMS.denseScoutMaxWaypoints))
+    ),
+    denseScoutMinDistanceFromLastDelivery: asNumber(
+      params.denseScoutMinDistanceFromLastDelivery,
+      DEFAULT_PARAMS.denseScoutMinDistanceFromLastDelivery
+    ),
+    greenExposureDepth: Math.max(1, Math.round(asNumber(params.greenExposureDepth, DEFAULT_PARAMS.greenExposureDepth))),
+    greenExposureBeamWidth: Math.max(
+      1,
+      Math.round(asNumber(params.greenExposureBeamWidth, DEFAULT_PARAMS.greenExposureBeamWidth))
+    ),
+    greenExposureMaxExpanded: Math.max(
+      1,
+      Math.round(asNumber(params.greenExposureMaxExpanded, DEFAULT_PARAMS.greenExposureMaxExpanded))
+    ),
+    greenExposureMinPlanLength: Math.max(
+      1,
+      Math.round(asNumber(params.greenExposureMinPlanLength, DEFAULT_PARAMS.greenExposureMinPlanLength))
+    ),
+    greenExposureStaleWeight: asNumber(params.greenExposureStaleWeight, DEFAULT_PARAMS.greenExposureStaleWeight),
+    greenExposureNewTileWeight: asNumber(params.greenExposureNewTileWeight, DEFAULT_PARAMS.greenExposureNewTileWeight),
+    greenExposureGreenWeight: asNumber(params.greenExposureGreenWeight, DEFAULT_PARAMS.greenExposureGreenWeight),
+    greenExposureDistanceWeight: asNumber(
+      params.greenExposureDistanceWeight,
+      DEFAULT_PARAMS.greenExposureDistanceWeight
+    ),
+    greenExposureBacktrackPenalty: asNumber(
+      params.greenExposureBacktrackPenalty,
+      DEFAULT_PARAMS.greenExposureBacktrackPenalty
+    ),
+    minGreenExposureScore: asNumber(params.minGreenExposureScore, DEFAULT_PARAMS.minGreenExposureScore),
+    positionRevisitPenalty: asNumber(params.positionRevisitPenalty, DEFAULT_PARAMS.positionRevisitPenalty),
+    edgeRevisitPenalty: asNumber(params.edgeRevisitPenalty, DEFAULT_PARAMS.edgeRevisitPenalty),
+    sameTargetPenalty: asNumber(params.sameTargetPenalty, DEFAULT_PARAMS.sameTargetPenalty),
+    sameSectorPenalty: asNumber(params.sameSectorPenalty, DEFAULT_PARAMS.sameSectorPenalty),
+    failedScoutTargetPenalty: asNumber(params.failedScoutTargetPenalty, DEFAULT_PARAMS.failedScoutTargetPenalty),
+    failedScoutTargetCooldownTicks: asNumber(
+      params.failedScoutTargetCooldownTicks,
+      DEFAULT_PARAMS.failedScoutTargetCooldownTicks
+    ),
+    edgeCooldownTicks: asNumber(params.edgeCooldownTicks, DEFAULT_PARAMS.edgeCooldownTicks),
+    positionCooldownTicks: asNumber(params.positionCooldownTicks, DEFAULT_PARAMS.positionCooldownTicks),
+    coverageSectorSize: Math.max(1, Math.round(asNumber(params.coverageSectorSize, DEFAULT_PARAMS.coverageSectorSize))),
+    returnToRedWeight: asNumber(params.returnToRedWeight, DEFAULT_PARAMS.returnToRedWeight),
+    trapPenalty: asNumber(params.trapPenalty, DEFAULT_PARAMS.trapPenalty),
+    planningBudgetMs: asNumber(params.planningBudgetMs, DEFAULT_PARAMS.planningBudgetMs),
+    hardPlanningBudgetMs: asNumber(params.hardPlanningBudgetMs, DEFAULT_PARAMS.hardPlanningBudgetMs),
+    mazeObstacleDensityThreshold: asNumber(
+      params.mazeObstacleDensityThreshold,
+      DEFAULT_PARAMS.mazeObstacleDensityThreshold
+    ),
+    enableEdgeTemporaryBlocks: params.enableEdgeTemporaryBlocks ?? DEFAULT_PARAMS.enableEdgeTemporaryBlocks,
+    temporaryEdgeBlockTtlTicks: Math.max(
+      1,
+      Math.round(asNumber(params.temporaryEdgeBlockTtlTicks, DEFAULT_PARAMS.temporaryEdgeBlockTtlTicks))
+    ),
+    maxRepeatedBlockedMovesBeforeReplan: Math.max(
+      1,
+      Math.round(
+        asNumber(
+          params.maxRepeatedBlockedMovesBeforeReplan,
+          DEFAULT_PARAMS.maxRepeatedBlockedMovesBeforeReplan
+        )
+      )
+    ),
     opportunisticMaxDistance: asNumber(params.opportunisticMaxDistance, DEFAULT_PARAMS.opportunisticMaxDistance),
     opportunisticPathRadius: asNumber(params.opportunisticPathRadius, DEFAULT_PARAMS.opportunisticPathRadius),
+    opportunisticCheckIntervalTicks: Math.max(
+      1,
+      Math.round(asNumber(params.opportunisticCheckIntervalTicks, DEFAULT_PARAMS.opportunisticCheckIntervalTicks))
+    ),
     opportunisticMinGain: asNumber(params.opportunisticMinGain, DEFAULT_PARAMS.opportunisticMinGain),
     opportunisticCongestionPenalty: asNumber(
       params.opportunisticCongestionPenalty,
@@ -636,7 +860,7 @@ function buildNearestRedDistanceMap(state, profile = null) {
     const current = queue[head];
     head += 1;
     const currentDistance = distanceByKey.get(positionKey(current)) ?? 0;
-    for (const next of neighbors4(state, current)) {
+    for (const next of getDirectedNeighbors(state, current)) {
       const key = positionKey(next);
       if (distanceByKey.has(key)) continue;
       distanceByKey.set(key, currentDistance + 1);
@@ -649,6 +873,9 @@ function buildNearestRedDistanceMap(state, profile = null) {
 
 function nearestRedDistance(state, position) {
   if (!state.reds || state.reds.length === 0) return 0;
+  if (state.__directedDistanceFields) {
+    return distanceToNearestReachableRed(state, position);
+  }
   const cached = state.__redDistanceMap?.get(positionKey(position));
   if (Number.isFinite(cached)) return cached;
   return Math.min(...state.reds.map((red) => rankingDistance(state, position, red.position)));
@@ -700,30 +927,171 @@ export function computeGreenScores(state, config) {
 }
 
 export function selectCandidateGreens(state, greenScores, config) {
-  return [...state.greens]
-    .filter((green) => hasAvailablePackage(green, config))
+  const diagnostics = [];
+  const entries = [...state.greens]
     .map((green) => {
-      const score = greenScores.get(green.id) ?? 0;
-      const distanceFromMe = rankingDistance(state, state.me.position, green.position);
-      const distanceToRed = nearestRedDistance(state, green.position);
-      if (!Number.isFinite(distanceFromMe) || !Number.isFinite(distanceToRed)) {
-        return { green, score, priority: -Infinity };
-      }
+      const reward = packageReward(green, config.meanPackageValue);
       const confidence = packageConfidence(green);
-      const win = winProbability(state, green, distanceFromMe, config);
-      const deliveryAwareReward = Math.max(
-        0,
-        packageReward(green, config.meanPackageValue) -
-          packageDecayRate(green, config.decayRate) * (distanceFromMe + distanceToRed)
-      );
-      const rankingScore = (score + deliveryAwareReward) * confidence * win;
-      const priority = rankingScore / (1 + distanceFromMe + distanceToRed);
-      return { green, score, priority };
+      if (!green.package || green.package.carriedBy) return null;
+      if (reward <= 0) {
+        diagnostics.push({
+          id: green.id,
+          position: copyPosition(green.position),
+          reward,
+          confidence,
+          pickupDistance: Infinity,
+          deliveryDistance: Infinity,
+          estimatedDeliveredValue: 0,
+          reachableFromMe: false,
+          reachableRedAfterPickup: false,
+          rejectionReason: "zero_reward"
+        });
+        return null;
+      }
+      if (confidence < config.minParcelConfidence) {
+        diagnostics.push({
+          id: green.id,
+          position: copyPosition(green.position),
+          reward,
+          confidence,
+          pickupDistance: Infinity,
+          deliveryDistance: Infinity,
+          estimatedDeliveredValue: 0,
+          reachableFromMe: false,
+          reachableRedAfterPickup: false,
+          rejectionReason: "low_score"
+        });
+        return null;
+      }
+
+      const score = greenScores.get(green.id) ?? 0;
+      const pickupDistance = distanceFromMe(state, green.position);
+      const deliveryDistance = nearestRedDistance(state, green.position);
+      const reachableFromMe = Number.isFinite(pickupDistance);
+      const reachableRedAfterPickup = Number.isFinite(deliveryDistance);
+      const estimatedDeliveredValue = reachableFromMe && reachableRedAfterPickup
+        ? reward - packageDecayRate(green, config.decayRate) * (pickupDistance + deliveryDistance)
+        : 0;
+
+      if (!reachableFromMe || !reachableRedAfterPickup) {
+        diagnostics.push({
+          id: green.id,
+          position: copyPosition(green.position),
+          reward,
+          confidence,
+          pickupDistance,
+          deliveryDistance,
+          estimatedDeliveredValue,
+          reachableFromMe,
+          reachableRedAfterPickup,
+          rejectionReason: reachableFromMe ? "no_reachable_red_after_pickup" : "unreachable_from_me"
+        });
+        return null;
+      }
+
+      const win = winProbability(state, green, pickupDistance, config);
+      if (win <= EPSILON) {
+        diagnostics.push({
+          id: green.id,
+          position: copyPosition(green.position),
+          reward,
+          confidence,
+          pickupDistance,
+          deliveryDistance,
+          estimatedDeliveredValue,
+          reachableFromMe,
+          reachableRedAfterPickup,
+          rejectionReason: "enemy_wins_race"
+        });
+        return null;
+      }
+
+      const priority = estimatedDeliveredValue / (1 + pickupDistance + deliveryDistance);
+      return {
+        green,
+        score,
+        priority,
+        distanceFromMe: pickupDistance,
+        distanceToRed: deliveryDistance,
+        pickupDistance,
+        deliveryDistance,
+        estimatedDeliveredValue
+      };
     })
+    .filter(Boolean)
     .filter((entry) => Number.isFinite(entry.priority))
-    .sort((a, b) => b.priority - a.priority || b.score - a.score || a.green.id.localeCompare(b.green.id))
-    .slice(0, config.topK)
-    .map((entry) => entry.green);
+    .sort((a, b) => b.priority - a.priority || b.score - a.score || a.green.id.localeCompare(b.green.id));
+
+  const maxCandidateGreens = Math.max(0, Math.round(asNumber(config.maxCandidateGreens, entries.length)));
+  if (maxCandidateGreens === 0) {
+    state.__candidateSelectionDiagnostics = diagnostics;
+    return [];
+  }
+
+  const topGlobal = entries.slice(0, Math.max(0, Math.round(asNumber(config.topK, 0))));
+  const localRadius = Math.max(0, asNumber(config.localCandidateRadius, DEFAULT_PARAMS.localCandidateRadius));
+  const localLimit = Math.max(0, Math.round(asNumber(config.localCandidateLimit, DEFAULT_PARAMS.localCandidateLimit)));
+  const clusterRadius = Math.max(
+    0,
+    asNumber(config.clusterExpansionRadius, asNumber(config.clusterPickupRadius, DEFAULT_PARAMS.clusterExpansionRadius))
+  );
+  const clusterLimit = Math.max(0, Math.round(asNumber(config.clusterExpansionLimit, DEFAULT_PARAMS.clusterExpansionLimit)));
+  const selected = [];
+  const selectedIds = new Set();
+
+  const addEntry = (entry) => {
+    if (!entry || selectedIds.has(entry.green.id)) return false;
+    selectedIds.add(entry.green.id);
+    selected.push(entry.green);
+    return true;
+  };
+
+  for (const entry of topGlobal) addEntry(entry);
+
+  if (localLimit > 0) {
+    let added = 0;
+    for (const entry of entries) {
+      if (entry.distanceFromMe > localRadius) continue;
+      if (addEntry(entry)) added += 1;
+      if (added >= localLimit) break;
+    }
+  }
+
+  if (clusterLimit > 0 && clusterRadius > 0) {
+    let added = 0;
+    for (const seed of topGlobal) {
+      for (const entry of entries) {
+        if (selectedIds.has(entry.green.id)) continue;
+        const seedDistance = (state.__mapProfile?.hasDirectionalTiles)
+          ? rankingDistance(state, seed.green.position, entry.green.position)
+          : manhattan(seed.green.position, entry.green.position);
+        if (!Number.isFinite(seedDistance) || seedDistance > clusterRadius) continue;
+        if (addEntry(entry)) added += 1;
+        if (added >= clusterLimit) break;
+      }
+      if (added >= clusterLimit) break;
+    }
+  }
+
+  const result = selected.slice(0, maxCandidateGreens);
+  const selectedSet = new Set(result.map((green) => green.id));
+  for (const entry of entries) {
+    if (selectedSet.has(entry.green.id)) continue;
+    diagnostics.push({
+      id: entry.green.id,
+      position: copyPosition(entry.green.position),
+      reward: packageReward(entry.green, config.meanPackageValue),
+      confidence: packageConfidence(entry.green),
+      pickupDistance: entry.pickupDistance,
+      deliveryDistance: entry.deliveryDistance,
+      estimatedDeliveredValue: entry.estimatedDeliveredValue,
+      reachableFromMe: true,
+      reachableRedAfterPickup: true,
+      rejectionReason: "low_score"
+    });
+  }
+  state.__candidateSelectionDiagnostics = diagnostics;
+  return result;
 }
 
 export function visibleCellsFromPosition(state, position, range) {
@@ -772,13 +1140,22 @@ export function buildPointsOfInterest(state, candidateGreens) {
   ];
 }
 
-function neighbors4(state, position) {
+export function getDirectedNeighbors(state, position) {
   return [
     { x: position.x + 1, y: position.y },
     { x: position.x - 1, y: position.y },
     { x: position.x, y: position.y + 1 },
     { x: position.x, y: position.y - 1 }
   ].filter((next) => isMoveAllowed(state, position, next));
+}
+
+function incomingDirectedNeighbors(state, position) {
+  return [
+    { x: position.x + 1, y: position.y },
+    { x: position.x - 1, y: position.y },
+    { x: position.x, y: position.y + 1 },
+    { x: position.x, y: position.y - 1 }
+  ].filter((previous) => isMoveAllowed(state, previous, position));
 }
 
 function minTraversalCost(state) {
@@ -837,7 +1214,7 @@ export function bfsGridPath(state, from, to) {
     const current = queue[head];
     head += 1;
 
-    for (const next of neighbors4(state, current)) {
+    for (const next of getDirectedNeighbors(state, current)) {
       const key = positionKey(next);
       if (visited.has(key)) continue;
       visited.add(key);
@@ -909,6 +1286,106 @@ export class PriorityQueue {
   }
 }
 
+function moveCostInto(state, position) {
+  return asNumber(getCell(state, position)?.cost, 1);
+}
+
+function singleSourceDirectedDistances(state, sourcePosition) {
+  const source = copyPosition(sourcePosition);
+  const sourceKey = positionKey(source);
+  const distanceByKey = new Map();
+
+  if (!isWalkable(state, source)) return distanceByKey;
+
+  const open = new PriorityQueue();
+  distanceByKey.set(sourceKey, 0);
+  open.push(source, 0);
+
+  while (open.size > 0) {
+    const current = open.pop();
+    const currentKey = positionKey(current);
+    const currentDistance = distanceByKey.get(currentKey);
+
+    for (const next of getDirectedNeighbors(state, current)) {
+      const nextKey = positionKey(next);
+      const tentative = currentDistance + moveCostInto(state, next);
+      if (tentative + EPSILON >= (distanceByKey.get(nextKey) ?? Infinity)) continue;
+      distanceByKey.set(nextKey, tentative);
+      open.push(next, tentative);
+    }
+  }
+
+  return distanceByKey;
+}
+
+function multiSourceReverseDistancesToReds(state) {
+  const distanceByKey = new Map();
+  const nearestReachableRedByCell = new Map();
+  if (!state.reds || state.reds.length === 0) {
+    return { distanceByKey, nearestReachableRedByCell };
+  }
+
+  const open = new PriorityQueue();
+  for (const red of state.reds) {
+    if (!isWalkable(state, red.position)) continue;
+    const key = positionKey(red.position);
+    if ((distanceByKey.get(key) ?? Infinity) <= 0) continue;
+    distanceByKey.set(key, 0);
+    nearestReachableRedByCell.set(key, red);
+    open.push(copyPosition(red.position), 0);
+  }
+
+  while (open.size > 0) {
+    const current = open.pop();
+    const currentKey = positionKey(current);
+    const currentDistance = distanceByKey.get(currentKey);
+    const sourceRed = nearestReachableRedByCell.get(currentKey);
+
+    for (const previous of incomingDirectedNeighbors(state, current)) {
+      const previousKey = positionKey(previous);
+      const tentative = currentDistance + moveCostInto(state, current);
+      if (tentative + EPSILON >= (distanceByKey.get(previousKey) ?? Infinity)) continue;
+      distanceByKey.set(previousKey, tentative);
+      nearestReachableRedByCell.set(previousKey, sourceRed);
+      open.push(previous, tentative);
+    }
+  }
+
+  return { distanceByKey, nearestReachableRedByCell };
+}
+
+export function buildDirectedDistanceFields(state) {
+  const profile = state.__mapProfile ?? buildMapProfile(state);
+  const distFromMe = singleSourceDirectedDistances(state, state.me.position);
+  const reverse = multiSourceReverseDistancesToReds(state);
+
+  return {
+    distFromMe,
+    distToNearestRed: reverse.distanceByKey,
+    nearestReachableRedByCell: reverse.nearestReachableRedByCell,
+    hasDirectionalTiles: Boolean(profile.hasDirectionalTiles)
+  };
+}
+
+function directedDistanceFields(state) {
+  return state.__directedDistanceFields ?? buildDirectedDistanceFields(state);
+}
+
+function distanceFromMe(state, position) {
+  const distance = directedDistanceFields(state).distFromMe.get(positionKey(position));
+  return Number.isFinite(distance) ? distance : Infinity;
+}
+
+function distanceToNearestReachableRed(state, position) {
+  if (!state.reds || state.reds.length === 0) return 0;
+  const distance = directedDistanceFields(state).distToNearestRed.get(positionKey(position));
+  return Number.isFinite(distance) ? distance : Infinity;
+}
+
+function reachableRedFromPosition(state, position) {
+  return directedDistanceFields(state).nearestReachableRedByCell.get(positionKey(position)) ?? null;
+}
+
 export function aStarGridPath(state, from, to) {
   if (!isWalkable(state, from) || !isWalkable(state, to)) return { cost: Infinity, path: [] };
   if (positionKey(from) === positionKey(to)) return { cost: 0, path: [copyPosition(from)] };
@@ -929,7 +1406,7 @@ export function aStarGridPath(state, from, to) {
       return { cost: gScore.get(goalKey) ?? Infinity, path };
     }
 
-    for (const next of neighbors4(state, current)) {
+    for (const next of getDirectedNeighbors(state, current)) {
       const nextCell = getCell(state, next);
       const tentative = (gScore.get(currentKey) ?? Infinity) + asNumber(nextCell?.cost, 1);
       const nextKey = positionKey(next);
@@ -955,7 +1432,7 @@ export function shortestGridPath(state, from, to, profile = null) {
   if (!isWalkable(state, from) || !isWalkable(state, to)) return { cost: Infinity, path: [] };
   const mapProfile = profile ?? buildMapProfile(state);
 
-  if (!mapProfile.hasObstacles && mapProfile.hasUniformCosts) {
+  if (!mapProfile.hasObstacles && !mapProfile.hasDirectionalTiles && mapProfile.hasUniformCosts) {
     const direct = manhattanGridPath(from, to);
     if (pathIsWalkable(state, direct.path)) return direct;
     return bfsGridPath(state, from, to);
@@ -985,7 +1462,7 @@ export function bfsAllDistancesFrom(state, sourcePosition) {
     const currentKey = positionKey(current);
     const currentDistance = distanceByKey.get(currentKey) ?? 0;
 
-    for (const next of neighbors4(state, current)) {
+    for (const next of getDirectedNeighbors(state, current)) {
       const nextKey = positionKey(next);
       if (distanceByKey.has(nextKey)) continue;
       distanceByKey.set(nextKey, currentDistance + 1);
@@ -1317,9 +1794,26 @@ export function findBestSequence(state, points, oracle, _greenScores, config) {
     }
   }
 
-  const fallback = bestPartial ?? initialPlan(state);
-  const best = bestComplete ?? fallback;
-  return { ...best, value: planValue(best, state, oracle, config) };
+  if (bestComplete) {
+    return { ...bestComplete, value: planValue(bestComplete, state, oracle, config) };
+  }
+
+  if (bestPartial) {
+    return {
+      ...bestPartial,
+      value: planValue(bestPartial, state, oracle, config),
+      incomplete: true,
+      needsDeliveryAfterPickup: true
+    };
+  }
+
+  const failed = initialPlan(state);
+  return {
+    ...failed,
+    value: planValue(failed, state, oracle, config),
+    failed: true,
+    failureReason: "no_valid_sequence"
+  };
 }
 
 export function reconstructGridPath(sequence, oracle) {
@@ -1329,12 +1823,39 @@ export function reconstructGridPath(sequence, oracle) {
 
   for (let i = 0; i < sequence.length - 1; i += 1) {
     const edge = getOracleEdge(oracle, sequence[i], sequence[i + 1]);
-    if (!edge || !Number.isFinite(edge.cost) || edge.path.length === 0) break;
+    if (!edge || !Number.isFinite(edge.cost) || edge.path.length === 0) return [];
     const segment = i === 0 && fullPath.length === 0 ? edge.path : edge.path.slice(1);
     fullPath.push(...segment.map(copyPosition));
   }
 
   return fullPath;
+}
+
+const TARGET_PLAN_MODES = new Set(["PICKUP_DELIVERY", "DELIVERY_ONLY", "PICKUP_ONLY", "OPPORTUNISTIC_PICKUP"]);
+
+function routePlanWouldHaveExecutableActions(routePlan) {
+  if (!routePlan?.oracle || !Array.isArray(routePlan.sequence)) return false;
+
+  for (let i = 0; i < routePlan.sequence.length - 1; i += 1) {
+    const fromId = routePlan.sequence[i];
+    const toId = routePlan.sequence[i + 1];
+    const edge = getOracleEdge(routePlan.oracle, fromId, toId);
+    const toPoint = routePlan.oracle.pointsById?.get(toId) ?? routePlan.oracle.points?.find((point) => point.id === toId);
+    if (!edge || !toPoint) continue;
+    if (Array.isArray(edge.path) && edge.path.length > 1) return true;
+    if (toPoint.type === "green" && toPoint.package && !toPoint.noPickup) return true;
+    if (toPoint.type === "red") return true;
+  }
+
+  return false;
+}
+
+function isInvalidNonIdleRoutePlan(routePlan) {
+  if (!routePlan || !TARGET_PLAN_MODES.has(routePlan.mode)) return false;
+  if (!Array.isArray(routePlan.sequence) || routePlan.sequence.length <= 1) return true;
+  if (routePlan.sequence.length === 1 && routePlan.sequence[0] === "START") return true;
+  if (!Array.isArray(routePlan.path) || routePlan.path.length === 0) return true;
+  return !routePlanWouldHaveExecutableActions(routePlan);
 }
 
 function baseRoutePlan({
@@ -1349,7 +1870,10 @@ function baseRoutePlan({
   candidateGreens = [],
   oracle,
   state,
-  scoutTarget = null
+  scoutTarget = null,
+  invalidPlanDetected = false,
+  fallbackStage = null,
+  candidateDiagnostics = []
 }) {
   return {
     mode,
@@ -1365,7 +1889,12 @@ function baseRoutePlan({
     oracle,
     state,
     generatedAtTime: asNumber(state.time, 0),
-    pathIndex: 0
+    pathIndex: 0,
+    invalidPlanDetected,
+    fallbackStage,
+    candidateDiagnostics,
+    hasDirectionalTiles: Boolean(profile?.hasDirectionalTiles),
+    directedDistanceFieldsBuilt: Boolean(state.__directedDistanceFields)
   };
 }
 
@@ -1409,8 +1938,7 @@ function buildDeliveryOnlyPlan(state, profile, config, greenScores) {
 
   if (!bestPlan) return null;
   const path = reconstructGridPath(bestPlan.sequence, oracle);
-
-  return baseRoutePlan({
+  const routePlan = baseRoutePlan({
     mode: "DELIVERY_ONLY",
     sequence: bestPlan.sequence,
     path,
@@ -1420,8 +1948,133 @@ function buildDeliveryOnlyPlan(state, profile, config, greenScores) {
     config,
     greenScores,
     oracle,
-    state
+    state,
+    fallbackStage: "full_plan"
   });
+  if (isInvalidNonIdleRoutePlan(routePlan)) return null;
+
+  return routePlan;
+}
+
+function candidateRejectionReason(diagnostic) {
+  if (!diagnostic.reachableFromMe) return "unreachable_from_me";
+  if (diagnostic.reward <= 0 || diagnostic.valueAtPickup <= EPSILON) return "zero_reward";
+  if (diagnostic.enemyBeatsUs) return "enemy_wins_race";
+  if (!diagnostic.reachableRedAfterPickup) return "no_reachable_red_after_pickup";
+  return "low_score";
+}
+
+function diagnoseCandidateGreens(state, candidateGreens, oracle, config) {
+  return candidateGreens.map((green) => {
+    const startEdge = getOracleEdge(oracle, "START", green.id);
+    const pickupDistance = startEdge?.cost ?? distanceFromMe(state, green.position);
+    const reachableFromMe = Number.isFinite(pickupDistance);
+    const pickupTime = reachableFromMe ? asNumber(state.time, 0) + pickupDistance : Infinity;
+    const valueAtPickup = reachableFromMe ? packageValueAtPickup(state, green, pickupTime, config) : 0;
+    let bestGreenToRed = Infinity;
+
+    for (const red of oracle.points.filter((point) => point.type === "red")) {
+      const edge = getOracleEdge(oracle, green.id, red.id);
+      if (edge && Number.isFinite(edge.cost)) bestGreenToRed = Math.min(bestGreenToRed, edge.cost);
+    }
+
+    if (!Number.isFinite(bestGreenToRed)) bestGreenToRed = nearestRedDistance(state, green.position);
+    const deliveryDistance = bestGreenToRed;
+    const reachableRedAfterPickup = Number.isFinite(deliveryDistance);
+    const decayRate = packageDecayRate(green, config.decayRate);
+    const estimatedDeliveredValue = reachableFromMe && reachableRedAfterPickup
+      ? packageReward(green, config.meanPackageValue) - decayRate * (pickupDistance + deliveryDistance)
+      : 0;
+    const estimatedValueAtDelivery = reachableRedAfterPickup
+      ? Math.max(0, valueAtPickup - decayRate * deliveryDistance)
+      : 0;
+    const enemyBeatsUs = reachableFromMe && !beatsEnemiesToGreen(state, green, pickupDistance, config);
+    const diagnostic = {
+      id: green.id,
+      position: copyPosition(green.position),
+      reward: packageReward(green, config.meanPackageValue),
+      confidence: packageConfidence(green),
+      pickupDistance,
+      deliveryDistance,
+      estimatedDeliveredValue,
+      reachableFromMe,
+      reachableRedAfterPickup,
+      distanceStartToGreen: pickupDistance,
+      startToGreenFinite: reachableFromMe,
+      nearestRedDistance: deliveryDistance,
+      greenToRedFinite: reachableRedAfterPickup,
+      enemyBeatsUs,
+      valueAtPickup,
+      estimatedValueAtDelivery,
+      rejectionReason: "unknown"
+    };
+    diagnostic.rejectionReason = candidateRejectionReason(diagnostic);
+    return diagnostic;
+  });
+}
+
+export function buildPickupOnlyPlan(state, candidateGreens, oracle, config, profile, greenScores) {
+  let best = null;
+
+  for (const green of candidateGreens) {
+    if (!hasAvailablePackage(green, config)) continue;
+
+    const edge = getOracleEdge(oracle, "START", green.id);
+    if (!edge || !Number.isFinite(edge.cost) || edge.path.length === 0) continue;
+
+    const pickupTime = asNumber(state.time, 0) + edge.cost;
+    const valueAtPickup = packageValueAtPickup(state, green, pickupTime, config);
+    if (valueAtPickup <= EPSILON) continue;
+
+    const win = winProbability(state, green, edge.cost, config);
+    const value = valueAtPickup * win - config.moveWeight * edge.cost;
+    const pickupPlan = {
+      ...initialPlan(state),
+      sequence: ["START", green.id],
+      currentId: green.id,
+      currentPosition: copyPosition(green.position),
+      time: pickupTime,
+      moveCost: edge.cost,
+      pickedPackages: [
+        {
+          greenId: green.id,
+          packageId: String(green.package.id),
+          valueAtPickup,
+          pickupTime,
+          decayRate: packageDecayRate(green, config.decayRate),
+          confidence: packageConfidence(green)
+        }
+      ],
+      pickedGreenIds: new Set([green.id]),
+      deliveredScore: 0,
+      value,
+      incomplete: true,
+      needsDeliveryAfterPickup: true
+    };
+
+    if (!best || value > best.value + EPSILON || (Math.abs(value - best.value) <= EPSILON && edge.cost < best.edge.cost)) {
+      best = { green, edge, plan: pickupPlan, value };
+    }
+  }
+
+  if (!best) return null;
+
+  const routePlan = baseRoutePlan({
+    mode: "PICKUP_ONLY",
+    sequence: ["START", best.green.id],
+    path: best.edge.path.map(copyPosition),
+    value: best.value,
+    plan: best.plan,
+    profile,
+    config,
+    greenScores,
+    candidateGreens,
+    oracle,
+    state,
+    fallbackStage: "pickup_only"
+  });
+
+  return isInvalidNonIdleRoutePlan(routePlan) ? null : routePlan;
 }
 
 function buildPickupDeliveryPlan(state, profile, config, greenScores, candidateGreens) {
@@ -1429,8 +2082,7 @@ function buildPickupDeliveryPlan(state, profile, config, greenScores, candidateG
   const oracle = buildDistanceOracle(state, points);
   const bestPlan = findBestSequence(state, points, oracle, greenScores, config);
   const path = reconstructGridPath(bestPlan.sequence, oracle);
-
-  return baseRoutePlan({
+  const routePlan = baseRoutePlan({
     mode: "PICKUP_DELIVERY",
     sequence: bestPlan.sequence,
     path,
@@ -1441,8 +2093,20 @@ function buildPickupDeliveryPlan(state, profile, config, greenScores, candidateG
     greenScores,
     candidateGreens,
     oracle,
-    state
+    state,
+    invalidPlanDetected: Boolean(bestPlan.failed || bestPlan.incomplete),
+    fallbackStage: "full_plan"
   });
+
+  if (bestPlan.failed || bestPlan.incomplete || isInvalidNonIdleRoutePlan(routePlan)) {
+    return {
+      ...routePlan,
+      invalidPlanDetected: true,
+      failureReason: bestPlan.failureReason ?? (bestPlan.incomplete ? "incomplete_sequence" : "invalid_non_idle_plan")
+    };
+  }
+
+  return routePlan;
 }
 
 function observedTimeForGreen(state, green) {
@@ -1494,7 +2158,9 @@ export function buildGreenClusters(state, config) {
     const id =
       members.length === 1
         ? members[0].id
-        : `CLUSTER_${members.map((green) => green.id).sort().join("_")}`;
+        : members.length > 20
+          ? `CLUSTER_size_${members.length}_centroid_${centroid.x}_${centroid.y}`
+          : `CLUSTER_${members.map((green) => green.id).sort().join("_")}`;
 
     clusters.push({
       id,
@@ -1557,6 +2223,357 @@ function clusterWaypoints(state, cluster, config) {
   }));
 }
 
+function visibleAvailablePackages(state, config) {
+  return state.greens.filter((green) => {
+    if (!hasAvailablePackage(green, config)) return false;
+    const lastSeen = asNumber(green.package?.lastSeenTime, NaN);
+    return packageConfidence(green) >= 1 || lastSeen >= asNumber(state.time, 0);
+  });
+}
+
+function greenStalenessAt(state, position, config) {
+  const key = positionKey(position);
+  const last = state.lastObservedAtByGreen?.[key] ?? state.lastObservedAtByTile?.[key];
+  if (last === undefined) return config.maxStalenessValue;
+  return Math.min(config.maxStalenessValue, Math.max(0, asNumber(state.time, 0) - asNumber(last, 0)));
+}
+
+function exposureStatsAt(state, position, config) {
+  const visible = visibleCellsFromPosition(state, position, config.sensingRange);
+  let greenVisibleAfterPath = 0;
+  let staleGreenVisibleAfterPath = 0;
+  let newTilesVisibleAfterPath = 0;
+  let localInformationValue = 0;
+
+  for (const cellPosition of visible) {
+    const cell = getCell(state, cellPosition);
+    if (!cell || cell.blocked) continue;
+    const key = positionKey(cellPosition);
+    if (state.lastObservedAtByTile?.[key] === undefined) newTilesVisibleAfterPath += 1;
+    if (cell.type === "green") {
+      greenVisibleAfterPath += 1;
+      if (greenStalenessAt(state, cellPosition, config) > 0) staleGreenVisibleAfterPath += 1;
+    }
+    localInformationValue += tileInformationValue(state, cellPosition, config);
+  }
+
+  return {
+    localInformationValue,
+    staleGreenCoverage: staleGreenVisibleAfterPath,
+    newTileCoverage: newTilesVisibleAfterPath,
+    greenVisibleAfterPath,
+    staleGreenVisibleAfterPath,
+    newTilesVisibleAfterPath
+  };
+}
+
+function enemyRiskAt(state, position, distance = 1, penalty = 10) {
+  return (state.enemies ?? []).some((enemy) => manhattan(enemy.position, position) <= distance) ? penalty : 0;
+}
+
+function returnToRedPenalty(state, position, config) {
+  const distance = distanceToNearestReachableRed(state, position);
+  if (!Number.isFinite(distance)) {
+    return {
+      distanceToNearestRed: Infinity,
+      penalty: state.reds?.length > 0 ? asNumber(config.trapPenalty, DEFAULT_PARAMS.trapPenalty) : 0,
+      trapPenaltyApplied: state.reds?.length > 0
+    };
+  }
+  return {
+    distanceToNearestRed: distance,
+    penalty: asNumber(config.returnToRedWeight, DEFAULT_PARAMS.returnToRedWeight) * distance,
+    trapPenaltyApplied: false
+  };
+}
+
+function routePlanForScoutPoint({ mode, state, profile, config, greenScores, pointId, point, edge, value, scoutTarget }) {
+  const startPoint = { id: "START", type: "start", position: copyPosition(state.me.position) };
+  const scoutPoint = {
+    id: pointId,
+    type: "scout",
+    position: copyPosition(point),
+    noPickup: true
+  };
+  const oracle = {
+    entries: new Map([
+      [
+        pairKey("START", pointId),
+        {
+          fromId: "START",
+          toId: pointId,
+          cost: edge.cost,
+          path: edge.path
+        }
+      ]
+    ]),
+    points: [startPoint, scoutPoint],
+    pointsById: new Map([
+      ["START", startPoint],
+      [pointId, scoutPoint]
+    ]),
+    profile
+  };
+
+  return baseRoutePlan({
+    mode,
+    sequence: ["START", pointId],
+    path: edge.path.map(copyPosition),
+    value,
+    plan: initialPlan(state),
+    profile,
+    config,
+    greenScores,
+    candidateGreens: [],
+    scoutTarget: {
+      ...scoutTarget,
+      distanceFromMe: scoutTarget?.distanceFromMe ?? edge.cost,
+      distanceToNearestRed: scoutTarget?.distanceToNearestRed ?? returnToRedPenalty(state, point, config).distanceToNearestRed,
+      trapPenaltyApplied: Boolean(scoutTarget?.trapPenaltyApplied)
+    },
+    oracle,
+    state
+  });
+}
+
+function denseScoutWaypointCandidates(state, config) {
+  const start = copyPosition(state.me.position);
+  const radius = Math.max(1, asNumber(config.denseScoutRadius, DEFAULT_PARAMS.denseScoutRadius));
+  const candidates = [];
+
+  for (let y = Math.max(0, start.y - radius); y <= Math.min(state.height - 1, start.y + radius); y += 1) {
+    for (let x = Math.max(0, start.x - radius); x <= Math.min(state.width - 1, start.x + radius); x += 1) {
+      const position = { x, y };
+      if (positionKey(position) === positionKey(start)) continue;
+      if (manhattan(start, position) > radius) continue;
+      if (!isWalkable(state, position)) continue;
+      if (
+        state.lastDeliveryPosition &&
+        manhattan(state.lastDeliveryPosition, position) <
+          asNumber(config.denseScoutMinDistanceFromLastDelivery, DEFAULT_PARAMS.denseScoutMinDistanceFromLastDelivery)
+      ) {
+        continue;
+      }
+      candidates.push(position);
+    }
+  }
+
+  return candidates;
+}
+
+function buildDenseGreenScoutPlan(state, profile, config, greenScores) {
+  let best = null;
+  const start = copyPosition(state.me.position);
+  const candidates = denseScoutWaypointCandidates(state, config);
+  const limited = candidates
+    .sort((a, b) => distanceFromMe(state, a) - distanceFromMe(state, b))
+    .slice(0, Math.max(1, asNumber(config.denseScoutMaxWaypoints, DEFAULT_PARAMS.denseScoutMaxWaypoints)) * 3);
+
+  for (const position of limited) {
+    const directedFromMe = distanceFromMe(state, position);
+    if (!Number.isFinite(directedFromMe)) continue;
+    const returnPenalty = returnToRedPenalty(state, position, config);
+    if (returnPenalty.trapPenaltyApplied) continue;
+    const edge = shortestGridPath(state, start, position, profile);
+    if (!Number.isFinite(edge.cost) || edge.path.length <= 1) continue;
+    const stats = exposureStatsAt(state, position, config);
+    const recentlyVisitedPenalty =
+      state.lastScoutTargetId === `DENSE_SCOUT_${position.x}_${position.y}` ? config.sameScoutTargetPenalty : 0;
+    const enemyPenalty = enemyRiskAt(state, position, config.scoutCongestionDistance, config.scoutCongestionPenalty);
+    const score =
+      stats.localInformationValue +
+      stats.staleGreenCoverage +
+      stats.newTileCoverage -
+      config.scoutDistanceWeight * directedFromMe -
+      returnPenalty.penalty -
+      recentlyVisitedPenalty -
+      enemyPenalty;
+
+    if (!best || score > best.score) {
+      best = { position, edge, stats, score, directedFromMe, returnPenalty };
+    }
+  }
+
+  if (!best) return null;
+
+  const id = `DENSE_SCOUT_${best.position.x}_${best.position.y}`;
+  return routePlanForScoutPoint({
+    mode: "DENSE_SCOUT",
+    state,
+    profile,
+    config,
+    greenScores,
+    pointId: id,
+    point: best.position,
+    edge: best.edge,
+    value: best.score,
+    scoutTarget: {
+      id,
+      position: copyPosition(best.position),
+      localInformationValue: best.stats.localInformationValue,
+      staleGreenCoverage: best.stats.staleGreenCoverage,
+      newTileCoverage: best.stats.newTileCoverage,
+      distanceFromMe: best.directedFromMe,
+      distanceToNearestRed: best.returnPenalty.distanceToNearestRed,
+      trapPenaltyApplied: best.returnPenalty.trapPenaltyApplied,
+      score: best.score
+    }
+  });
+}
+
+function visitedTick(mapLike, key) {
+  if (!mapLike) return undefined;
+  if (mapLike instanceof Map) return mapLike.get(key);
+  return mapLike[key];
+}
+
+function sectorIdFor(position, config) {
+  const size = Math.max(1, asNumber(config.coverageSectorSize, DEFAULT_PARAMS.coverageSectorSize));
+  return `${Math.floor(position.x / size)},${Math.floor(position.y / size)}`;
+}
+
+function pathNoveltyPenalty(state, path, config) {
+  let repeatedPositions = 0;
+  let repeatedEdges = 0;
+  const now = asNumber(state.time, 0);
+  const positionCooldown = asNumber(config.positionCooldownTicks, DEFAULT_PARAMS.positionCooldownTicks);
+  const edgeCooldown = asNumber(config.edgeCooldownTicks, DEFAULT_PARAMS.edgeCooldownTicks);
+
+  for (const position of path.slice(1)) {
+    const last = asNumber(visitedTick(state.visitedPositions, positionKey(position)), -Infinity);
+    if (Number.isFinite(last) && now - last <= positionCooldown) repeatedPositions += 1;
+  }
+
+  for (let i = 0; i < path.length - 1; i += 1) {
+    const key = edgeKey(path[i], path[i + 1]);
+    const last = asNumber(visitedTick(state.visitedEdges, key), -Infinity);
+    if (Number.isFinite(last) && now - last <= edgeCooldown) repeatedEdges += 1;
+  }
+
+  return {
+    repeatedPositions,
+    repeatedEdges,
+    penalty:
+      repeatedPositions * asNumber(config.positionRevisitPenalty, DEFAULT_PARAMS.positionRevisitPenalty) +
+      repeatedEdges * asNumber(config.edgeRevisitPenalty, DEFAULT_PARAMS.edgeRevisitPenalty)
+  };
+}
+
+function scoutTargetAttemptPenalty(state, targetId, sectorId, config) {
+  const now = asNumber(state.time, 0);
+  const cooldown = asNumber(config.failedScoutTargetCooldownTicks, DEFAULT_PARAMS.failedScoutTargetCooldownTicks);
+  const attempt = state.scoutTargetAttempts?.[targetId];
+  const targetRecent = attempt && now - asNumber(attempt.lastAttemptTick, -Infinity) <= cooldown;
+  const sectorRecent = (state.recentScoutTargets ?? []).some((id) => String(id).includes(`_${sectorId}`));
+  return (
+    (targetRecent ? asNumber(config.sameTargetPenalty, DEFAULT_PARAMS.sameTargetPenalty) : 0) +
+    (sectorRecent ? asNumber(config.sameSectorPenalty, DEFAULT_PARAMS.sameSectorPenalty) : 0)
+  );
+}
+
+function pathExposureScore(state, path, config, previousKey = null) {
+  const end = path.at(-1);
+  const stats = exposureStatsAt(state, end, config);
+  const returnPenalty = returnToRedPenalty(state, end, config);
+  const sectorId = sectorIdFor(end, config);
+  const targetId = `GREEN_EXPOSURE_${end.x}_${end.y}`;
+  const novelty = pathNoveltyPenalty(state, path, config);
+  const repeatScoutPenalty = scoutTargetAttemptPenalty(state, targetId, sectorId, config);
+  const firstMove = path[1] ?? null;
+  const immediateBacktrackPenalty =
+    previousKey && firstMove && positionKey(firstMove) === previousKey ? config.greenExposureBacktrackPenalty : 0;
+  const enemyRisk = path.some((position) => enemyRiskAt(state, position, 1, 1)) ? config.scoutCongestionPenalty : 0;
+  const score =
+    stats.greenVisibleAfterPath * config.greenExposureGreenWeight +
+    stats.staleGreenVisibleAfterPath * config.greenExposureStaleWeight +
+    stats.newTilesVisibleAfterPath * config.greenExposureNewTileWeight -
+    (path.length - 1) * config.greenExposureDistanceWeight -
+    returnPenalty.penalty -
+    novelty.penalty -
+    repeatScoutPenalty -
+    enemyRisk -
+    immediateBacktrackPenalty;
+
+  return { score, ...stats, ...returnPenalty, ...novelty, sectorId, targetId };
+}
+
+function buildGreenExposureScoutPlan(state, profile, config, greenScores) {
+  const start = copyPosition(state.me.position);
+  const previous = previousExplorePosition(state);
+  const previousKey = previous ? positionKey(previous) : null;
+  let beam = [{ path: [start], visited: new Set([positionKey(start)]) }];
+  let best = null;
+  let bestShort = null;
+  let expanded = 0;
+
+  for (let depth = 0; depth < config.greenExposureDepth; depth += 1) {
+    const nextBeam = [];
+    for (const item of beam) {
+      const current = item.path.at(-1);
+      for (const next of getDirectedNeighbors(state, current)) {
+        const key = positionKey(next);
+        if (item.visited.has(key)) continue;
+        const path = [...item.path, copyPosition(next)];
+        const scored = pathExposureScore(state, path, config, previousKey);
+        if (scored.trapPenaltyApplied) continue;
+        const candidate = {
+          path,
+          visited: new Set([...item.visited, key]),
+          ...scored
+        };
+        const moveCount = path.length - 1;
+        if (moveCount >= config.greenExposureMinPlanLength) {
+          if (!best || candidate.score > best.score || (Math.abs(candidate.score - best.score) <= EPSILON && candidate.repeatedEdges < best.repeatedEdges)) {
+            best = candidate;
+          }
+        } else if (!bestShort || candidate.score > bestShort.score) {
+          bestShort = candidate;
+        }
+        nextBeam.push(candidate);
+        expanded += 1;
+        if (expanded >= config.greenExposureMaxExpanded) break;
+      }
+      if (expanded >= config.greenExposureMaxExpanded) break;
+    }
+    if (nextBeam.length === 0 || expanded >= config.greenExposureMaxExpanded) break;
+    nextBeam.sort((a, b) => b.score - a.score || a.path.length - b.path.length);
+    beam = nextBeam.slice(0, config.greenExposureBeamWidth);
+  }
+
+  best = best ?? bestShort;
+  if (!best || best.path.length <= 1) return null;
+  if (best.score < asNumber(config.minGreenExposureScore, DEFAULT_PARAMS.minGreenExposureScore)) return null;
+
+  const position = best.path.at(-1);
+  const edge = { cost: best.path.length - 1, path: best.path };
+  const id = `GREEN_EXPOSURE_${position.x}_${position.y}`;
+  return routePlanForScoutPoint({
+    mode: "GREEN_EXPOSURE_SCOUT",
+    state,
+    profile,
+    config,
+    greenScores,
+    pointId: id,
+    point: position,
+    edge,
+    value: best.score,
+    scoutTarget: {
+      id,
+      position: copyPosition(position),
+      score: best.score,
+      distanceFromMe: best.path.length - 1,
+      distanceToNearestRed: best.distanceToNearestRed,
+      trapPenaltyApplied: best.trapPenaltyApplied,
+      sectorId: best.sectorId,
+      repeatedPositions: best.repeatedPositions,
+      repeatedEdges: best.repeatedEdges,
+      greenVisibleAfterPath: best.greenVisibleAfterPath,
+      staleGreenVisibleAfterPath: best.staleGreenVisibleAfterPath,
+      newTilesVisibleAfterPath: best.newTilesVisibleAfterPath
+    }
+  });
+}
+
 function buildScoutPlan(state, profile, config, greenScores) {
   let best = null;
   const startSearch = profile.hasUniformCosts ? bfsAllDistancesFrom(state, state.me.position) : null;
@@ -1564,6 +2581,10 @@ function buildScoutPlan(state, profile, config, greenScores) {
 
   for (const cluster of clusters) {
     for (const waypoint of clusterWaypoints(state, cluster, config)) {
+      const directedFromMe = distanceFromMe(state, waypoint.position);
+      if (!Number.isFinite(directedFromMe)) continue;
+      const returnPenalty = returnToRedPenalty(state, waypoint.position, config);
+      if (returnPenalty.trapPenaltyApplied) continue;
       const edge = startSearch
         ? pathFromBfsAll(startSearch, waypoint.position)
         : shortestGridPath(state, state.me.position, waypoint.position, profile);
@@ -1573,8 +2594,8 @@ function buildScoutPlan(state, profile, config, greenScores) {
       const futureScore =
         cluster.greens.reduce((sum, green) => sum + (greenScores.get(green.id) ?? 0), 0) * config.emptyGreenFutureWeight;
       const infoValue = informationValueAtWaypoint(state, waypoint.position, config);
-      const redDistance = nearestRedDistance(state, waypoint.position);
-      const redPenalty = Number.isFinite(redDistance) ? redDistance * config.scoutRedDistanceWeight : 0;
+      const redDistance = returnPenalty.distanceToNearestRed;
+      const redPenalty = returnPenalty.penalty;
       const lastVisited = asNumber(state.visitedGreenAt?.[cluster.id], -Infinity);
       const recentlyVisited =
         Number.isFinite(lastVisited) && asNumber(state.time, 0) - lastVisited < config.scoutCooldownTicks;
@@ -1601,7 +2622,7 @@ function buildScoutPlan(state, profile, config, greenScores) {
         clusterBonus +
         debtBonus +
         noveltyBonus -
-        config.scoutDistanceWeight * edge.cost -
+        config.scoutDistanceWeight * directedFromMe -
         redPenalty -
         recentlyVisitedPenalty -
         sameTargetPenalty -
@@ -1616,6 +2637,8 @@ function buildScoutPlan(state, profile, config, greenScores) {
           infoValue,
           redDistance,
           redPenalty,
+          directedFromMe,
+          trapPenaltyApplied: returnPenalty.trapPenaltyApplied,
           clusterBonus,
           debtBonus,
           congestionPenalty,
@@ -1683,6 +2706,9 @@ function buildScoutPlan(state, profile, config, greenScores) {
       infoValue: best.infoValue,
       scoutScore: best.scoutScore,
       redDistance: best.redDistance,
+      distanceFromMe: best.directedFromMe,
+      distanceToNearestRed: best.redDistance,
+      trapPenaltyApplied: best.trapPenaltyApplied,
       redPenalty: best.redPenalty,
       clusterBonus: best.clusterBonus,
       debtBonus: best.debtBonus,
@@ -1695,21 +2721,72 @@ function buildScoutPlan(state, profile, config, greenScores) {
   });
 }
 
+function previousExplorePosition(state) {
+  if (state.lastPosition) return copyPosition(state.lastPosition);
+  if (Array.isArray(state.recentPositions) && state.recentPositions.length > 0) {
+    return copyPosition(state.recentPositions.at(-1));
+  }
+  return null;
+}
+
+function temporaryBlockScorePenalty(state, position) {
+  const key = positionKey(position);
+  const blocks = state.temporaryBlockedCells;
+  if (!blocks) return 0;
+  if (blocks instanceof Map) return blocks.has(key) ? 100 : 0;
+  if (Array.isArray(blocks)) {
+    return blocks.some((block) => positionKey(block.position ?? block) === key) ? 100 : 0;
+  }
+  return blocks[key] ? 100 : 0;
+}
+
+function enemyProximityPenalty(state, position, config) {
+  let penalty = 0;
+  for (const enemy of state.enemies ?? []) {
+    const distance = manhattan(enemy.position, position);
+    if (distance <= 1) penalty += asNumber(config.scoutCongestionPenalty, 10);
+    else if (distance === 2) penalty += asNumber(config.scoutCongestionPenalty, 10) / 2;
+  }
+  return penalty;
+}
+
+function localExploreTieBreaker(state, position) {
+  const seed = asNumber(state.time, 0) + position.x * 31 + position.y * 17;
+  return (Math.abs(seed) % 4) * 1e-3;
+}
+
 function buildLocalExplorePlan(state, profile, config) {
   const start = copyPosition(state.me.position);
-  const candidates = [
+  const previous = previousExplorePosition(state);
+  const reverseKey = previous ? positionKey(previous) : null;
+  const candidates = [];
+
+  for (const position of [
     { x: start.x + 1, y: start.y },
     { x: start.x - 1, y: start.y },
     { x: start.x, y: start.y + 1 },
     { x: start.x, y: start.y - 1 }
-  ];
-
-  for (const position of candidates) {
+  ]) {
     if (!isWalkable(state, position)) continue;
-
     const edge = shortestGridPath(state, start, position, profile);
     if (!Number.isFinite(edge.cost) || edge.path.length < 2) continue;
+    const returnPenalty = returnToRedPenalty(state, position, config);
 
+    const isReverse = reverseKey !== null && positionKey(position) === reverseKey;
+    const score =
+      asNumber(config.localExploreInfoWeight, 1) * tileInformationValue(state, position, config) +
+      localExploreTieBreaker(state, position) -
+      returnPenalty.penalty -
+      (isReverse ? asNumber(config.localExploreReversePenalty, 20) : 0) -
+      temporaryBlockScorePenalty(state, position) -
+      enemyProximityPenalty(state, position, config);
+    candidates.push({ position, edge, score, isReverse, returnPenalty });
+  }
+
+  candidates.sort((a, b) => b.score - a.score || Number(a.isReverse) - Number(b.isReverse));
+
+  for (const candidate of candidates) {
+    const { position, edge } = candidate;
     const startPoint = { id: "START", type: "start", position: start };
     const explorePoint = { id: "EXPLORE", type: "explore", position: copyPosition(position), noPickup: true };
     const oracle = {
@@ -1736,7 +2813,7 @@ function buildLocalExplorePlan(state, profile, config) {
       mode: "LOCAL_EXPLORE",
       sequence: ["START", "EXPLORE"],
       path: edge.path.map(copyPosition),
-      value: 0,
+      value: candidate.score,
       plan: initialPlan(state),
       profile,
       config,
@@ -1755,6 +2832,10 @@ export function replan(state) {
   const profile = buildMapProfile(planningState);
   Object.defineProperty(planningState, "__mapProfile", { value: profile, enumerable: false });
   Object.defineProperty(planningState, "__rankingDistanceCache", { value: new Map(), enumerable: false });
+  Object.defineProperty(planningState, "__directedDistanceFields", {
+    value: buildDirectedDistanceFields(planningState),
+    enumerable: false
+  });
   Object.defineProperty(planningState, "__redDistanceMap", {
     value: buildNearestRedDistanceMap(planningState, profile),
     enumerable: false
@@ -1762,6 +2843,10 @@ export function replan(state) {
   const config = chooseConfig(profile, planningState.params);
   const greenScores = computeGreenScores(planningState, config);
   const candidateGreens = selectCandidateGreens(planningState, greenScores, config);
+  const selectionDiagnostics = planningState.__candidateSelectionDiagnostics ?? [];
+  const visiblePackages = visibleAvailablePackages(planningState, config);
+  let invalidPlanDetected = false;
+  let candidateDiagnostics = selectionDiagnostics;
 
   if ((planningState.carriedPackages ?? []).length > 0) {
     const deliveryPlan = buildDeliveryOnlyPlan(planningState, profile, config, greenScores);
@@ -1769,16 +2854,111 @@ export function replan(state) {
   }
 
   if ((planningState.carriedPackages ?? []).length === 0 && candidateGreens.length > 0) {
-    return buildPickupDeliveryPlan(planningState, profile, config, greenScores, candidateGreens);
+    const fullPlan = buildPickupDeliveryPlan(planningState, profile, config, greenScores, candidateGreens);
+    if (fullPlan && !fullPlan.invalidPlanDetected && !isInvalidNonIdleRoutePlan(fullPlan)) {
+      return {
+        ...fullPlan,
+        candidateDiagnostics
+      };
+    }
+
+    invalidPlanDetected = true;
+    candidateDiagnostics = [
+      ...selectionDiagnostics,
+      ...diagnoseCandidateGreens(planningState, candidateGreens, fullPlan.oracle, config)
+    ];
+    const pickupOnlyPlan = buildPickupOnlyPlan(
+      planningState,
+      candidateGreens,
+      fullPlan.oracle,
+      config,
+      profile,
+      greenScores
+    );
+    if (pickupOnlyPlan) {
+      return {
+        ...pickupOnlyPlan,
+        invalidPlanDetected,
+        fallbackStage: "pickup_only",
+        candidateDiagnostics
+      };
+    }
+  }
+
+  if (
+    (planningState.carriedPackages ?? []).length === 0 &&
+    candidateGreens.length === 0 &&
+    visiblePackages.length === 0 &&
+    profile.isDenseGreen
+  ) {
+    const denseScoutPlan = buildDenseGreenScoutPlan(planningState, profile, config, greenScores);
+    if (denseScoutPlan) {
+      return {
+        ...denseScoutPlan,
+        fallbackStage: "scout",
+        candidateDiagnostics
+      };
+    }
+
+    const localExplorePlan = buildLocalExplorePlan(planningState, profile, config);
+    if (localExplorePlan) {
+      return {
+        ...localExplorePlan,
+        fallbackStage: "local_explore",
+        candidateDiagnostics
+      };
+    }
+
+    return {
+      ...buildIdlePlan(planningState, profile, config, greenScores),
+      fallbackStage: "idle",
+      candidateDiagnostics
+    };
+  }
+
+  if (
+    (planningState.carriedPackages ?? []).length === 0 &&
+    candidateGreens.length === 0 &&
+    planningState.greens.length > 0 &&
+    visiblePackages.length === 0 &&
+    (config.sensingRange <= 1 || profile.isMazeLike)
+  ) {
+    const exposurePlan = buildGreenExposureScoutPlan(planningState, profile, config, greenScores);
+    if (exposurePlan) {
+      return {
+        ...exposurePlan,
+        fallbackStage: "scout",
+        candidateDiagnostics
+      };
+    }
   }
 
   const scoutPlan = buildScoutPlan(planningState, profile, config, greenScores);
-  if (scoutPlan) return scoutPlan;
+  if (scoutPlan) {
+    return {
+      ...scoutPlan,
+      invalidPlanDetected,
+      fallbackStage: "scout",
+      candidateDiagnostics
+    };
+  }
 
   const localExplorePlan = buildLocalExplorePlan(planningState, profile, config);
-  if (localExplorePlan) return localExplorePlan;
+  if (localExplorePlan) {
+    return {
+      ...localExplorePlan,
+      invalidPlanDetected,
+      fallbackStage: "local_explore",
+      candidateDiagnostics
+    };
+  }
 
-  return buildIdlePlan(planningState, profile, config, greenScores);
+  return {
+    ...buildIdlePlan(planningState, profile, config, greenScores),
+    invalidPlanDetected,
+    fallbackStage: "idle",
+    candidateDiagnostics
+  };
 }
 
 export function directionFromPositions(from, to) {

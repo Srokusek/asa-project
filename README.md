@@ -20,6 +20,8 @@ LOG_LEVEL=info
 ACTION_DELAY_MS=100
 ```
 
+For competition runs, set `ACTION_DELAY_MS` around `20`-`30` for a smoother action loop. The loop still enforces a `20ms` minimum.
+
 Alternative hosts:
 
 ```env

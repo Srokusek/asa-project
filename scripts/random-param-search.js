@@ -26,8 +26,16 @@ const DEFAULT_RANGES = Object.freeze({
   clusterSizeWeight: [0, 5],
   explorationDebtThreshold: [10, 60],
   explorationDebtBonus: [0, 40],
+  localCandidateRadius: [1, 8],
+  localCandidateLimit: [1, 8],
+  clusterExpansionRadius: [1, 6],
+  clusterExpansionLimit: [1, 10],
+  maxCandidateGreens: [8, 24],
+  localExploreReversePenalty: [0, 40],
+  localExploreInfoWeight: [0.2, 3],
   opportunisticMaxDistance: [1, 5],
   opportunisticPathRadius: [1, 4],
+  opportunisticCheckIntervalTicks: [1, 5],
   opportunisticMinGain: [0, 20],
   opportunisticCongestionPenalty: [0, 20],
   beamWidth: [10, 120],
@@ -66,8 +74,15 @@ function sampleParam(name, range) {
       "clusterPickupRadius",
       "greenClusterDistance",
       "explorationDebtThreshold",
+      "localCandidateRadius",
+      "localCandidateLimit",
+      "clusterExpansionRadius",
+      "clusterExpansionLimit",
+      "maxCandidateGreens",
+      "localExploreReversePenalty",
       "opportunisticMaxDistance",
-      "opportunisticPathRadius"
+      "opportunisticPathRadius",
+      "opportunisticCheckIntervalTicks"
     ].includes(name)
   ) {
     return Math.max(1, Math.round(value));
