@@ -1,12 +1,7 @@
-import { directionFromPositions } from "./route-planner.js";
+import { directionFromPositions, positionKey } from "../utils/geometry.js";
 
 function copyPosition(position) {
   return { x: Math.round(Number(position.x)), y: Math.round(Number(position.y)) };
-}
-
-function positionKey(position) {
-  const p = copyPosition(position);
-  return `${p.x},${p.y}`;
 }
 
 function getPoint(routePlan, id) {

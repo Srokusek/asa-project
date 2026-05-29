@@ -2,7 +2,6 @@ import { Executor } from "../executor/executor.js";
 import { buildExecutablePlan } from "../planner/executable-plan.js";
 import {
   buildMapProfile,
-  directionFromPositions,
   getDirectedNeighbors,
   isMoveAllowed,
   isWalkable,
@@ -12,6 +11,7 @@ import {
 import { buildPlannerState } from "../state/planner-state.js";
 import { createTelemetry } from "../telemetry/telemetry.js";
 import { createLogger } from "../utils/logger.js";
+import { directionFromPositions, manhattan, positionKey } from "../utils/geometry.js";
 
 const HARD_REPLAN_EVENTS = new Set([
   "MOVE_FAILED",
@@ -152,15 +152,6 @@ function compactScoutTargetId(id) {
 
 function copyPosition(position) {
   return { x: Math.round(Number(position.x)), y: Math.round(Number(position.y)) };
-}
-
-function positionKey(position) {
-  const p = copyPosition(position);
-  return `${p.x},${p.y}`;
-}
-
-function manhattan(a, b) {
-  return Math.abs(Math.round(Number(a.x)) - Math.round(Number(b.x))) + Math.abs(Math.round(Number(a.y)) - Math.round(Number(b.y)));
 }
 
 export class AgentLoop {
