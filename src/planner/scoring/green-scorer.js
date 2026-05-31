@@ -85,12 +85,6 @@ function expectedGenerationWait(config) {
   return 0;
 }
 
-function activePackageCount(state) {
-  const onMap = state.greens.filter((green) => green.package && !green.package.carriedBy).length;
-  const carried = state.carriedPackages?.length ?? 0;
-  return onMap + carried;
-}
-
 export function packageConfidence(green) {
   return clamp(asNumber(green.package?.confidence, 1), 0, 1);
 }
@@ -166,7 +160,6 @@ export function currentGreenValue(state, green, config) {
 
 export function futureGreenValue(state, green, config) {
   if (!green.package && config.emptyGreenFutureWeight <= EPSILON) return 0;
-  if (activePackageCount(state) >= config.maxPackages) return 0;
 
   const etaMe = rankingDistance(state, state.me.position, green.position);
   if (!Number.isFinite(etaMe)) return 0;

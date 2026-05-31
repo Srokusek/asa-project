@@ -33,7 +33,6 @@ export const CONFIG = {
     decayRate: 1,
     generationMeanTime: null,
     generationProbability: null,
-    maxPackages: Infinity,
     kSmoothMax: 0.25,
     kWin: 1,
     rhoGeneration: 0.1,

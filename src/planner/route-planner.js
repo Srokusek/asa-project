@@ -160,10 +160,6 @@ export function chooseConfig(profile, params = {}) {
     meanPackageValue: asNumber(params.meanPackageValue, DEFAULT_PARAMS.meanPackageValue),
     generationMeanTime: params.generationMeanTime ?? DEFAULT_PARAMS.generationMeanTime,
     generationProbability: params.generationProbability ?? DEFAULT_PARAMS.generationProbability,
-    maxPackages:
-      params.maxPackages === null || params.maxPackages === undefined
-        ? DEFAULT_PARAMS.maxPackages
-        : asNumber(params.maxPackages, DEFAULT_PARAMS.maxPackages),
     minParcelConfidence: asNumber(params.minParcelConfidence, DEFAULT_PARAMS.minParcelConfidence),
     enemySafetyMargin: asNumber(params.enemySafetyMargin, DEFAULT_PARAMS.enemySafetyMargin),
     maxPlanningTimeMs: asNumber(params.maxPlanningTimeMs, DEFAULT_PARAMS.maxPlanningTimeMs),
