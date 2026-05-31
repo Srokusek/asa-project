@@ -56,10 +56,17 @@ function hasEvent(events, eventSet) {
 
 function hasVisibleParcelEvent(events) {
   return events.some((event) => eventType(event) === "PARCELS_SENSING" && eventPayloadCount(event) > 0);
+  // if we have sensed a positive number of parcels, return true
 }
 
 export function routePathIsExecutable(routePlan) {
-  if (!routePlan?.state || !Array.isArray(routePlan.path)) return true;
+  /**
+   * function for checking whether a path is executable
+   * returns True in 2 cases:
+   *  1) if the path is empty (since no contradictions are present)
+   *  2) if all tiles are path are walkable and all moves between them are allowed (includes direction tiles restrictitons)
+   */
+  if (!routePlan?.state || !Array.isArray(routePlan.path)) return true; 
   if (!routePlan.path.every((position) => isWalkable(routePlan.state, position))) return false;
   for (let i = 0; i < routePlan.path.length - 1; i += 1) {
     if (!isMoveAllowed(routePlan.state, routePlan.path[i], routePlan.path[i + 1])) return false;
@@ -68,6 +75,7 @@ export function routePathIsExecutable(routePlan) {
 }
 
 function isStartOnlyPlan(routePlan, executablePlan) {
+  // checks whether current plan only contains start (no POIs)
   return (
     Array.isArray(routePlan?.sequence) &&
     routePlan.sequence.length === 1 &&
@@ -78,6 +86,7 @@ function isStartOnlyPlan(routePlan, executablePlan) {
 }
 
 function summarizeEvents(events = []) {
+  // summarize events from event queue (such as failed movement, new package observation etc.)
   const counts = new Map();
 
   for (const event of events) {
@@ -95,9 +104,10 @@ function summarizeEvents(events = []) {
 }
 
 function summarizeScoutTarget(target) {
+  // summarize the scouting target
   if (!target) return null;
   const rawId = String(target.id ?? "");
-  const compactId =
+  const compactId = // compact id usefu for logging
     rawId.length > 80 && target.size
       ? `CLUSTER_size_${target.size}_centroid_${target.centroid?.x ?? "?"}_${target.centroid?.y ?? "?"}`
       : rawId.length > 80
@@ -126,6 +136,7 @@ function summarizeScoutTarget(target) {
 }
 
 export function compactSequence(sequence = []) {
+  // move sequence for logging
   if (!Array.isArray(sequence)) return { text: "", sequenceLength: 0, truncated: false };
   if (sequence.length <= 8) {
     return { text: sequence.join(" -> "), sequenceLength: sequence.length, truncated: false };
@@ -161,7 +172,7 @@ export class AgentLoop {
     this.config = config;
     this.logger = createLogger(config.logLevel);
     this.telemetry = createTelemetry(config);
-    this.executor = new Executor(socket, beliefs, config, this.telemetry);
+    this.executor = new Executor(socket, beliefs, config, this.telemetry); // handes all executions with Deliveroo.js
     this.currentRoutePlan = null;
     this.currentExecutablePlan = null;
     this.actionIndex = 0;
@@ -186,7 +197,7 @@ export class AgentLoop {
     this.timer = setInterval(() => {
       void this.tick();
     }, interval);
-    void this.tick();
+    void this.tick(); // call tick at every [interval] ms
   }
 
   stop() {
@@ -197,6 +208,7 @@ export class AgentLoop {
   }
 
   enemyRelevantToCurrentPlan(lookahead = 3) {
+    // looks ahead in own path to check whether any enemy agents are on the path
     if (!this.currentExecutablePlan) return false;
 
     const dangerCells = new Set(
@@ -208,7 +220,7 @@ export class AgentLoop {
     );
 
     for (const enemy of this.beliefs.agents.values()) {
-      if (enemy.confidence < 0.4) continue;
+      if (enemy.confidence < 0.4) continue; // ignore if we have low confidence (for example due to vision)
       if (dangerCells.has(`${enemy.x},${enemy.y}`)) return true;
     }
 
@@ -704,6 +716,7 @@ export class AgentLoop {
 
   makePlan(events = []) {
     const start = Date.now();
+    // collect the planner state
     const plannerState = buildPlannerState(this.beliefs, this.config);
     const plannerSummary = {
       width: plannerState.width,
@@ -853,7 +866,7 @@ export class AgentLoop {
 
   async tick() {
     if (this.ticking) return;
-    this.ticking = true;
+    this.ticking = true; // mark that a tick is in progress
 
     try {
       this.telemetry.nextTick();
@@ -863,27 +876,36 @@ export class AgentLoop {
         this.beliefs.advanceTime();
       }
       const events = this.beliefs.consumeEvents();
-      if (!this.beliefs.ready) return;
+      // events is a list of all events that the agent has sensed since the last tick
+      if (!this.beliefs.ready) return; // stop if connection, map or other crucial steps have not been resolved yet
 
       if (this.mustReplan(events)) {
+        // check whether sensed events constitute to having to replan
         this.makePlan(events);
       }
 
+      // stop if we have no executable route plan
       if (!this.currentRoutePlan || !this.currentExecutablePlan) return;
 
+      // collect future path points
       const pathPoints = this.futurePathPoints();
+      // check whether the agent should check for pickups outside the original plan
       if (this.shouldCheckOpportunisticPickup(events, pathPoints)) {
         this.lastOpportunisticCheckTick = Number(this.telemetry.tick ?? 0);
+        // if yes, create an opportunistic plan that picks up the package
         const opportunistic = this.findOpportunisticPickup(this.currentRoutePlan, this.currentExecutablePlan, pathPoints);
-        if (opportunistic) {
+        if (opportunistic) { 
+          // set the opportunistic plan as the new plan
           this.currentRoutePlan = opportunistic.routePlan;
           this.currentExecutablePlan = opportunistic.executablePlan;
           this.actionIndex = 0;
         }
       }
 
+      // get the next action in plan
       const action = this.currentExecutablePlan?.[this.actionIndex];
       if (!action) {
+        // if there is no executable action, check for possible reasons
         if (this.isInvalidTargetZeroAction(this.currentRoutePlan, this.currentExecutablePlan)) {
           this.rejectInvalidZeroActionPlan(this.currentRoutePlan);
           return;
@@ -892,6 +914,7 @@ export class AgentLoop {
           return;
         }
         if (this.canUseFallbackExploration(this.currentRoutePlan)) {
+          // get a fallback plan if possible
           const fallbackAction = this.explorationAction();
           if (fallbackAction) {
             this.currentExecutablePlan = [fallbackAction];
@@ -911,9 +934,12 @@ export class AgentLoop {
         sequence: compactSequence(this.currentRoutePlan?.sequence).text
       });
 
+      // take note if there is another agent in the target tile of a move action
       if (action.type === "move" && action.to && this.enemyOccupies(action.to)) {
         const blockedMode = this.currentRoutePlan?.mode;
+        // keep track of repeated cases of this happening
         const repeated = this.recordBlockedMove(action, "enemy_in_next_cell");
+        // mark the tile as temporarily blocked for 2 ticks
         this.beliefs.markTemporaryBlocked(action.to, 2, "enemy_in_next_cell");
         this.logger.warn("enemy_in_next_cell", {
           blockedCell: action.to,
@@ -938,6 +964,7 @@ export class AgentLoop {
         return;
       }
 
+      // if we have an executable action, record the start of the action with related beliefs
       this.telemetry.record("action_start", {
         mode: this.currentRoutePlan?.mode,
         currentPosition: this.beliefs.me ? { x: this.beliefs.me.x, y: this.beliefs.me.y } : null,
@@ -954,11 +981,17 @@ export class AgentLoop {
         candidateCount: this.currentRoutePlan?.candidateGreens?.length ?? 0
       });
 
+      // await response from deliveroo
       const ok = await this.executor.execute(action);
+
+      // if action failed:
       if (ok === false) {
         if (action.type === "move") {
+          // if the action was a move, count how many times it has failed (specific to lcoation)
+          // note: the count gets reset after a success
           const failures = this.recordMoveFailure(action);
           const repeatedLimit = Number(this.config.planner.maxRepeatedBlockedMovesBeforeReplan ?? 2);
+          // log warning about failure
           if (this.sameBlockedMoveCount >= repeatedLimit) {
             this.logger.warn("repeatedBlockedMove", {
               action,
@@ -971,6 +1004,7 @@ export class AgentLoop {
               sameBlockedMoveCount: this.sameBlockedMoveCount
             });
           } else if (failures >= 3) {
+            // if we have 3 or more move failures here, force a "sidestep" action
             const sidestep = this.explorationAction();
             if (sidestep) {
               this.logger.warn("forced sidestep after repeated move failure", {
@@ -992,20 +1026,26 @@ export class AgentLoop {
         return;
       }
 
+      // if move action was successful, reset failure counts
       if (action.type === "move") {
         this.resetMoveFailures();
+        // take note of observed tiles within vision
         this.markScoutTargetVisitedIfInRange();
       }
 
+      // increment the action index
       this.actionIndex += 1;
       if (this.actionIndex >= this.currentExecutablePlan.length) {
+        // if this has finished the plan:
         if (this.currentRoutePlan?.mode === "SCOUT" && this.currentRoutePlan.scoutTarget) {
+          // if the plan was a scouting plan, mark target location as scouted
           this.beliefs.markScoutVisited(
             this.currentRoutePlan.scoutTarget.id,
             this.currentRoutePlan.scoutTarget.position
           );
         }
         this.telemetry.record("plan_completed", {
+          // for other plan types, mark as completed
           mode: this.currentRoutePlan?.mode,
           sequence: compactSequence(this.currentRoutePlan?.sequence).text,
           scoutTarget: compactScoutTargetId(this.currentRoutePlan?.scoutTarget?.id),

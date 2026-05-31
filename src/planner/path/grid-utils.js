@@ -276,7 +276,7 @@ export function parseMap(json) {
   const me = normalizeMe(input);
   const parcelByPosition = new Map();
 
-  for (const parcel of input.parcels ?? []) { // ISSUE: the json will never contain information about the parcels, it is a static map. remove
+  for (const parcel of input.parcels ?? []) {
     const position = copyPosition(parcel.position ?? parcel);
     parcelByPosition.set(positionKey(position), packageFromParcel(parcel, params));
   }

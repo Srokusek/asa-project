@@ -47,6 +47,7 @@ function inferBoundsFromTiles(beliefs) {
 }
 
 export function buildPlannerState(beliefs, config) {
+  // initiate objects for general information about the environment
   const bounds = inferBoundsFromTiles(beliefs);
   const width = bounds.width;
   const height = bounds.height;
@@ -56,6 +57,8 @@ export function buildPlannerState(beliefs, config) {
   const parcelsByPosition = new Map();
   const greenPositions = new Set();
 
+  //get the list of parcels from beliefs,
+  // includes information such as location, reward, timeLastSeen, carriedBy, confidence etc.
   for (const parcel of beliefs.parcels.values()) {
     const key = positionKey(parcel);
     const list = parcelsByPosition.get(key) ?? [];
@@ -66,14 +69,18 @@ export function buildPlannerState(beliefs, config) {
   for (let y = 0; y < height; y += 1) {
     const row = [];
     for (let x = 0; x < width; x += 1) {
+      // construct a representation of the map where temporarily blocked tiles are treated as unwalkable
       const tile = beliefs.isTemporarilyBlocked?.({ x, y }) ? "0" : tileAt(beliefs, x, y);
       const type = tileType(tile);
       row.push(tile);
-
+    
+      // if the tile is a green tile:
       if (type === "1") {
         const position = { x, y };
+        // we only take the best package at a tile, not the best in case one tile has more than one package
         const best = bestParcelAt(beliefs, parcelsByPosition.get(positionKey(position)) ?? [], config);
         greenPositions.add(positionKey(position));
+        // push the green tiles information into the greens list, including present packages
         greens.push({
           id: `G_${x}_${y}`,
           position,
@@ -98,16 +105,23 @@ export function buildPlannerState(beliefs, config) {
     grid.push(row);
   }
 
+  // keep track of parcels seperately, this is important since otherwise we only consider
+  // parcels at green tiles!
   for (const parcel of beliefs.parcels.values()) {
+    // ignore parcels carried by other agents or with low confidence
     if (!parcelAvailableForPlanning(beliefs, parcel, config)) continue;
 
     const position = { x: Number(parcel.x), y: Number(parcel.y) };
     const key = positionKey(position);
+    // if the parcel is on a green tile, ignore this parcel as it has been noted
+    // in the greens object already
     if (greenPositions.has(key)) continue;
+    // also ignore if the position is blocked for some reason
     if (beliefs.isTemporarilyBlocked?.(position)) continue;
     if (tileType(tileAt(beliefs, position.x, position.y)) === "0") continue;
 
     const reward = beliefs.estimateParcelReward(parcel);
+    // add the parcel to the greens list, the "P_..." id identifies that it is a "stray" parcel
     greens.push({
       id: `P_${parcel.id}`,
       position,
@@ -124,6 +138,7 @@ export function buildPlannerState(beliefs, config) {
     greenPositions.add(key);
   }
 
+  // collect information about me and other agents
   const mePosition = roundTilePosition(beliefs.me ?? { x: 0, y: 0 });
   const enemies = [...beliefs.agents.values()]
     .filter((agent) => agent.id !== beliefs.me?.id && agent.confidence >= config.planner.minParcelConfidence)
@@ -140,6 +155,7 @@ export function buildPlannerState(beliefs, config) {
       };
     });
 
+  // collect information about packages the agent itself is currently carrying
   const carriedPackages = [...beliefs.carriedParcels.values()].map((parcel) => ({
     greenId: parcel.greenId ?? "CARRIED",
     packageId: parcel.id,
@@ -149,6 +165,7 @@ export function buildPlannerState(beliefs, config) {
     confidence: Number(parcel.confidence ?? 1)
   }));
 
+  // return parsed map with all of the relevant information normalized
   return parseMap({
     width,
     height,

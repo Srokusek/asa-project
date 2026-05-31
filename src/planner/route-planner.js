@@ -397,6 +397,7 @@ function buildDeliveryOnlyPlan(state, profile, config, greenScores) {
 
   const points = buildPointsOfInterest(state, []);
   const oracle = buildDistanceOracle(state, points);
+  // init startPlan which only contains the start
   const startPlan = initialPlan(state);
   let bestPlan = null;
 
@@ -595,17 +596,22 @@ export function replan(state) {
   });
   const config = chooseConfig(profile, planningState.params);
   const greenScores = computeGreenScores(planningState, config);
+  // candidate greens only include possible packages
   const candidateGreens = selectCandidateGreens(planningState, greenScores, config);
   const selectionDiagnostics = planningState.__candidateSelectionDiagnostics ?? [];
   const visiblePackages = visibleAvailablePackages(planningState, config);
   let invalidPlanDetected = false;
   let candidateDiagnostics = selectionDiagnostics;
 
+  // consider only DELIVERY_ONLY plans when we picked up a parcel
+  // could add additional control here for other constraints
+  // Problem -> if we do not use deliver only plans, the delivery brakes and replans take a long time
   if ((planningState.carriedPackages ?? []).length > 0) {
     const deliveryPlan = buildDeliveryOnlyPlan(planningState, profile, config, greenScores);
     if (deliveryPlan) return deliveryPlan;
   }
 
+  // if we are not carrying any packages and have some candidate packages -> create full plan
   if ((planningState.carriedPackages ?? []).length === 0 && candidateGreens.length > 0) {
     const fullPlan = buildPickupDeliveryPlan(planningState, profile, config, greenScores, candidateGreens);
     if (fullPlan && !fullPlan.invalidPlanDetected && !isInvalidNonIdleRoutePlan(fullPlan)) {
@@ -615,11 +621,13 @@ export function replan(state) {
       };
     }
 
+    // if we couldn't find a full pickup delivery plan, 
     invalidPlanDetected = true;
     candidateDiagnostics = [
       ...selectionDiagnostics,
       ...diagnoseCandidateGreens(planningState, candidateGreens, fullPlan.oracle, config)
     ];
+    // try to create a pickupOnlyPlan, only creates one if there are available packages
     const pickupOnlyPlan = buildPickupOnlyPlan(
       planningState,
       candidateGreens,
@@ -638,6 +646,7 @@ export function replan(state) {
     }
   }
 
+  // if no pacakges are visible or carried and the map profile is dense of greens
   if (
     (planningState.carriedPackages ?? []).length === 0 &&
     candidateGreens.length === 0 &&

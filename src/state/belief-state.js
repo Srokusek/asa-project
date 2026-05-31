@@ -10,7 +10,7 @@ function normalizeTileType(type) {
       ? type.type ?? type.kind ?? type.tile ?? (typeof type.delivery === "boolean" ? type.delivery : undefined)
       : type;
   if (typeof candidate === "boolean") return candidate ? "2" : "3";
-  const raw = String(candidate ?? "0");
+  const raw = String(type ?? "0");
   if (raw === "0" || raw === "1" || raw === "2" || raw === "3") return raw;
   if (raw === "green" || raw === "parcel" || raw === "spawner") return "1";
   if (raw === "red" || raw === "delivery") return "2";
