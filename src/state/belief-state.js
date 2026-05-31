@@ -95,6 +95,7 @@ export class BeliefState {
     this.forbiddenTiles = new Map(); // sticky manually forbidden tiles overlay
     this.pickupTileMultipliers = new Map(); // sticky pickup-value multiplier by tile
     this.deliveryTileMultipliers = new Map(); // sticky delivery-value multiplier by tile
+    this.deliveryCountMultipliers = new Map(); // sticky delivery-value multiplier by delivered package count
     this.manualTasks = [];
     this.manualTaskSequence = 0;
     this.events = [];
@@ -274,6 +275,44 @@ export class BeliefState {
     return existing;
   }
 
+  setDeliveryCountMultiplier(count, multiplier, meta = {}) {
+    const normalizedCount = Math.round(Number(count));
+    const factor = Number(multiplier);
+    if (!Number.isFinite(normalizedCount) || normalizedCount < 1) return null;
+    if (!Number.isFinite(factor) || factor < 0) return null;
+    const key = String(normalizedCount);
+    const current = this.deliveryCountMultipliers.get(key);
+    const entry = {
+      count: normalizedCount,
+      multiplier: factor,
+      reason: String(meta.reason ?? current?.reason ?? "delivery_count_multiplier"),
+      sourceChatId: Number(meta.sourceChatId ?? current?.sourceChatId ?? 0) || null,
+      senderId: meta.senderId ?? current?.senderId ?? null,
+      createdAtTick: Number(current?.createdAtTick ?? this.time)
+    };
+    this.deliveryCountMultipliers.set(key, entry);
+    this.pushEvent("DELIVERY_COUNT_MULTIPLIER_SET", { ...entry });
+    this.markDirty();
+    return entry;
+  }
+
+  removeDeliveryCountMultiplier(count, meta = {}) {
+    const normalizedCount = Math.round(Number(count));
+    if (!Number.isFinite(normalizedCount) || normalizedCount < 1) return null;
+    const key = String(normalizedCount);
+    const existing = this.deliveryCountMultipliers.get(key);
+    if (!existing) return null;
+    this.deliveryCountMultipliers.delete(key);
+    this.pushEvent("DELIVERY_COUNT_MULTIPLIER_REMOVED", {
+      ...existing,
+      removedAtTick: this.time,
+      removedBy: meta.senderId ?? null,
+      sourceChatId: Number(meta.sourceChatId ?? 0) || existing.sourceChatId || null
+    });
+    this.markDirty();
+    return existing;
+  }
+
   pickupMultiplierAt(position) {
     const key = positionKey(roundTilePosition(position));
     return Number(this.pickupTileMultipliers.get(key)?.multiplier ?? 1);
@@ -282,6 +321,13 @@ export class BeliefState {
   deliveryMultiplierAt(position) {
     const key = positionKey(roundTilePosition(position));
     return Number(this.deliveryTileMultipliers.get(key)?.multiplier ?? 1);
+  }
+
+  deliveryCountMultiplierFor(count) {
+    const normalizedCount = Math.round(Number(count));
+    if (!Number.isFinite(normalizedCount) || normalizedCount < 1) return 1;
+    const key = String(normalizedCount);
+    return Number(this.deliveryCountMultipliers.get(key)?.multiplier ?? 1);
   }
 
   clearExpiredManualTasks() {
@@ -515,6 +561,7 @@ export class BeliefState {
     this.forbiddenTiles.clear();
     this.pickupTileMultipliers.clear();
     this.deliveryTileMultipliers.clear();
+    this.deliveryCountMultipliers.clear();
 
     for (const tile of tiles) { // iteratively add tiles along with their type
       const position = roundTilePosition(tile);

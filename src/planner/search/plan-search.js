@@ -2,6 +2,7 @@ import { DEFAULT_PARAMS } from "../default-params.js";
 import { asNumber, clamp, copyPosition } from "../path/grid-utils.js";
 import { getOracleEdge } from "../path/distance-oracle.js";
 import {
+  deliveryCountMultiplierAt,
   deliveryMultiplierAt,
   hasAvailablePackage,
   nearestRedDistance,
@@ -103,9 +104,11 @@ export function extendToGreen(plan, green, state, oracle, config) {
 
 export function computeDeliveredValue(pickedPackages, deliveryTime, deliveryPosition, state) {
   const deliveryMultiplier = deliveryMultiplierAt(state, deliveryPosition);
+  const countMultiplier = deliveryCountMultiplierAt(state, pickedPackages.length);
+  const effectiveMultiplier = deliveryMultiplier * countMultiplier;
   return pickedPackages.reduce((sum, pkg) => {
     const elapsed = Math.max(0, deliveryTime - pkg.pickupTime);
-    return sum + Math.max(0, pkg.valueAtPickup - pkg.decayRate * elapsed) * deliveryMultiplier;
+    return sum + Math.max(0, pkg.valueAtPickup - pkg.decayRate * elapsed) * effectiveMultiplier;
   }, 0);
 }
 

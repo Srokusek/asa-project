@@ -331,6 +331,7 @@ export function parseMap(json) {
     forbiddenTiles: normalizeObservationMap(input.forbiddenTiles),
     pickupTileMultipliers: normalizeObservationMap(input.pickupTileMultipliers),
     deliveryTileMultipliers: normalizeObservationMap(input.deliveryTileMultipliers),
+    deliveryCountMultipliers: normalizeObservationMap(input.deliveryCountMultipliers),
     visitedPositions: normalizeObservationMap(input.visitedPositions),
     visitedEdges: normalizeObservationMap(input.visitedEdges),
     scoutTargetAttempts: normalizeObservationMap(input.scoutTargetAttempts),

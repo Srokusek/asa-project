@@ -111,6 +111,14 @@ export function deliveryMultiplierAt(state, position) {
   return Number.isFinite(value) && value > 0 ? value : 1;
 }
 
+export function deliveryCountMultiplierAt(state, count) {
+  const normalizedCount = Math.round(Number(count));
+  if (!Number.isFinite(normalizedCount) || normalizedCount < 1) return 1;
+  const raw = state.deliveryCountMultipliers?.[String(normalizedCount)];
+  const value = asNumber(raw?.multiplier ?? raw, 1);
+  return Number.isFinite(value) && value >= 0 ? value : 1;
+}
+
 function bestDeliveryMultiplier(state) {
   if (!Array.isArray(state.reds) || state.reds.length === 0) return 1;
   let best = 1;

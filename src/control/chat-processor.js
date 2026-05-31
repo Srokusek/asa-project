@@ -183,6 +183,40 @@ export function createChatProcessor({ beliefs, executor, logger }) {
     }
   };
 
+  const setDeliveryCountMultiplierTool = {
+    type: "function",
+    function: {
+      name: "set_delivery_count_multiplier",
+      description: "Set a sticky reward multiplier for deliveries with an exact package count.",
+      parameters: {
+        type: "object",
+        properties: {
+          count: { type: "integer", minimum: 1 },
+          multiplier: { type: "number", minimum: 0 },
+          reason: { type: "string" }
+        },
+        required: ["count", "multiplier"],
+        additionalProperties: false
+      }
+    }
+  };
+
+  const removeDeliveryCountMultiplierTool = {
+    type: "function",
+    function: {
+      name: "remove_delivery_count_multiplier",
+      description: "Remove a sticky delivery-count reward multiplier.",
+      parameters: {
+        type: "object",
+        properties: {
+          count: { type: "integer", minimum: 1 }
+        },
+        required: ["count"],
+        additionalProperties: false
+      }
+    }
+  };
+
   function parseTarget(args) {
     const x = Math.round(Number(args?.target?.x));
     const y = Math.round(Number(args?.target?.y));
@@ -194,6 +228,18 @@ export function createChatProcessor({ beliefs, executor, logger }) {
     const factor = Number(args?.multiplier ?? args?.factor ?? args?.value);
     if (!Number.isFinite(factor) || factor <= 0) return null;
     return factor;
+  }
+
+  function parseNonNegativeMultiplier(args) {
+    const factor = Number(args?.multiplier ?? args?.factor ?? args?.value);
+    if (!Number.isFinite(factor) || factor < 0) return null;
+    return factor;
+  }
+
+  function parsePositiveIntegerCount(args) {
+    const count = Math.round(Number(args?.count));
+    if (!Number.isFinite(count) || count < 1) return null;
+    return count;
   }
 
   function isKnownWall(position) {
@@ -325,6 +371,21 @@ export function createChatProcessor({ beliefs, executor, logger }) {
     };
   }
 
+  function validateDeliveryCountMultiplierArgs(args) {
+    const count = parsePositiveIntegerCount(args);
+    if (count === null) return { ok: false, reason: "invalid_count" };
+    const factor = parseNonNegativeMultiplier(args);
+    if (factor === null) return { ok: false, reason: "invalid_multiplier" };
+    return {
+      ok: true,
+      value: {
+        count,
+        multiplier: factor,
+        reason: String(args.reason ?? "delivery_count_reward_multiplier_instruction")
+      }
+    };
+  }
+
   async function evaluateChatPrompt(messages, senderId, sourceChatId) {
     const baseURL = process.env.LITELLM_BASE_URL || "https://llm.bears.disi.unitn.it/v1";
     const apiKey = process.env.LITELLM_API_KEY;
@@ -350,7 +411,9 @@ export function createChatProcessor({ beliefs, executor, logger }) {
         setPickupTileMultiplierTool,
         removePickupTileMultiplierTool,
         setDeliveryTileMultiplierTool,
-        removeDeliveryTileMultiplierTool
+        removeDeliveryTileMultiplierTool,
+        setDeliveryCountMultiplierTool,
+        removeDeliveryCountMultiplierTool
       ],
       tool_choice: "auto",
       temperature: 0
@@ -579,6 +642,48 @@ export function createChatProcessor({ beliefs, executor, logger }) {
       return { response: `Delivery multiplier removed at (${target.x},${target.y}).` };
     }
 
+    if (call?.function?.name === "set_delivery_count_multiplier") {
+      let parsedArgs = null;
+      try {
+        parsedArgs = JSON.parse(call.function?.arguments ?? "{}");
+      } catch (_error) {
+        return { response: "I could not parse delivery count multiplier request. Please include count and multiplier." };
+      }
+      const validation = validateDeliveryCountMultiplierArgs(parsedArgs);
+      if (!validation.ok) return { response: `Delivery count multiplier rejected: ${validation.reason}.` };
+      const entry = beliefs.setDeliveryCountMultiplier(
+        validation.value.count,
+        validation.value.multiplier,
+        {
+          reason: validation.value.reason,
+          sourceChatId: Number(sourceChatId ?? 0) || null,
+          senderId
+        }
+      );
+      if (!entry) return { response: "Delivery count multiplier rejected: invalid_payload." };
+      return {
+        response: `Delivery count multiplier set for ${entry.count} package(s) to ${entry.multiplier}x.`,
+        deliveryCountMultiplierRule: entry
+      };
+    }
+
+    if (call?.function?.name === "remove_delivery_count_multiplier") {
+      let parsedArgs = null;
+      try {
+        parsedArgs = JSON.parse(call.function?.arguments ?? "{}");
+      } catch (_error) {
+        return { response: "I could not parse delivery count multiplier removal request." };
+      }
+      const count = parsePositiveIntegerCount(parsedArgs);
+      if (count === null) return { response: "Delivery count multiplier removal rejected: invalid_count." };
+      const removed = beliefs.removeDeliveryCountMultiplier(count, {
+        sourceChatId: Number(sourceChatId ?? 0) || null,
+        senderId
+      });
+      if (!removed) return { response: `No delivery count multiplier rule found for count ${count}.` };
+      return { response: `Delivery count multiplier removed for count ${count}.` };
+    }
+
     return { response: String(message?.content ?? "").trim() };
   }
 
@@ -603,6 +708,7 @@ export function createChatProcessor({ beliefs, executor, logger }) {
           "- set_forbidden_tile / remove_forbidden_tile: add/remove sticky forbidden tiles.",
           "- set_pickup_tile_multiplier / remove_pickup_tile_multiplier: add/remove pickup reward multipliers.",
           "- set_delivery_tile_multiplier / remove_delivery_tile_multiplier: add/remove delivery reward multipliers.",
+          "- set_delivery_count_multiplier / remove_delivery_count_multiplier: add/remove delivery reward multipliers by exact delivered package count.",
           "If the message is not an actionable instruction, reply briefly in plain text.",
           "Never output a raw JSON object in assistant text when a tool should be used."
         ].join("\n")

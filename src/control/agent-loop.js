@@ -28,7 +28,9 @@ const HARD_REPLAN_EVENTS = new Set([
   "PICKUP_MULTIPLIER_SET",
   "PICKUP_MULTIPLIER_REMOVED",
   "DELIVERY_MULTIPLIER_SET",
-  "DELIVERY_MULTIPLIER_REMOVED"
+  "DELIVERY_MULTIPLIER_REMOVED",
+  "DELIVERY_COUNT_MULTIPLIER_SET",
+  "DELIVERY_COUNT_MULTIPLIER_REMOVED"
 ]);
 
 const PACKAGE_REPLAN_EVENTS = new Set([
@@ -87,10 +89,12 @@ function multiplierEventPayload(event) {
   const x = Number(event.payload?.x ?? event.payload?.target?.x);
   const y = Number(event.payload?.y ?? event.payload?.target?.y);
   const multiplier = Number(event.payload?.multiplier);
+  const count = Number(event.payload?.count);
   return {
     type,
     x: Number.isFinite(x) ? x : null,
     y: Number.isFinite(y) ? y : null,
+    count: Number.isFinite(count) ? count : null,
     multiplier: Number.isFinite(multiplier) ? multiplier : null,
     reason: event.payload?.reason
   };
@@ -1054,6 +1058,10 @@ export class AgentLoop {
             this.telemetry.record("delivery_multiplier_set", multiplierPayload);
           } else if (multiplierPayload.type === "DELIVERY_MULTIPLIER_REMOVED") {
             this.telemetry.record("delivery_multiplier_removed", multiplierPayload);
+          } else if (multiplierPayload.type === "DELIVERY_COUNT_MULTIPLIER_SET") {
+            this.telemetry.record("delivery_count_multiplier_set", multiplierPayload);
+          } else if (multiplierPayload.type === "DELIVERY_COUNT_MULTIPLIER_REMOVED") {
+            this.telemetry.record("delivery_count_multiplier_removed", multiplierPayload);
           }
         }
       }

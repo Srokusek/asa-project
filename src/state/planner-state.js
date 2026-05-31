@@ -200,6 +200,7 @@ export function buildPlannerState(beliefs, config) {
     forbiddenTiles: Object.fromEntries(beliefs.forbiddenTiles ?? []),
     pickupTileMultipliers: Object.fromEntries(beliefs.pickupTileMultipliers ?? []),
     deliveryTileMultipliers: Object.fromEntries(beliefs.deliveryTileMultipliers ?? []),
+    deliveryCountMultipliers: Object.fromEntries(beliefs.deliveryCountMultipliers ?? []),
     lastObservedAtByTile: Object.fromEntries(beliefs.lastObservedAtByTile ?? []),
     lastObservedAtByGreen: Object.fromEntries(beliefs.lastObservedAtByGreen ?? []),
     sensingRange: config.planner.sensingRange,
