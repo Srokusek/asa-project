@@ -2,6 +2,7 @@ import { Executor } from "../executor/executor.js";
 import { buildExecutablePlan } from "../planner/executable-plan.js";
 import {
   buildMapProfile,
+  computeDeliveredValue,
   getDirectedNeighbors,
   isMoveAllowed,
   isWalkable,
@@ -442,6 +443,21 @@ export class AgentLoop {
     return Infinity;
   }
 
+  upcomingPutDownContext() {
+    if (!Array.isArray(this.currentExecutablePlan)) return null;
+    let moves = 0;
+    for (const action of this.currentExecutablePlan.slice(this.actionIndex)) {
+      if (action.type === "move") moves += 1;
+      if (action.type === "put_down" && action.at) {
+        return {
+          moves,
+          position: copyPosition(action.at)
+        };
+      }
+    }
+    return null;
+  }
+
   currentPlanTargetsParcel(parcelId) {
     const id = String(parcelId);
     if (this.currentRoutePlan?.sequence?.includes(`P_${id}`)) return true;
@@ -565,6 +581,16 @@ export class AgentLoop {
     const futureRejoinPoints = pathPoints.slice(1);
     const carriedValue = this.carriedValueEstimate();
     const movesToPutDown = this.movesUntilPutDown();
+    const putDownContext = this.upcomingPutDownContext();
+    const baselineDeliveredAtPutDown =
+      putDownContext && Array.isArray(plannerState.carriedPackages) && plannerState.carriedPackages.length > 0
+        ? computeDeliveredValue(
+            plannerState.carriedPackages,
+            Number(this.beliefs.time ?? 0) + Number(putDownContext.moves ?? 0),
+            putDownContext.position,
+            plannerState
+          )
+        : null;
     let best = null;
 
     for (const parcel of this.beliefs.parcels.values()) {
@@ -619,9 +645,41 @@ export class AgentLoop {
       const enemyPenalty = !reason ? this.enemyRacePenalty(parcelPosition, edgeToParcel.cost, config) : 0;
       if (!reason && !Number.isFinite(enemyPenalty)) reason = "enemy_wins_race";
 
-      const decayPenalty = !reason ? Number(config.decayRate ?? 0) * Math.max(0, bestRejoin.detourCost) : 0;
+      const decayRate = Number(config.decayRate ?? 0);
+      const pickupMultiplier = Number(this.beliefs.pickupMultiplierAt?.(parcelPosition) ?? 1);
+      const pickupConfidence = Math.max(0, Math.min(1, confidence));
+      const valueAtPickup = Math.max(0, reward - decayRate * Math.max(0, edgeToParcel.cost)) * pickupMultiplier * pickupConfidence;
+      const projectedDeliveredAtPutDown =
+        !reason && putDownContext && baselineDeliveredAtPutDown !== null
+          ? computeDeliveredValue(
+              [
+                ...(plannerState.carriedPackages ?? []),
+                {
+                  greenId: `OP_${parcelId}`,
+                  packageId: parcelId,
+                  valueAtPickup,
+                  pickupTime: Number(this.beliefs.time ?? 0) + Math.max(0, edgeToParcel.cost),
+                  decayRate,
+                  confidence: pickupConfidence,
+                  pickupPosition: copyPosition(parcelPosition)
+                }
+              ],
+              Number(this.beliefs.time ?? 0) +
+                Number(putDownContext.moves ?? 0) +
+                Math.max(0, bestRejoin.detourCost),
+              putDownContext.position,
+              plannerState
+            )
+          : null;
+      const projectedDeliveredGain =
+        projectedDeliveredAtPutDown !== null && baselineDeliveredAtPutDown !== null
+          ? projectedDeliveredAtPutDown - baselineDeliveredAtPutDown
+          : reward;
       const estimatedGain = !reason
-        ? reward - Number(config.moveWeight ?? 1) * Math.max(0, bestRejoin.detourCost) - decayPenalty - congestionPenalty - enemyPenalty
+        ? projectedDeliveredGain -
+          Number(config.moveWeight ?? 1) * Math.max(0, bestRejoin.detourCost) -
+          congestionPenalty -
+          enemyPenalty
         : -Infinity;
       const chosen = estimatedGain > Number(config.opportunisticMinGain ?? 5);
 
@@ -629,6 +687,9 @@ export class AgentLoop {
         parcelId,
         reward,
         detourCost: bestRejoin?.detourCost,
+        baselineDeliveredAtPutDown,
+        projectedDeliveredAtPutDown,
+        projectedDeliveredGain,
         estimatedGain,
         chosen,
         reason
