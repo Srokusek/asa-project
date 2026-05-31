@@ -4,11 +4,13 @@
   "type": "module",
   "scripts": {
     "start": "node src/index.js",
+    "chat:llm": "node src/llm-chat-agent.js",
     "dev": "node src/index.js",
     "test": "node --test"
   },
   "dependencies": {
     "@unitn-asa/deliveroo-js-sdk": "latest",
-    "dotenv": "latest"
+    "dotenv": "latest",
+    "openai": "latest"
   }
 }

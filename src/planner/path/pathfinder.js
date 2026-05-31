@@ -303,6 +303,7 @@ function manhattan(a, b) {
 }
 
 export function shortestGridPath(state, from, to, profile = null) {
+  // if the path between from and to is not walkable, return empty path and infinity cost
   if (!isWalkable(state, from) || !isWalkable(state, to)) return { cost: Infinity, path: [] };
   const mapProfile = profile ?? buildMapProfile(state);
 

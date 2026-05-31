@@ -11,7 +11,8 @@ import {
 import { buildPlannerState } from "../state/planner-state.js";
 import { createTelemetry } from "../telemetry/telemetry.js";
 import { createLogger } from "../utils/logger.js";
-import { directionFromPositions, manhattan, positionKey } from "../utils/geometry.js";
+import { directionFromPositions, manhattan, positionKey, sameTile } from "../utils/geometry.js";
+import { createChatProcessor } from "./chat-processor.js";
 
 const HARD_REPLAN_EVENTS = new Set([
   "MOVE_FAILED",
@@ -21,7 +22,13 @@ const HARD_REPLAN_EVENTS = new Set([
   "BELIEF_INVALIDATED",
   "PICKUP_FAILED",
   "PUTDOWN_FAILED",
-  "TEMPORARY_BLOCKED_CELL"
+  "TEMPORARY_BLOCKED_CELL",
+  "FORBIDDEN_TILE_ADDED",
+  "FORBIDDEN_TILE_REMOVED",
+  "PICKUP_MULTIPLIER_SET",
+  "PICKUP_MULTIPLIER_REMOVED",
+  "DELIVERY_MULTIPLIER_SET",
+  "DELIVERY_MULTIPLIER_REMOVED"
 ]);
 
 const PACKAGE_REPLAN_EVENTS = new Set([
@@ -58,6 +65,37 @@ function hasVisibleParcelEvent(events) {
   return events.some((event) => eventType(event) === "PARCELS_SENSING" && eventPayloadCount(event) > 0);
   // if we have sensed a positive number of parcels, return true
 }
+
+function forbiddenTileEventPayload(event) {
+  if (!event || typeof event !== "object") return null;
+  const type = event.type;
+  if (!type || !String(type).startsWith("FORBIDDEN_TILE_")) return null;
+  const x = Number(event.payload?.x ?? event.payload?.target?.x);
+  const y = Number(event.payload?.y ?? event.payload?.target?.y);
+  return {
+    type,
+    x: Number.isFinite(x) ? x : null,
+    y: Number.isFinite(y) ? y : null,
+    reason: event.payload?.reason
+  };
+}
+
+function multiplierEventPayload(event) {
+  if (!event || typeof event !== "object") return null;
+  const type = event.type;
+  if (!type || !String(type).includes("MULTIPLIER_")) return null;
+  const x = Number(event.payload?.x ?? event.payload?.target?.x);
+  const y = Number(event.payload?.y ?? event.payload?.target?.y);
+  const multiplier = Number(event.payload?.multiplier);
+  return {
+    type,
+    x: Number.isFinite(x) ? x : null,
+    y: Number.isFinite(y) ? y : null,
+    multiplier: Number.isFinite(multiplier) ? multiplier : null,
+    reason: event.payload?.reason
+  };
+}
+
 
 export function routePathIsExecutable(routePlan) {
   /**
@@ -187,6 +225,8 @@ export class AgentLoop {
     this.lastOpportunisticCheckTick = -Infinity;
     this.lastReplanCause = "missing_plan";
     this.invalidNonIdleZeroActionCount = 0;
+    this.chatProcessor = createChatProcessor({ beliefs: this.beliefs, executor: this.executor, logger: this.logger });
+    this.activeManualTask = null;
   }
 
   start() {
@@ -479,6 +519,7 @@ export class AgentLoop {
   }
 
   shouldCheckOpportunisticPickup(events = [], pathPoints = this.futurePathPoints()) {
+    if (this.currentRoutePlan?.mode === "MANUAL_GOTO") return false;
     if (this.currentRoutePlan?.mode === "OPPORTUNISTIC_PICKUP") return false;
     if (!this.hasNearbyOpportunisticParcel(pathPoints)) return false;
 
@@ -510,6 +551,7 @@ export class AgentLoop {
     pathPoints = this.futurePathPoints()
   ) {
     if (!this.beliefs.me || !currentRoutePlan || !currentExecutablePlan) return null;
+    if (currentRoutePlan.mode === "MANUAL_GOTO") return null;
     if (currentRoutePlan.mode === "OPPORTUNISTIC_PICKUP") return null;
 
     const config = this.config.planner;
@@ -714,6 +756,108 @@ export class AgentLoop {
     return decide(false, "no_replan");
   }
 
+  buildManualGotoPlan(task, plannerState) {
+    if (!plannerState?.me?.position) return null;
+    const target = task?.payload?.target;
+    if (!target) return null;
+
+    const start = { x: Math.round(Number(plannerState.me.position.x)), y: Math.round(Number(plannerState.me.position.y)) };
+    const goal = { x: Math.round(Number(target.x)), y: Math.round(Number(target.y)) };
+    if (!Number.isFinite(goal.x) || !Number.isFinite(goal.y)) return null;
+    if (this.beliefs.isForbiddenTile?.(goal)) return null;
+    if (sameTile(start, goal)) {
+      return {
+        mode: "MANUAL_GOTO",
+        sequence: ["START"],
+        path: [start],
+        value: 0,
+        state: plannerState,
+        config: this.config.planner,
+        manualTaskId: task.id,
+        manualTarget: goal
+      };
+    }
+
+    const profile = buildMapProfile(plannerState);
+    const shortest = shortestGridPath(plannerState, start, goal, profile);
+    if (!Array.isArray(shortest?.path) || shortest.path.length === 0 || !Number.isFinite(shortest.cost)) return null;
+    return {
+      mode: "MANUAL_GOTO",
+      sequence: ["START", `MANUAL_TARGET_${goal.x}_${goal.y}`],
+      path: shortest.path,
+      value: -shortest.cost,
+      state: plannerState,
+      profile,
+      config: this.config.planner,
+      manualTaskId: task.id,
+      manualTarget: goal
+    };
+  }
+
+  ensureManualPlan() {
+    if (this.activeManualTask && Number(this.activeManualTask.expiresAtTick ?? -1) <= this.beliefs.time) {
+      this.telemetry.record("manual_task_failed", {
+        taskId: this.activeManualTask.id,
+        reason: "expired",
+        target: this.activeManualTask?.payload?.target ?? null
+      });
+      this.logger.warn("manual task failed", {
+        taskId: this.activeManualTask.id,
+        reason: "expired",
+        target: this.activeManualTask?.payload?.target ?? null
+      });
+      this.activeManualTask = null;
+      this.invalidatePlan("manual_task_expired");
+    }
+
+    const task = this.activeManualTask ?? this.beliefs.peekManualTask?.();
+    if (!task) return false;
+    this.activeManualTask = task;
+
+    if (
+      this.currentRoutePlan?.mode === "MANUAL_GOTO" &&
+      Number(this.currentRoutePlan?.manualTaskId) === Number(task.id) &&
+      Array.isArray(this.currentExecutablePlan)
+    ) {
+      return true;
+    }
+
+    const plannerState = buildPlannerState(this.beliefs, this.config);
+    const routePlan = this.buildManualGotoPlan(task, plannerState);
+    if (!routePlan) {
+      this.telemetry.record("manual_task_retry", {
+        taskId: task.id,
+        reason: "path_not_found",
+        target: task?.payload?.target ?? null
+      });
+      this.logger.warn("manual task retry", {
+        taskId: task.id,
+        reason: "path_not_found",
+        target: task?.payload?.target ?? null
+      });
+      this.invalidatePlan("manual_task_retry_path_not_found");
+      return true;
+    }
+
+    this.currentRoutePlan = routePlan;
+    this.currentExecutablePlan = buildExecutablePlan(routePlan);
+    this.actionIndex = 0;
+    this.lastPlanTime = this.beliefs.time;
+    this.lastReplanCause = "manual_task";
+    this.telemetry.record("manual_task_started", {
+      taskId: task.id,
+      mode: routePlan.mode,
+      target: routePlan.manualTarget,
+      actionCount: this.currentExecutablePlan.length
+    });
+    this.logger.info("manual task started", {
+      taskId: task.id,
+      target: routePlan.manualTarget,
+      actionCount: this.currentExecutablePlan.length
+    });
+    return true;
+  }
+
   makePlan(events = []) {
     const start = Date.now();
     // collect the planner state
@@ -727,6 +871,8 @@ export class AgentLoop {
       parcelsInBelief: this.beliefs.parcels.size,
       carried: this.beliefs.carriedParcels.size,
       temporaryBlockedCells: this.beliefs.temporaryBlockedCells?.size ?? 0,
+      pickupMultiplierRules: this.beliefs.pickupTileMultipliers?.size ?? 0,
+      deliveryMultiplierRules: this.beliefs.deliveryTileMultipliers?.size ?? 0,
       me: this.beliefs.me
     };
     const routePlan = replan(plannerState);
@@ -789,6 +935,11 @@ export class AgentLoop {
     const sequenceSummary = compactSequence(routePlan.sequence);
     const candidateDiagnostics = compactCandidateDiagnostics(routePlan.candidateDiagnostics);
     const visiblePackageSummary = this.summarizeVisiblePackages(routePlan);
+    const adjustedValues = (routePlan.candidateDiagnostics ?? [])
+      .map((entry) => Number(entry?.estimatedDeliveredValue))
+      .filter((value) => Number.isFinite(value));
+    const adjustedDeliveredEstimateMax =
+      adjustedValues.length > 0 ? Math.max(...adjustedValues) : null;
     this.logger.info("replan", {
       eventsSeen,
       replanCause,
@@ -805,6 +956,9 @@ export class AgentLoop {
       directedDistanceFieldsBuilt: Boolean(routePlan.directedDistanceFieldsBuilt),
       candidateDiagnostics,
       ...visiblePackageSummary,
+      activePickupMultiplierRules: this.beliefs.pickupTileMultipliers?.size ?? 0,
+      activeDeliveryMultiplierRules: this.beliefs.deliveryTileMultipliers?.size ?? 0,
+      adjustedDeliveredEstimateMax,
       scoutTarget,
       oraclePoints: routePlan.oracle?.points?.length ?? 0,
       oraclePathfindingCalls: routePlan.oracle?.stats?.pathfindingCalls ?? 0,
@@ -843,6 +997,9 @@ export class AgentLoop {
       directedDistanceFieldsBuilt: Boolean(routePlan.directedDistanceFieldsBuilt),
       candidateDiagnostics,
       ...visiblePackageSummary,
+      activePickupMultiplierRules: this.beliefs.pickupTileMultipliers?.size ?? 0,
+      activeDeliveryMultiplierRules: this.beliefs.deliveryTileMultipliers?.size ?? 0,
+      adjustedDeliveredEstimateMax,
       oraclePoints: routePlan.oracle?.points?.length ?? 0,
       oraclePathfindingCalls: routePlan.oracle?.stats?.pathfindingCalls ?? 0,
       oracleSingleSourceBfsRuns: routePlan.oracle?.stats?.singleSourceBfsRuns ?? 0,
@@ -876,10 +1033,40 @@ export class AgentLoop {
         this.beliefs.advanceTime();
       }
       const events = this.beliefs.consumeEvents();
+      for (const event of events) {
+        const payload = forbiddenTileEventPayload(event);
+        if (payload) {
+          if (payload.type === "FORBIDDEN_TILE_ADDED") {
+            this.telemetry.record("forbidden_tile_added", payload);
+          } else if (payload.type === "FORBIDDEN_TILE_REMOVED") {
+            this.telemetry.record("forbidden_tile_removed", payload);
+          } else if (payload.type === "FORBIDDEN_TILE_REJECTED") {
+            this.telemetry.record("forbidden_tile_rejected", payload);
+          }
+        }
+        const multiplierPayload = multiplierEventPayload(event);
+        if (multiplierPayload) {
+          if (multiplierPayload.type === "PICKUP_MULTIPLIER_SET") {
+            this.telemetry.record("pickup_multiplier_set", multiplierPayload);
+          } else if (multiplierPayload.type === "PICKUP_MULTIPLIER_REMOVED") {
+            this.telemetry.record("pickup_multiplier_removed", multiplierPayload);
+          } else if (multiplierPayload.type === "DELIVERY_MULTIPLIER_SET") {
+            this.telemetry.record("delivery_multiplier_set", multiplierPayload);
+          } else if (multiplierPayload.type === "DELIVERY_MULTIPLIER_REMOVED") {
+            this.telemetry.record("delivery_multiplier_removed", multiplierPayload);
+          }
+        }
+      }
       // events is a list of all events that the agent has sensed since the last tick
       if (!this.beliefs.ready) return; // stop if connection, map or other crucial steps have not been resolved yet
 
-      if (this.mustReplan(events)) {
+      if (await this.chatProcessor.processPendingChatMessage()) {
+        return;
+      }
+
+      if (this.ensureManualPlan()) {
+        // manual plan has priority over automatic replanning
+      } else if (this.mustReplan(events)) {
         // check whether sensed events constitute to having to replan
         this.makePlan(events);
       }
@@ -1022,6 +1209,18 @@ export class AgentLoop {
           consecutiveMoveFailures: this.consecutiveMoveFailures,
           temporaryBlockedCells: this.beliefs.temporaryBlockedCells?.size ?? 0
         });
+        if (this.currentRoutePlan?.mode === "MANUAL_GOTO" && this.activeManualTask) {
+          this.telemetry.record("manual_task_retry", {
+            taskId: this.activeManualTask.id,
+            reason: "action_failed",
+            target: this.currentRoutePlan?.manualTarget ?? this.activeManualTask?.payload?.target ?? null
+          });
+          this.logger.warn("manual task retry", {
+            taskId: this.activeManualTask.id,
+            reason: "action_failed_replan",
+            target: this.currentRoutePlan?.manualTarget ?? this.activeManualTask?.payload?.target ?? null
+          });
+        }
         this.invalidatePlan("action_failed");
         return;
       }
@@ -1036,6 +1235,7 @@ export class AgentLoop {
       // increment the action index
       this.actionIndex += 1;
       if (this.actionIndex >= this.currentExecutablePlan.length) {
+        const completedManualTask = this.currentRoutePlan?.mode === "MANUAL_GOTO" ? this.activeManualTask : null;
         // if this has finished the plan:
         if (this.currentRoutePlan?.mode === "SCOUT" && this.currentRoutePlan.scoutTarget) {
           // if the plan was a scouting plan, mark target location as scouted
@@ -1051,6 +1251,18 @@ export class AgentLoop {
           scoutTarget: compactScoutTargetId(this.currentRoutePlan?.scoutTarget?.id),
           currentPosition: this.beliefs.me ? { x: this.beliefs.me.x, y: this.beliefs.me.y } : null
         });
+        if (completedManualTask) {
+          this.telemetry.record("manual_task_completed", {
+            taskId: completedManualTask.id,
+            target: this.currentRoutePlan?.manualTarget ?? completedManualTask?.payload?.target ?? null
+          });
+          this.logger.info("manual task completed", {
+            taskId: completedManualTask.id,
+            target: this.currentRoutePlan?.manualTarget ?? completedManualTask?.payload?.target ?? null
+          });
+          this.beliefs.consumeManualTask?.();
+          this.activeManualTask = null;
+        }
         this.invalidatePlan("plan_completed");
       }
     } catch (error) {

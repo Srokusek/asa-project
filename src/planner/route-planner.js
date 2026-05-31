@@ -120,20 +120,20 @@ export { buildMapProfile };
 
 export function chooseConfig(profile, params = {}) {
   let mode = "DENSE_BEAM";
-  let topK = 8;
-  let beamWidth = 20;
+  let topK = 4;
+  let beamWidth = 4;
   let maxPickupsBeforeDelivery = 3;
 
   if (profile.greenCount <= 15) {
     mode = "SMALL_EXACT";
     topK = profile.greenCount;
-    beamWidth = 200;
-    maxPickupsBeforeDelivery = 5;
+    beamWidth = 10;
+    maxPickupsBeforeDelivery = 3;
   } else if (profile.greenCount <= 60) {
     mode = "MEDIUM_BEAM";
-    topK = 12;
-    beamWidth = 40;
-    maxPickupsBeforeDelivery = 4;
+    topK = 4;
+    beamWidth = 4;
+    maxPickupsBeforeDelivery = 3;
   }
 
   const periodicBase = Math.max(
@@ -151,8 +151,8 @@ export function chooseConfig(profile, params = {}) {
       0,
       Math.round(asNumber(params.maxPickupsBeforeDelivery, maxPickupsBeforeDelivery))
     ),
-    kSmoothMax: asNumber(params.kSmoothMax, DEFAULT_PARAMS.kSmoothMax),
-    kWin: asNumber(params.kWin, DEFAULT_PARAMS.kWin),
+    kSmoothMax: asNumber(params.kSmoothMax, DEFAULT_PARAMS.kSmoothMax), // used for comparing current vs. future value
+    kWin: asNumber(params.kWin, DEFAULT_PARAMS.kWin), // used for calculating probability of beating oponents to package
     rhoGeneration: asNumber(params.rhoGeneration, DEFAULT_PARAMS.rhoGeneration),
     moveWeight: asNumber(params.moveWeight, DEFAULT_PARAMS.moveWeight),
     betaCarry: asNumber(params.betaCarry, DEFAULT_PARAMS.betaCarry),
@@ -160,6 +160,10 @@ export function chooseConfig(profile, params = {}) {
     meanPackageValue: asNumber(params.meanPackageValue, DEFAULT_PARAMS.meanPackageValue),
     generationMeanTime: params.generationMeanTime ?? DEFAULT_PARAMS.generationMeanTime,
     generationProbability: params.generationProbability ?? DEFAULT_PARAMS.generationProbability,
+    maxPackages:
+      params.maxPackages === null || params.maxPackages === undefined
+        ? DEFAULT_PARAMS.maxPackages
+        : asNumber(params.maxPackages, DEFAULT_PARAMS.maxPackages),
     minParcelConfidence: asNumber(params.minParcelConfidence, DEFAULT_PARAMS.minParcelConfidence),
     enemySafetyMargin: asNumber(params.enemySafetyMargin, DEFAULT_PARAMS.enemySafetyMargin),
     maxPlanningTimeMs: asNumber(params.maxPlanningTimeMs, DEFAULT_PARAMS.maxPlanningTimeMs),

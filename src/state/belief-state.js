@@ -51,6 +51,19 @@ function eventPayload(type, payload) {
   return { type, payload, createdAt: Date.now() };
 }
 
+function chatPayload(message) {
+  if (message && typeof message === "object") {
+    return {
+      ...message,
+      fromId: message.fromId ?? message.id ?? message.from ?? null,
+      fromName: message.fromName ?? message.name ?? null,
+      text: String(message.text ?? message.msg ?? message.message ?? "")
+    };
+  }
+
+  return { text: String(message ?? "") };
+}
+
 export class BeliefState {
   constructor(config) {
     this.config = config; // config with parameters for scoring etc.
@@ -77,6 +90,13 @@ export class BeliefState {
     this.recentPositions = []; // list of recent posiitons
     this.lastObservedAtByTile = new Map(); // last observation of a given tile
     this.lastObservedAtByGreen = new Map(); // last observation of a given green tile
+    this.chatInbox = []; // recent chat messages seen in Deliveroo.js
+    this.chatSequence = 0;
+    this.forbiddenTiles = new Map(); // sticky manually forbidden tiles overlay
+    this.pickupTileMultipliers = new Map(); // sticky pickup-value multiplier by tile
+    this.deliveryTileMultipliers = new Map(); // sticky delivery-value multiplier by tile
+    this.manualTasks = [];
+    this.manualTaskSequence = 0;
     this.events = [];
     this.ready = false; // mark that initial beliefs have been initiated
     this.dirty = true; // quickly note that something about the state has changed and should be reflected in planner
@@ -86,6 +106,202 @@ export class BeliefState {
   pushEvent(type, payload = {}) { // add an event payload to the events list, 
     this.events.push(eventPayload(type, payload));
   }
+
+  pushChatMessage(message) {
+    const entry = {
+      chatId: ++this.chatSequence,
+      ...chatPayload(message),
+      receivedAt: Date.now()
+    };
+
+    this.chatInbox.push(entry);
+    if (this.chatInbox.length > 50) {
+      this.chatInbox.splice(0, this.chatInbox.length - 50);
+    }
+
+    this.markDirty();
+    return entry;
+  }
+
+  pendingChatMessages(sinceChatId = 0, limit = 1) {
+    const afterId = Math.max(0, Number(sinceChatId) || 0);
+    const maxCount = Math.max(0, Number(limit) || 0);
+    if (maxCount === 0) return [];
+    return this.chatInbox.filter((message) => Number(message.chatId ?? 0) > afterId).slice(0, maxCount);
+  }
+
+  recentChatMessages(limit = 10) {
+    const count = Math.max(0, Number(limit) || 0);
+    if (count === 0) return [];
+    return this.chatInbox.slice(-count);
+  }
+
+  pushManualTask(task = {}) {
+    const ttl = Math.max(1, Number(task.expiresTicks ?? 30) || 30);
+    const entry = {
+      id: ++this.manualTaskSequence,
+      type: String(task.type ?? "manual_task"),
+      sourceChatId: Number(task.sourceChatId ?? 0) || null,
+      senderId: task.senderId ?? null,
+      createdAtTick: this.time,
+      expiresAtTick: this.time + ttl,
+      priority: String(task.priority ?? "override_once"),
+      payload: task.payload ?? {}
+    };
+    this.manualTasks.push(entry);
+    this.pushEvent("MANUAL_TASK_ADDED", {
+      taskId: entry.id,
+      taskType: entry.type,
+      priority: entry.priority
+    });
+    this.markDirty();
+    return entry;
+  }
+
+  setForbiddenTile(position, meta = {}) {
+    const cell = roundTilePosition(position);
+    const key = positionKey(cell);
+    const current = this.forbiddenTiles.get(key);
+    const entry = {
+      x: cell.x,
+      y: cell.y,
+      reason: String(meta.reason ?? current?.reason ?? "manual_forbidden_tile"),
+      sourceChatId: Number(meta.sourceChatId ?? current?.sourceChatId ?? 0) || null,
+      senderId: meta.senderId ?? current?.senderId ?? null,
+      createdAtTick: Number(current?.createdAtTick ?? this.time)
+    };
+    this.forbiddenTiles.set(key, entry);
+    this.pushEvent("FORBIDDEN_TILE_ADDED", { ...entry });
+    this.markDirty();
+    return entry;
+  }
+
+  removeForbiddenTile(position, meta = {}) {
+    const cell = roundTilePosition(position);
+    const key = positionKey(cell);
+    const existing = this.forbiddenTiles.get(key);
+    if (!existing) return null;
+    this.forbiddenTiles.delete(key);
+    this.pushEvent("FORBIDDEN_TILE_REMOVED", {
+      ...existing,
+      removedAtTick: this.time,
+      removedBy: meta.senderId ?? null,
+      sourceChatId: Number(meta.sourceChatId ?? 0) || existing.sourceChatId || null
+    });
+    this.markDirty();
+    return existing;
+  }
+
+  isForbiddenTile(position) {
+    return this.forbiddenTiles.has(positionKey(roundTilePosition(position)));
+  }
+
+  listForbiddenTiles() {
+    return [...this.forbiddenTiles.values()].map((tile) => ({ ...tile }));
+  }
+
+  setPickupTileMultiplier(position, multiplier, meta = {}) {
+    const cell = roundTilePosition(position);
+    const key = positionKey(cell);
+    const factor = Number(multiplier);
+    if (!Number.isFinite(factor) || factor <= 0) return null;
+    const current = this.pickupTileMultipliers.get(key);
+    const entry = {
+      x: cell.x,
+      y: cell.y,
+      multiplier: factor,
+      reason: String(meta.reason ?? current?.reason ?? "pickup_tile_multiplier"),
+      sourceChatId: Number(meta.sourceChatId ?? current?.sourceChatId ?? 0) || null,
+      senderId: meta.senderId ?? current?.senderId ?? null,
+      createdAtTick: Number(current?.createdAtTick ?? this.time)
+    };
+    this.pickupTileMultipliers.set(key, entry);
+    this.pushEvent("PICKUP_MULTIPLIER_SET", { ...entry });
+    this.markDirty();
+    return entry;
+  }
+
+  removePickupTileMultiplier(position, meta = {}) {
+    const cell = roundTilePosition(position);
+    const key = positionKey(cell);
+    const existing = this.pickupTileMultipliers.get(key);
+    if (!existing) return null;
+    this.pickupTileMultipliers.delete(key);
+    this.pushEvent("PICKUP_MULTIPLIER_REMOVED", {
+      ...existing,
+      removedAtTick: this.time,
+      removedBy: meta.senderId ?? null,
+      sourceChatId: Number(meta.sourceChatId ?? 0) || existing.sourceChatId || null
+    });
+    this.markDirty();
+    return existing;
+  }
+
+  setDeliveryTileMultiplier(position, multiplier, meta = {}) {
+    const cell = roundTilePosition(position);
+    const key = positionKey(cell);
+    const factor = Number(multiplier);
+    if (!Number.isFinite(factor) || factor <= 0) return null;
+    const current = this.deliveryTileMultipliers.get(key);
+    const entry = {
+      x: cell.x,
+      y: cell.y,
+      multiplier: factor,
+      reason: String(meta.reason ?? current?.reason ?? "delivery_tile_multiplier"),
+      sourceChatId: Number(meta.sourceChatId ?? current?.sourceChatId ?? 0) || null,
+      senderId: meta.senderId ?? current?.senderId ?? null,
+      createdAtTick: Number(current?.createdAtTick ?? this.time)
+    };
+    this.deliveryTileMultipliers.set(key, entry);
+    this.pushEvent("DELIVERY_MULTIPLIER_SET", { ...entry });
+    this.markDirty();
+    return entry;
+  }
+
+  removeDeliveryTileMultiplier(position, meta = {}) {
+    const cell = roundTilePosition(position);
+    const key = positionKey(cell);
+    const existing = this.deliveryTileMultipliers.get(key);
+    if (!existing) return null;
+    this.deliveryTileMultipliers.delete(key);
+    this.pushEvent("DELIVERY_MULTIPLIER_REMOVED", {
+      ...existing,
+      removedAtTick: this.time,
+      removedBy: meta.senderId ?? null,
+      sourceChatId: Number(meta.sourceChatId ?? 0) || existing.sourceChatId || null
+    });
+    this.markDirty();
+    return existing;
+  }
+
+  pickupMultiplierAt(position) {
+    const key = positionKey(roundTilePosition(position));
+    return Number(this.pickupTileMultipliers.get(key)?.multiplier ?? 1);
+  }
+
+  deliveryMultiplierAt(position) {
+    const key = positionKey(roundTilePosition(position));
+    return Number(this.deliveryTileMultipliers.get(key)?.multiplier ?? 1);
+  }
+
+  clearExpiredManualTasks() {
+    const previousLength = this.manualTasks.length;
+    this.manualTasks = this.manualTasks.filter((task) => Number(task.expiresAtTick ?? -1) > this.time);
+    if (this.manualTasks.length !== previousLength) this.markDirty();
+  }
+
+  peekManualTask() {
+    this.clearExpiredManualTasks();
+    return this.manualTasks[0] ?? null;
+  }
+
+  consumeManualTask() {
+    this.clearExpiredManualTasks();
+    const task = this.manualTasks.shift() ?? null;
+    if (task) this.markDirty();
+    return task;
+  }
+
 
   consumeEvents() { // return recently collocted events and empty events list
     const events = this.events;
@@ -109,6 +325,7 @@ export class BeliefState {
     this.decayUnseenAgents(); // decay beliefs on unseen agents
     this.clearExpiredTemporaryBlocks(); // clear beliefs about temporarily blocked tiles which have expired (enough time has passed)
     this.clearExpiredTemporaryBlockedEdges(); // --||-- but for blocked edges
+    this.clearExpiredManualTasks();
     return this.time;
   }
 
@@ -118,6 +335,7 @@ export class BeliefState {
     this.decayUnseenAgents(); // same belief decay as in previous functions
     this.clearExpiredTemporaryBlocks();
     this.clearExpiredTemporaryBlockedEdges();
+    this.clearExpiredManualTasks();
     return this.time;
   }
 
@@ -139,6 +357,7 @@ export class BeliefState {
       this.decayUnseenAgents(); // same belief decay as in previous functions
       this.clearExpiredTemporaryBlocks();
       this.clearExpiredTemporaryBlockedEdges();
+      this.clearExpiredManualTasks();
     }
 
     return this.time;
@@ -293,6 +512,9 @@ export class BeliefState {
     this.width = dimensions.width;
     this.height = dimensions.height;
     this.tiles.clear();
+    this.forbiddenTiles.clear();
+    this.pickupTileMultipliers.clear();
+    this.deliveryTileMultipliers.clear();
 
     for (const tile of tiles) { // iteratively add tiles along with their type
       const position = roundTilePosition(tile);

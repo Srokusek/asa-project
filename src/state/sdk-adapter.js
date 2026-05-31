@@ -1,3 +1,5 @@
+import { CONFIG } from "../config.js";
+
 function asArray(value) {
   return Array.isArray(value) ? value : [];
 }
@@ -21,6 +23,39 @@ function normalizeTileArgs(args) {
   }
 
   return { x, y, type: third };
+}
+
+function normalizeChatArgs(args) {
+  if (args.length === 1 && typeof args[0] === "object") {
+    const message = args[0];
+    return {
+      ...message,
+      fromId: message.fromId ?? message.id ?? message.from ?? null,
+      fromName: message.fromName ?? message.name ?? null,
+      text: String(message.text ?? message.msg ?? message.message ?? "")
+    };
+  }
+
+  if (args.length >= 4) {
+    const [fromId, fromName, msg] = args;
+    return {
+      fromId,
+      fromName,
+      text: String(msg ?? "")
+    };
+  }
+
+  if (args.length === 3) {
+    const [fromId, fromName, msg] = args;
+    return { fromId, fromName, text: String(msg ?? "") };
+  }
+
+  if (args.length === 2) {
+    const [fromId, msg] = args;
+    return { fromId, text: String(msg ?? "") };
+  }
+
+  return { text: String(args[0] ?? "") };
 }
 
 export function registerSdkListeners(socket, beliefs, _loop = null) {
@@ -60,5 +95,14 @@ export function registerSdkListeners(socket, beliefs, _loop = null) {
       parcels: asArray(sensing.parcels),
       time: sensing.time
     });
+  });
+
+  socket.on("msg", (...args) => {
+    const normalized = normalizeChatArgs(args);
+    // ignore non-admin messages
+    if (CONFIG.adminId) {
+      if (String(normalized.fromId ?? "") !== String(CONFIG.adminId)) return;
+    }
+    beliefs.pushChatMessage(normalized);
   });
 }

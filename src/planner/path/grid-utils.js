@@ -328,6 +328,9 @@ export function parseMap(json) {
     recentPositions: Array.isArray(input.recentPositions) ? input.recentPositions.map(copyPosition) : [],
     temporaryBlockedCells: input.temporaryBlockedCells ?? null,
     temporaryBlockedEdges: input.temporaryBlockedEdges ?? null,
+    forbiddenTiles: normalizeObservationMap(input.forbiddenTiles),
+    pickupTileMultipliers: normalizeObservationMap(input.pickupTileMultipliers),
+    deliveryTileMultipliers: normalizeObservationMap(input.deliveryTileMultipliers),
     visitedPositions: normalizeObservationMap(input.visitedPositions),
     visitedEdges: normalizeObservationMap(input.visitedEdges),
     scoutTargetAttempts: normalizeObservationMap(input.scoutTargetAttempts),
@@ -400,15 +403,27 @@ function isTemporarilyBlockedCell(state, position) {
   return true;
 }
 
+function isForbiddenTile(state, position) {
+  const key = positionKey(position);
+  const forbidden = state.forbiddenTiles;
+  if (!forbidden) return false;
+  if (forbidden instanceof Map) return forbidden.has(key);
+  if (Array.isArray(forbidden)) {
+    return forbidden.some((entry) => positionKey(entry.position ?? entry) === key);
+  }
+  return Boolean(forbidden[key]);
+}
+
 export function isWalkable(state, position) {
   const cell = getCell(state, position);
-  return !!cell && !cell.blocked && !isTemporarilyBlockedCell(state, position);
+  return !!cell && !cell.blocked && !isTemporarilyBlockedCell(state, position) && !isForbiddenTile(state, position);
 }
 
 export function isMoveAllowed(state, from, to) {
   const fromCell = getCell(state, from);
   const toCell = getCell(state, to);
   if (!fromCell || fromCell.blocked || !toCell || toCell.blocked) return false;
+  if (isForbiddenTile(state, from) || isForbiddenTile(state, to)) return false;
   if (isTemporarilyBlockedCell(state, from) || isTemporarilyBlockedCell(state, to)) return false;
   if (isTemporarilyBlockedEdge(state, from, to)) return false;
 

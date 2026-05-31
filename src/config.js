@@ -20,6 +20,7 @@ export const CONFIG = {
   token: process.env.TOKEN ?? "",
   agentName: process.env.AGENT_NAME ?? "PlannerAgent",
   logLevel: process.env.LOG_LEVEL ?? "info",
+  adminId: process.env.ADMIN_ID ?? null,
   actionDelayMs: numberFromEnv("ACTION_DELAY_MS", 100),
   telemetryEnabled: booleanFromEnv("TELEMETRY_ENABLED", false),
   telemetryFile: process.env.TELEMETRY_FILE ?? "telemetry.jsonl",

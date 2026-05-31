@@ -97,6 +97,29 @@ export function packageDecayRate(green, fallbackRate) {
   return asNumber(green.package?.decayRate, fallbackRate);
 }
 
+export function pickupMultiplierAt(state, position) {
+  const key = positionKey(copyPosition(position));
+  const raw = state.pickupTileMultipliers?.[key];
+  const value = asNumber(raw?.multiplier ?? raw, 1);
+  return Number.isFinite(value) && value > 0 ? value : 1;
+}
+
+export function deliveryMultiplierAt(state, position) {
+  const key = positionKey(copyPosition(position));
+  const raw = state.deliveryTileMultipliers?.[key];
+  const value = asNumber(raw?.multiplier ?? raw, 1);
+  return Number.isFinite(value) && value > 0 ? value : 1;
+}
+
+function bestDeliveryMultiplier(state) {
+  if (!Array.isArray(state.reds) || state.reds.length === 0) return 1;
+  let best = 1;
+  for (const red of state.reds) {
+    best = Math.max(best, deliveryMultiplierAt(state, red.position));
+  }
+  return best;
+}
+
 export function hasAvailablePackage(green, config) {
   if (!green.package || green.package.carriedBy) return false;
   if (packageConfidence(green) < config.minParcelConfidence) return false;
@@ -155,7 +178,8 @@ export function currentGreenValue(state, green, config) {
   const decayRate = packageDecayRate(green, config.decayRate);
   const currentValue = packageReward(green, config.meanPackageValue);
   const deliveryAwareValue = Math.max(0, currentValue - decayRate * etaTotal);
-  return packageConfidence(green) * winProbability(state, green, etaMe, config) * deliveryAwareValue;
+  const adjustedValue = deliveryAwareValue * pickupMultiplierAt(state, green.position) * bestDeliveryMultiplier(state);
+  return packageConfidence(green) * winProbability(state, green, etaMe, config) * adjustedValue;
 }
 
 export function futureGreenValue(state, green, config) {
@@ -233,8 +257,9 @@ export function selectCandidateGreens(state, greenScores, config) {
       const deliveryDistance = nearestRedDistance(state, green.position);
       const reachableFromMe = Number.isFinite(pickupDistance);
       const reachableRedAfterPickup = Number.isFinite(deliveryDistance);
+      const multiplier = pickupMultiplierAt(state, green.position) * bestDeliveryMultiplier(state);
       const estimatedDeliveredValue = reachableFromMe && reachableRedAfterPickup
-        ? reward - packageDecayRate(green, config.decayRate) * (pickupDistance + deliveryDistance)
+        ? (reward - packageDecayRate(green, config.decayRate) * (pickupDistance + deliveryDistance)) * multiplier
         : 0;
 
       if (!reachableFromMe || !reachableRedAfterPickup) {
@@ -279,6 +304,7 @@ export function selectCandidateGreens(state, greenScores, config) {
         distanceToRed: deliveryDistance,
         pickupDistance,
         deliveryDistance,
+        adjustedReward: reward * multiplier,
         estimatedDeliveredValue
       };
     })
@@ -345,6 +371,7 @@ export function selectCandidateGreens(state, greenScores, config) {
       id: entry.green.id,
       position: copyPosition(entry.green.position),
       reward: packageReward(entry.green, config.meanPackageValue),
+      adjustedReward: entry.adjustedReward,
       confidence: packageConfidence(entry.green),
       pickupDistance: entry.pickupDistance,
       deliveryDistance: entry.deliveryDistance,

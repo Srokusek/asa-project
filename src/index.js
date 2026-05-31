@@ -6,8 +6,6 @@ import { BeliefState } from "./state/belief-state.js";
 import { registerSdkListeners } from "./state/sdk-adapter.js";
 import { createLogger } from "./utils/logger.js";
 
-console.log("[DEBUG HOST]", CONFIG.host);
-console.log("[DEBUG TOKEN END]", CONFIG.token.slice(-10));
 const logger = createLogger(CONFIG.logLevel);
 const socket = DjsConnect(CONFIG.host, CONFIG.token, CONFIG.agentName);
 const beliefs = new BeliefState(CONFIG);

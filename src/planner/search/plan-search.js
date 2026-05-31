@@ -2,11 +2,13 @@ import { DEFAULT_PARAMS } from "../default-params.js";
 import { asNumber, clamp, copyPosition } from "../path/grid-utils.js";
 import { getOracleEdge } from "../path/distance-oracle.js";
 import {
+  deliveryMultiplierAt,
   hasAvailablePackage,
   nearestRedDistance,
   packageConfidence,
   packageDecayRate,
   packageReward,
+  pickupMultiplierAt,
   rankingDistance,
   winProbability
 } from "../scoring/green-scorer.js";
@@ -17,10 +19,13 @@ export function initialPlan(state) {
   const carriedPackages = (state.carriedPackages ?? []).map((pkg) => ({
     greenId: pkg.greenId ?? "CARRIED",
     packageId: String(pkg.packageId ?? pkg.id),
-    valueAtPickup: asNumber(pkg.valueAtPickup ?? pkg.value, 0),
+    valueAtPickup:
+      asNumber(pkg.valueAtPickup ?? pkg.value, 0) *
+      pickupMultiplierAt(state, pkg.pickupPosition ?? { x: 0, y: 0 }),
     pickupTime: asNumber(pkg.pickupTime, asNumber(state.time, 0)),
     decayRate: asNumber(pkg.decayRate, state.params?.decayRate ?? DEFAULT_PARAMS.decayRate),
-    confidence: clamp(asNumber(pkg.confidence, 1), 0, 1)
+    confidence: clamp(asNumber(pkg.confidence, 1), 0, 1),
+    pickupPosition: copyPosition(pkg.pickupPosition ?? { x: 0, y: 0 })
   }));
 
   return {
@@ -41,7 +46,8 @@ export function packageValueAtPickup(state, green, pickupTime, config) {
   const currentValue = packageReward(green, config.meanPackageValue);
   const decayRate = packageDecayRate(green, config.decayRate);
   const elapsed = Math.max(0, pickupTime - asNumber(state.time, 0));
-  return packageConfidence(green) * Math.max(0, currentValue - decayRate * elapsed);
+  const pickupMultiplier = pickupMultiplierAt(state, green.position);
+  return packageConfidence(green) * Math.max(0, currentValue - decayRate * elapsed) * pickupMultiplier;
 }
 
 export function beatsEnemiesToGreen(state, green, etaMe, config) {
@@ -87,17 +93,19 @@ export function extendToGreen(plan, green, state, oracle, config) {
         valueAtPickup,
         pickupTime: arrivalTime,
         decayRate,
-        confidence: packageConfidence(green)
+        confidence: packageConfidence(green),
+        pickupPosition: copyPosition(green.position)
       }
     ],
     pickedGreenIds
   };
 }
 
-export function computeDeliveredValue(pickedPackages, deliveryTime) {
+export function computeDeliveredValue(pickedPackages, deliveryTime, deliveryPosition, state) {
+  const deliveryMultiplier = deliveryMultiplierAt(state, deliveryPosition);
   return pickedPackages.reduce((sum, pkg) => {
     const elapsed = Math.max(0, deliveryTime - pkg.pickupTime);
-    return sum + Math.max(0, pkg.valueAtPickup - pkg.decayRate * elapsed);
+    return sum + Math.max(0, pkg.valueAtPickup - pkg.decayRate * elapsed) * deliveryMultiplier;
   }, 0);
 }
 
@@ -108,7 +116,7 @@ export function extendToRed(plan, red, _state, oracle, _config) {
   if (!edge || !Number.isFinite(edge.cost)) return null;
 
   const deliveryTime = plan.time + edge.cost;
-  const delivered = computeDeliveredValue(plan.pickedPackages, deliveryTime);
+  const delivered = computeDeliveredValue(plan.pickedPackages, deliveryTime, red.position, _state);
 
   return {
     ...plan,
@@ -133,7 +141,7 @@ export function carriedPotential(plan, _state, oracle, config = null) {
     const edge = getOracleEdge(oracle, plan.currentId, red.id);
     if (!edge || !Number.isFinite(edge.cost)) continue;
     const deliveryTime = plan.time + edge.cost;
-    const delivered = computeDeliveredValue(plan.pickedPackages, deliveryTime);
+    const delivered = computeDeliveredValue(plan.pickedPackages, deliveryTime, red.position, _state);
     best = Math.max(best, delivered - moveWeight * edge.cost);
   }
   return Number.isFinite(best) ? best : 0;
@@ -159,7 +167,7 @@ export function bestCompletionValue(plan, reds, state, oracle, config) {
     const edge = getOracleEdge(oracle, plan.currentId, red.id);
     if (!edge || !Number.isFinite(edge.cost)) continue;
     const deliveryTime = plan.time + edge.cost;
-    const delivered = computeDeliveredValue(plan.pickedPackages, deliveryTime);
+    const delivered = computeDeliveredValue(plan.pickedPackages, deliveryTime, red.position, state);
     const totalMoveCost = plan.moveCost + edge.cost;
     best = Math.max(best, plan.deliveredScore + delivered - config.moveWeight * totalMoveCost);
   }

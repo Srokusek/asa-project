@@ -14,11 +14,48 @@ export class Executor {
       if (action.type === "move") return await this.move(action);
       if (action.type === "pick_up") return await this.pickUp(action);
       if (action.type === "put_down") return await this.putDown(action.parcels === "all" ? undefined : action.parcels);
+      if (action.type === "write_message" || action.type === "say" || action.type === "shout") {
+        return await this.writeMessage(action);
+      }
       this.beliefs.pushEvent("UNKNOWN_ACTION", { action });
       this.telemetry?.record("unknown_action", { action, result: false });
       return false;
     } finally {
       this.busy = false;
+    }
+  }
+
+  async writeMessage(action = {}) {
+    const toId = action.toId ?? action.targetId ?? action.recipientId ?? null;
+    const message = String(action.message ?? action.msg ?? action.text ?? "");
+    const shouldShout = action.type === "shout" || action.shout === true || !toId;
+
+    if (!message) {
+      this.beliefs.pushEvent("MESSAGE_FAILED", { reason: "empty_message", action });
+      this.telemetry?.record("message_failed", { action, result: false, reason: "empty_message" });
+      return false;
+    }
+
+    try {
+      const result = shouldShout ? await this.socket.emitShout(message) : await this.socket.emitSay(toId, message);
+      this.beliefs.pushEvent("MESSAGE_SENT", { toId, message, shouted: shouldShout, result });
+      this.telemetry?.record("message_sent", {
+        action,
+        result,
+        toId,
+        shouted: shouldShout
+      });
+      return result;
+    } catch (error) {
+      this.beliefs.pushEvent("MESSAGE_FAILED", { toId, message, shouted: shouldShout, error: error.message });
+      this.telemetry?.record("message_failed", {
+        action,
+        result: false,
+        toId,
+        shouted: shouldShout,
+        error: error.message
+      });
+      return false;
     }
   }
 

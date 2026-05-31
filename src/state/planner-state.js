@@ -162,7 +162,11 @@ export function buildPlannerState(beliefs, config) {
     valueAtPickup: Number(parcel.valueAtPickup ?? 0),
     pickupTime: Number(parcel.pickupTime ?? beliefs.time),
     decayRate: Number(parcel.decayRate ?? config.planner.decayRate),
-    confidence: Number(parcel.confidence ?? 1)
+    confidence: Number(parcel.confidence ?? 1),
+    pickupPosition: {
+      x: Number(parcel.x ?? beliefs.me?.x ?? 0),
+      y: Number(parcel.y ?? beliefs.me?.y ?? 0)
+    }
   }));
 
   // return parsed map with all of the relevant information normalized
@@ -193,6 +197,9 @@ export function buildPlannerState(beliefs, config) {
     scoutTargetAttempts: Object.fromEntries(beliefs.scoutTargetAttempts ?? []),
     recentScoutTargets: beliefs.recentScoutTargets,
     lastDeliveryPosition: beliefs.lastDeliveryPosition,
+    forbiddenTiles: Object.fromEntries(beliefs.forbiddenTiles ?? []),
+    pickupTileMultipliers: Object.fromEntries(beliefs.pickupTileMultipliers ?? []),
+    deliveryTileMultipliers: Object.fromEntries(beliefs.deliveryTileMultipliers ?? []),
     lastObservedAtByTile: Object.fromEntries(beliefs.lastObservedAtByTile ?? []),
     lastObservedAtByGreen: Object.fromEntries(beliefs.lastObservedAtByGreen ?? []),
     sensingRange: config.planner.sensingRange,
