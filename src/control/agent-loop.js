@@ -38,7 +38,13 @@ const IDLE_REPLAN_EVENTS = new Set([
   "MAP_READY"
 ]);
 
-const TARGET_PLAN_MODES = new Set(["PICKUP_DELIVERY", "DELIVERY_ONLY", "PICKUP_ONLY", "OPPORTUNISTIC_PICKUP"]);
+const TARGET_PLAN_MODES = new Set([
+  "PICKUP_DELIVERY",
+  "PICKUP_DELIVERY_UNIFIED",
+  "DELIVERY_ONLY",
+  "PICKUP_ONLY",
+  "OPPORTUNISTIC_PICKUP"
+]);
 const INVALID_TARGET_PLAN_LIMIT = 3;
 const SCOUT_PLAN_MODES = new Set([
   "SCOUT_UNIFIED",
@@ -641,6 +647,7 @@ export class AgentLoop {
                 ...(plannerState.carriedPackages ?? []),
                 {
                   greenId: `OP_${parcelId}`,
+                  pickupSourceId: `L_${parcelPosition.x}_${parcelPosition.y}`,
                   packageId: parcelId,
                   valueAtPickup,
                   pickupTime: Number(this.beliefs.time ?? 0) + Math.max(0, edgeToParcel.cost),

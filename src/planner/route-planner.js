@@ -58,6 +58,7 @@ import {
   extendToRed,
   finalObjective,
   findBestSequence,
+  findBestSequenceUnderBudget,
   initialPlan,
   packageValueAtPickup,
   partialPlanPriority,
@@ -131,9 +132,25 @@ export { buildMapProfile };
 export { sigmoid, winProbability, currentGreenValue, computeGreenScore, computeGreenScores, selectCandidateGreens };
 
 export function buildPointsOfInterest(state, candidateGreens) {
+  const carriedPickupAnchors = Array.from(
+    new Map(
+      (state.carriedPackages ?? [])
+        .filter((pkg) => pkg?.pickupSourceId && Number.isFinite(pkg?.pickupPosition?.x) && Number.isFinite(pkg?.pickupPosition?.y))
+        .map((pkg) => [
+          String(pkg.pickupSourceId),
+          {
+            id: String(pkg.pickupSourceId),
+            type: "anchor",
+            position: copyPosition(pkg.pickupPosition)
+          }
+        ])
+    ).values()
+  );
+
   return [
     { id: "START", type: "start", position: copyPosition(state.me.position) },
     ...candidateGreens.map((green) => ({ ...green, type: "green", position: copyPosition(green.position) })),
+    ...carriedPickupAnchors,
     ...state.reds.map((red) => ({ ...red, type: "red", position: copyPosition(red.position) }))
   ];
 }
@@ -161,6 +178,7 @@ export {
   extendToRed,
   finalObjective,
   findBestSequence,
+  findBestSequenceUnderBudget,
   initialPlan,
   packageValueAtPickup,
   partialPlanPriority,
@@ -169,7 +187,13 @@ export {
 
 export { reconstructGridPath };
 
-const TARGET_PLAN_MODES = new Set(["PICKUP_DELIVERY", "DELIVERY_ONLY", "PICKUP_ONLY", "OPPORTUNISTIC_PICKUP"]);
+const TARGET_PLAN_MODES = new Set([
+  "PICKUP_DELIVERY",
+  "PICKUP_DELIVERY_UNIFIED",
+  "DELIVERY_ONLY",
+  "PICKUP_ONLY",
+  "OPPORTUNISTIC_PICKUP"
+]);
 
 function routePlanWouldHaveExecutableActions(routePlan) {
   if (!routePlan?.oracle || !Array.isArray(routePlan.sequence)) return false;
@@ -337,11 +361,13 @@ export function buildPickupOnlyPlan(state, candidateGreens, oracle, config, prof
       pickedPackages: [
         {
           greenId: green.id,
+          pickupSourceId: `L_${green.position.x}_${green.position.y}`,
           packageId: String(green.package.id),
           valueAtPickup,
           pickupTime,
           decayRate: packageDecayRate(green, config.decayRate),
-          confidence: packageConfidence(green)
+          confidence: packageConfidence(green),
+          pickupPosition: copyPosition(green.position)
         }
       ],
       pickedGreenIds: new Set([green.id]),
@@ -410,6 +436,37 @@ function buildPickupDeliveryPlan(state, profile, config, greenScores, candidateG
   return routePlan;
 }
 
+function buildUnifiedPickupDeliveryPlan(state, profile, config, greenScores, candidateGreens) {
+  const points = buildPointsOfInterest(state, candidateGreens);
+  const oracle = buildDistanceOracle(state, points);
+  const result = findBestSequenceUnderBudget(state, points, oracle, greenScores, config);
+  const bestPlan = result.plan;
+  const path = reconstructGridPath(bestPlan.sequence, oracle);
+  const routePlan = baseRoutePlan({
+    mode: "PICKUP_DELIVERY_UNIFIED",
+    sequence: bestPlan.sequence,
+    path,
+    value: bestPlan.value,
+    plan: bestPlan,
+    profile,
+    config,
+    greenScores,
+    candidateGreens,
+    oracle,
+    state,
+    invalidPlanDetected: Boolean(bestPlan.failed),
+    fallbackStage: "unified_full_plan"
+  });
+
+  return {
+    ...routePlan,
+    unifiedOutcome: result.outcome,
+    unifiedTimeoutHit: Boolean(result.timeoutHit),
+    unifiedElapsedMs: result.elapsedMs,
+    redShortlistStats: result.stats ?? null
+  };
+}
+
 export function replan(state) {
   const planningState = parseMap(state);
   const profile = buildMapProfile(planningState);
@@ -438,47 +495,73 @@ export function replan(state) {
   const visiblePackages = visibleAvailablePackages(planningState, config);
   let invalidPlanDetected = false;
   let candidateDiagnostics = selectionDiagnostics;
+  const useUnifiedPickupDelivery = Boolean(config.useUnifiedPickupDelivery);
 
-  // consider only DELIVERY_ONLY plans when we picked up a parcel
-  // could add additional control here for other constraints
-  // Problem -> if we do not use deliver only plans, the delivery brakes and replans take a long time
-  if ((planningState.carriedPackages ?? []).length > 0) {
-    const deliveryPlan = buildDeliveryOnlyPlan(planningState, profile, config, greenScores);
-    if (deliveryPlan) return deliveryPlan;
-  }
+  if (useUnifiedPickupDelivery && ((planningState.carriedPackages ?? []).length > 0 || candidateGreens.length > 0)) {
+    const unifiedPlan = buildUnifiedPickupDeliveryPlan(
+      planningState,
+      profile,
+      config,
+      greenScores,
+      candidateGreens
+    );
 
-  // if we are not carrying any packages and have some candidate packages -> create full plan
-  if ((planningState.carriedPackages ?? []).length === 0 && candidateGreens.length > 0) {
-    const fullPlan = buildPickupDeliveryPlan(planningState, profile, config, greenScores, candidateGreens);
-    if (fullPlan && !fullPlan.invalidPlanDetected && !isInvalidNonIdleRoutePlan(fullPlan)) {
+    if (!unifiedPlan.plan.failed && !isInvalidNonIdleRoutePlan(unifiedPlan)) {
       return {
-        ...fullPlan,
+        ...unifiedPlan,
         candidateDiagnostics
       };
     }
 
-    // if we couldn't find a full pickup delivery plan, 
     invalidPlanDetected = true;
     candidateDiagnostics = [
       ...selectionDiagnostics,
-      ...diagnoseCandidateGreens(planningState, candidateGreens, fullPlan.oracle, config)
+      ...diagnoseCandidateGreens(planningState, candidateGreens, unifiedPlan.oracle, config)
     ];
-    // try to create a pickupOnlyPlan, only creates one if there are available packages
-    const pickupOnlyPlan = buildPickupOnlyPlan(
-      planningState,
-      candidateGreens,
-      fullPlan.oracle,
-      config,
-      profile,
-      greenScores
-    );
-    if (pickupOnlyPlan) {
-      return {
-        ...pickupOnlyPlan,
-        invalidPlanDetected,
-        fallbackStage: "pickup_only",
-        candidateDiagnostics
-      };
+  }
+
+  if (!useUnifiedPickupDelivery) {
+    // consider only DELIVERY_ONLY plans when we picked up a parcel
+    // could add additional control here for other constraints
+    // Problem -> if we do not use deliver only plans, the delivery brakes and replans take a long time
+    if ((planningState.carriedPackages ?? []).length > 0) {
+      const deliveryPlan = buildDeliveryOnlyPlan(planningState, profile, config, greenScores);
+      if (deliveryPlan) return deliveryPlan;
+    }
+
+    // if we are not carrying any packages and have some candidate packages -> create full plan
+    if ((planningState.carriedPackages ?? []).length === 0 && candidateGreens.length > 0) {
+      const fullPlan = buildPickupDeliveryPlan(planningState, profile, config, greenScores, candidateGreens);
+      if (fullPlan && !fullPlan.invalidPlanDetected && !isInvalidNonIdleRoutePlan(fullPlan)) {
+        return {
+          ...fullPlan,
+          candidateDiagnostics
+        };
+      }
+
+      // if we couldn't find a full pickup delivery plan,
+      invalidPlanDetected = true;
+      candidateDiagnostics = [
+        ...selectionDiagnostics,
+        ...diagnoseCandidateGreens(planningState, candidateGreens, fullPlan.oracle, config)
+      ];
+      // try to create a pickupOnlyPlan, only creates one if there are available packages
+      const pickupOnlyPlan = buildPickupOnlyPlan(
+        planningState,
+        candidateGreens,
+        fullPlan.oracle,
+        config,
+        profile,
+        greenScores
+      );
+      if (pickupOnlyPlan) {
+        return {
+          ...pickupOnlyPlan,
+          invalidPlanDetected,
+          fallbackStage: "pickup_only",
+          candidateDiagnostics
+        };
+      }
     }
   }
 

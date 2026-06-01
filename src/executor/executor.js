@@ -141,6 +141,7 @@ export class Executor {
             this.beliefs.carriedParcels.set(picked.id, {
               id: picked.id,
               greenId: action?.targetId,
+              pickupSourceId: `L_${Number(parcel.x ?? action?.at?.x ?? this.beliefs.me?.x ?? 0)}_${Number(parcel.y ?? action?.at?.y ?? this.beliefs.me?.y ?? 0)}`,
               valueAtPickup: rewardNow,
               pickupTime: this.beliefs.time,
               decayRate: this.config.planner.decayRate,
@@ -154,6 +155,7 @@ export class Executor {
             this.beliefs.carriedParcels.set(picked.id, {
               id: picked.id,
               greenId: action?.targetId,
+              pickupSourceId: `L_${Number(action?.at?.x ?? this.beliefs.me?.x ?? 0)}_${Number(action?.at?.y ?? this.beliefs.me?.y ?? 0)}`,
               valueAtPickup: pickedReward,
               pickupTime: this.beliefs.time,
               decayRate: this.config.planner.decayRate,

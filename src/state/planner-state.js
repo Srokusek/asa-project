@@ -158,6 +158,9 @@ export function buildPlannerState(beliefs, config) {
   // collect information about packages the agent itself is currently carrying
   const carriedPackages = [...beliefs.carriedParcels.values()].map((parcel) => ({
     greenId: parcel.greenId ?? "CARRIED",
+    pickupSourceId:
+      parcel.pickupSourceId ??
+      `L_${Number(parcel.x ?? beliefs.me?.x ?? 0)}_${Number(parcel.y ?? beliefs.me?.y ?? 0)}`,
     packageId: parcel.id,
     valueAtPickup: Number(parcel.valueAtPickup ?? 0),
     pickupTime: Number(parcel.pickupTime ?? beliefs.time),
