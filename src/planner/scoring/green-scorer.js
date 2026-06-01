@@ -65,23 +65,10 @@ export function winProbability(state, green, etaMe, config) {
 
 function generationProbabilityForGreen(state, config) {
   const greenCount = Math.max(1, state.greens.length);
-  if (config.generationProbability !== null && config.generationProbability !== undefined) {
-    return clamp(asNumber(config.generationProbability, 0), 0, 1) / greenCount;
-  }
-  if (config.generationMeanTime !== null && config.generationMeanTime !== undefined) {
-    return 1 / Math.max(1, asNumber(config.generationMeanTime, 1)) / greenCount;
-  }
   return 1 / greenCount;
 }
 
 function expectedGenerationWait(config) {
-  if (config.generationMeanTime !== null && config.generationMeanTime !== undefined) {
-    return Math.max(0, asNumber(config.generationMeanTime, 0));
-  }
-  if (config.generationProbability !== null && config.generationProbability !== undefined) {
-    const p = clamp(asNumber(config.generationProbability, 0), 0, 1);
-    return p > EPSILON ? 1 / p : Infinity;
-  }
   return 0;
 }
 

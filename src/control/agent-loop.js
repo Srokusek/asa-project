@@ -1076,8 +1076,8 @@ export class AgentLoop {
       reason: replanCause
     });
 
-    if (elapsed > this.config.planner.maxPlanningTimeMs) {
-      this.logger.warn("planning exceeded budget", { elapsedMs: elapsed, budgetMs: this.config.planner.maxPlanningTimeMs });
+    if (elapsed > this.config.planner.planningBudgetMs) {
+      this.logger.warn("planning exceeded budget", { elapsedMs: elapsed, budgetMs: this.config.planner.planningBudgetMs });
     }
   }
 

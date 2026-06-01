@@ -37,8 +37,6 @@ export const CONFIG = {
     meanPackageValue: 10,
     packageVariance: 0,
     decayRate: 1,
-    generationMeanTime: null,
-    generationProbability: null,
     kSmoothMax: 0.25,
     kWin: 1,
     rhoGeneration: 0.1,
@@ -69,6 +67,8 @@ export const CONFIG = {
     failedScoutTargetCooldownTicks: 40,
     coverageSectorSize: 5,
     returnToRedWeight: 0.5,
+
+    // parameters used by unified scout
     unifiedScoutCheckpointCount: 24,
     unifiedScoutStalenessWeight: 1.0,
     unifiedScoutDistanceWeight: 0.5,
@@ -77,8 +77,6 @@ export const CONFIG = {
     unifiedScoutRepeatSectorPenalty: 10,
     trapPenalty: 10000,
     planningBudgetMs: 30,
-    hardPlanningBudgetMs: 100,
-    mazeObstacleDensityThreshold: 0.25,
     enableEdgeTemporaryBlocks: true,
     temporaryEdgeBlockTtlTicks: 2,
     maxRepeatedBlockedMovesBeforeReplan: 2,
@@ -88,8 +86,6 @@ export const CONFIG = {
     opportunisticMinGain: 5,
     opportunisticCongestionPenalty: 8,
     targetCongestionPenalty: 0,
-    deliveryUrgencyWeight: 0,
-    maxPlanningTimeMs: 30
   }
 };
 
