@@ -38,26 +38,21 @@ import {
   computeGreenScore,
   computeGreenScores,
   currentGreenValue,
-  hasAvailablePackage,
   nearestRedDistance,
   packageConfidence,
   packageDecayRate,
   packageReward,
   selectCandidateGreens,
-  sigmoid,
-  winProbability
+  sigmoid
 } from "./scoring/green-scorer.js";
 import {
   bestCompletionValue,
-  betterPlan,
   beatsEnemiesToGreen,
   carriedPotential,
   computeDeliveredValue,
   estimateNearbyPackageBonus,
   extendToGreen,
-  extendToRed,
   finalObjective,
-  findBestSequence,
   findBestSequenceUnderBudget,
   initialPlan,
   packageValueAtPickup,
@@ -69,8 +64,7 @@ import {
   buildScoutCheckpointIndex,
   buildScoutCheckpointSignature,
   buildUnifiedScoutPlan,
-  buildLocalExplorePlan,
-  visibleAvailablePackages
+  buildLocalExplorePlan
 } from "./scout/scout-planner.js";
 
 const EPSILON = 1e-9;
@@ -129,7 +123,7 @@ function rankingDistance(state, from, to) {
 
 export { buildMapProfile };
 
-export { sigmoid, winProbability, currentGreenValue, computeGreenScore, computeGreenScores, selectCandidateGreens };
+export { sigmoid, currentGreenValue, computeGreenScore, computeGreenScores, selectCandidateGreens };
 
 export function buildPointsOfInterest(state, candidateGreens) {
   const carriedPickupAnchors = Array.from(
@@ -170,14 +164,11 @@ export { buildDistanceOracle, getOracleEdge };
 
 export {
   bestCompletionValue,
-  betterPlan,
   carriedPotential,
   computeDeliveredValue,
   estimateNearbyPackageBonus,
   extendToGreen,
-  extendToRed,
   finalObjective,
-  findBestSequence,
   findBestSequenceUnderBudget,
   initialPlan,
   packageValueAtPickup,
@@ -188,10 +179,7 @@ export {
 export { reconstructGridPath };
 
 const TARGET_PLAN_MODES = new Set([
-  "PICKUP_DELIVERY",
   "PICKUP_DELIVERY_UNIFIED",
-  "DELIVERY_ONLY",
-  "PICKUP_ONLY",
   "OPPORTUNISTIC_PICKUP"
 ]);
 
@@ -241,42 +229,6 @@ function buildIdlePlan(state, profile, config, greenScores) {
     oracle,
     state
   });
-}
-
-function buildDeliveryOnlyPlan(state, profile, config, greenScores) {
-  if (!state.reds || state.reds.length === 0 || (state.carriedPackages ?? []).length === 0) return null;
-
-  const points = buildPointsOfInterest(state, []);
-  const oracle = buildDistanceOracle(state, points);
-  // init startPlan which only contains the start
-  const startPlan = initialPlan(state);
-  let bestPlan = null;
-
-  for (const red of points.filter((point) => point.type === "red")) {
-    const deliveredPlan = extendToRed(startPlan, red, state, oracle, config);
-    if (deliveredPlan) {
-      bestPlan = betterPlan(bestPlan, deliveredPlan, state, oracle, config);
-    }
-  }
-
-  if (!bestPlan) return null;
-  const path = reconstructGridPath(bestPlan.sequence, oracle);
-  const routePlan = baseRoutePlan({
-    mode: "DELIVERY_ONLY",
-    sequence: bestPlan.sequence,
-    path,
-    value: planValue(bestPlan, state, oracle, config),
-    plan: bestPlan,
-    profile,
-    config,
-    greenScores,
-    oracle,
-    state,
-    fallbackStage: "full_plan"
-  });
-  if (isInvalidNonIdleRoutePlan(routePlan)) return null;
-
-  return routePlan;
 }
 
 function candidateRejectionReason(diagnostic) {
@@ -336,106 +288,6 @@ function diagnoseCandidateGreens(state, candidateGreens, oracle, config) {
   });
 }
 
-export function buildPickupOnlyPlan(state, candidateGreens, oracle, config, profile, greenScores) {
-  let best = null;
-
-  for (const green of candidateGreens) {
-    if (!hasAvailablePackage(green, config)) continue;
-
-    const edge = getOracleEdge(oracle, "START", green.id);
-    if (!edge || !Number.isFinite(edge.cost)) continue;
-
-    const pickupTime = asNumber(state.time, 0) + edge.cost;
-    const valueAtPickup = packageValueAtPickup(state, green, pickupTime, config);
-    if (valueAtPickup <= EPSILON) continue;
-
-    const win = winProbability(state, green, edge.cost, config);
-    const value = valueAtPickup * win - config.moveWeight * edge.cost;
-    const pickupPlan = {
-      ...initialPlan(state),
-      sequence: ["START", green.id],
-      currentId: green.id,
-      currentPosition: copyPosition(green.position),
-      time: pickupTime,
-      moveCost: edge.cost,
-      pickedPackages: [
-        {
-          greenId: green.id,
-          pickupSourceId: `L_${green.position.x}_${green.position.y}`,
-          packageId: String(green.package.id),
-          valueAtPickup,
-          pickupTime,
-          decayRate: packageDecayRate(green, config.decayRate),
-          confidence: packageConfidence(green),
-          pickupPosition: copyPosition(green.position)
-        }
-      ],
-      pickedGreenIds: new Set([green.id]),
-      deliveredScore: 0,
-      value,
-      incomplete: true,
-      needsDeliveryAfterPickup: true
-    };
-
-    if (!best || value > best.value + EPSILON || (Math.abs(value - best.value) <= EPSILON && edge.cost < best.edgeCost)) {
-      best = { green, edgeCost: edge.cost, plan: pickupPlan, value };
-    }
-  }
-
-  if (!best) return null;
-  const bestEdge = getOracleEdge(oracle, "START", best.green.id, { requirePath: true });
-  if (!bestEdge || !Array.isArray(bestEdge.path) || bestEdge.path.length === 0) return null;
-
-  const routePlan = baseRoutePlan({
-    mode: "PICKUP_ONLY",
-    sequence: ["START", best.green.id],
-    path: bestEdge.path.map(copyPosition),
-    value: best.value,
-    plan: best.plan,
-    profile,
-    config,
-    greenScores,
-    candidateGreens,
-    oracle,
-    state,
-    fallbackStage: "pickup_only"
-  });
-
-  return isInvalidNonIdleRoutePlan(routePlan) ? null : routePlan;
-}
-
-function buildPickupDeliveryPlan(state, profile, config, greenScores, candidateGreens) {
-  const points = buildPointsOfInterest(state, candidateGreens);
-  const oracle = buildDistanceOracle(state, points);
-  const bestPlan = findBestSequence(state, points, oracle, greenScores, config);
-  const path = reconstructGridPath(bestPlan.sequence, oracle);
-  const routePlan = baseRoutePlan({
-    mode: "PICKUP_DELIVERY",
-    sequence: bestPlan.sequence,
-    path,
-    value: bestPlan.value,
-    plan: bestPlan,
-    profile,
-    config,
-    greenScores,
-    candidateGreens,
-    oracle,
-    state,
-    invalidPlanDetected: Boolean(bestPlan.failed || bestPlan.incomplete),
-    fallbackStage: "full_plan"
-  });
-
-  if (bestPlan.failed || bestPlan.incomplete || isInvalidNonIdleRoutePlan(routePlan)) {
-    return {
-      ...routePlan,
-      invalidPlanDetected: true,
-      failureReason: bestPlan.failureReason ?? (bestPlan.incomplete ? "incomplete_sequence" : "invalid_non_idle_plan")
-    };
-  }
-
-  return routePlan;
-}
-
 function buildUnifiedPickupDeliveryPlan(state, profile, config, greenScores, candidateGreens) {
   const points = buildPointsOfInterest(state, candidateGreens);
   const oracle = buildDistanceOracle(state, points);
@@ -492,12 +344,10 @@ export function replan(state) {
   // candidate greens only include possible packages
   const candidateGreens = selectCandidateGreens(planningState, greenScores, config);
   const selectionDiagnostics = planningState.__candidateSelectionDiagnostics ?? [];
-  const visiblePackages = visibleAvailablePackages(planningState, config);
   let invalidPlanDetected = false;
   let candidateDiagnostics = selectionDiagnostics;
-  const useUnifiedPickupDelivery = Boolean(config.useUnifiedPickupDelivery);
 
-  if (useUnifiedPickupDelivery && ((planningState.carriedPackages ?? []).length > 0 || candidateGreens.length > 0)) {
+  if ((planningState.carriedPackages ?? []).length > 0 || candidateGreens.length > 0) {
     const unifiedPlan = buildUnifiedPickupDeliveryPlan(
       planningState,
       profile,
@@ -518,51 +368,6 @@ export function replan(state) {
       ...selectionDiagnostics,
       ...diagnoseCandidateGreens(planningState, candidateGreens, unifiedPlan.oracle, config)
     ];
-  }
-
-  if (!useUnifiedPickupDelivery) {
-    // consider only DELIVERY_ONLY plans when we picked up a parcel
-    // could add additional control here for other constraints
-    // Problem -> if we do not use deliver only plans, the delivery brakes and replans take a long time
-    if ((planningState.carriedPackages ?? []).length > 0) {
-      const deliveryPlan = buildDeliveryOnlyPlan(planningState, profile, config, greenScores);
-      if (deliveryPlan) return deliveryPlan;
-    }
-
-    // if we are not carrying any packages and have some candidate packages -> create full plan
-    if ((planningState.carriedPackages ?? []).length === 0 && candidateGreens.length > 0) {
-      const fullPlan = buildPickupDeliveryPlan(planningState, profile, config, greenScores, candidateGreens);
-      if (fullPlan && !fullPlan.invalidPlanDetected && !isInvalidNonIdleRoutePlan(fullPlan)) {
-        return {
-          ...fullPlan,
-          candidateDiagnostics
-        };
-      }
-
-      // if we couldn't find a full pickup delivery plan,
-      invalidPlanDetected = true;
-      candidateDiagnostics = [
-        ...selectionDiagnostics,
-        ...diagnoseCandidateGreens(planningState, candidateGreens, fullPlan.oracle, config)
-      ];
-      // try to create a pickupOnlyPlan, only creates one if there are available packages
-      const pickupOnlyPlan = buildPickupOnlyPlan(
-        planningState,
-        candidateGreens,
-        fullPlan.oracle,
-        config,
-        profile,
-        greenScores
-      );
-      if (pickupOnlyPlan) {
-        return {
-          ...pickupOnlyPlan,
-          invalidPlanDetected,
-          fallbackStage: "pickup_only",
-          candidateDiagnostics
-        };
-      }
-    }
   }
 
   if ((planningState.carriedPackages ?? []).length === 0 ) {

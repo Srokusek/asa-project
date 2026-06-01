@@ -74,7 +74,6 @@ export const CONFIG = {
     unifiedScoutRepeatSectorPenalty: 10,
     trapPenalty: 10000,
     planningBudgetMs: 100,
-    useUnifiedPickupDelivery: true,
     topKRedCandidates: 5,
     enableEdgeTemporaryBlocks: true,
     temporaryEdgeBlockTtlTicks: 2,
@@ -87,8 +86,8 @@ export const CONFIG = {
     targetCongestionPenalty: 0,
 
     // search parameters
-    beamWidth: 50,
-    maxPickupsBeforeDelivery: 5,
+    beamWidth: 200,
+    topK: 16,
   }
 };
 
@@ -96,7 +95,6 @@ export function choosePlannerConfig(profile = {}, planner = CONFIG.planner) {
   const mode = "CONFIG_STATIC";
   const topK = Math.max(0, Math.min(asFinite(profile.greenCount, 0), asFinite(planner.topK, asFinite(profile.greenCount, 0))));
   const beamWidth = Math.max(1, Math.round(asFinite(planner.beamWidth, 1)));
-  const maxPickupsBeforeDelivery = Math.max(0, Math.round(asFinite(planner.maxPickupsBeforeDelivery, 0)));
   const topKRedCandidates = Math.max(0, Math.round(asFinite(planner.topKRedCandidates, 0)));
   const periodicBase = Math.max(0, Math.round(asFinite(planner.periodicReplanTicks, 0)));
   const periodicReplanTicks =
@@ -107,7 +105,6 @@ export function choosePlannerConfig(profile = {}, planner = CONFIG.planner) {
     mode,
     topK,
     beamWidth,
-    maxPickupsBeforeDelivery,
     topKRedCandidates,
     periodicReplanTicks
   };
