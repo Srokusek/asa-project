@@ -265,7 +265,7 @@ The scoring logic balances:
 Important functions include:
 
 - `currentGreenValue(...)`,
-- `futureGreenValue(...)`,
+- `packageValueAtPickup(...)`,
 - `computeGreenScore(...)`,
 - `computeGreenScores(...)`,
 - `selectCandidateGreens(...)`.
