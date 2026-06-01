@@ -11,7 +11,6 @@ import { choosePlannerConfig } from "../config.js";
 import {
   asNumber,
   clamp,
-  positionKey,
   copyPosition,
   parseMap,
   inBounds,
@@ -70,10 +69,6 @@ import {
 const EPSILON = 1e-9;
 const UNIFIED_SCOUT_CHECKPOINT_CACHE = new Map();
 
-function pairKey(fromId, toId) {
-  return `${fromId}->${toId}`;
-}
-
 function scoutCheckpointIndexFor(state, config, profile) {
   const signature = buildScoutCheckpointSignature(state, config, profile);
   const cached = UNIFIED_SCOUT_CHECKPOINT_CACHE.get(signature);
@@ -92,34 +87,6 @@ function scoutCheckpointIndexFor(state, config, profile) {
 }
 
 export { parseMap, inBounds, getCell, isWalkable, isMoveAllowed };
-
-function estimateDistance(_state, from, to) {
-  return manhattan(from, to);
-}
-
-function rankingDistance(state, from, to) {
-  const key = `${positionKey(from)}->${positionKey(to)}`;
-  const cache = state.__rankingDistanceCache;
-  if (cache?.has(key)) return cache.get(key);
-
-  if (positionKey(from) === positionKey(state.me.position)) {
-    const directed = distanceFromMe(state, to);
-    if (Number.isFinite(directed)) {
-      cache?.set(key, directed);
-      return directed;
-    }
-  }
-
-  const profile = state.__mapProfile ?? buildMapProfile(state);
-  let cost = manhattan(from, to);
-  if (!profile.hasObstacles && !profile.hasDirectionalTiles && profile.hasUniformCosts) {
-    cache?.set(key, cost);
-    return cost;
-  }
-  cost = shortestGridPath(state, from, to, profile).cost;
-  cache?.set(key, cost);
-  return cost;
-}
 
 export { buildMapProfile };
 

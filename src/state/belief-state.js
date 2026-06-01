@@ -19,10 +19,10 @@ function normalizeTileType(type) {
   return raw;
 }
 
-function normalizeTileRecord(tileOrType, fallbackType = undefined) {
-  const rawTile = tileOrType && typeof tileOrType === "object" ? tileOrType : { type: tileOrType ?? fallbackType };
+function normalizeTileRecord(tile) {
+  const rawTile = tile && typeof tile === "object" ? tile : { type: tile };
   const normalized = {
-    type: normalizeTileType(rawTile.type ?? rawTile.kind ?? rawTile.tile ?? fallbackType)
+    type: normalizeTileType(rawTile.type ?? rawTile.kind ?? rawTile.tile)
   };
 
   for (const key of ["directionConstraint", "entryConstraint", "blocked", "walkable", "cost", "moveCost"]) {
@@ -513,17 +513,9 @@ export class BeliefState {
     this.pushEvent("MAP_READY", { width: this.width, height: this.height }); // push event payload
   }
 
-  updateTile(tileOrX, y, typeOrDelivery) { // update a type of tile on a map
-    const tile =
-      typeof tileOrX === "object" // accepts tile either as tile object or x y coords
-        ? tileOrX
-        : {
-            x: tileOrX,
-            y,
-            type: typeOrDelivery // legacy for when True -> delivery point, False -> other type, now just use specific type
-          };
+  updateTile(tile) { // update a type of tile on a map
     const position = roundTilePosition(tile);
-    const normalizedTile = normalizeTileRecord(tile, typeOrDelivery);
+    const normalizedTile = normalizeTileRecord(tile);
     const normalized = {
       x: position.x,
       y: position.y,
