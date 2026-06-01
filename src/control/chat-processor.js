@@ -62,6 +62,26 @@ function buildLimitFallback(outcomes, stopReason) {
   return `I could not complete all requested actions because the tool-planning loop reached its safety limit (${reason}). Partial progress: ${successCount} succeeded, ${failureCount} failed.`;
 }
 
+function evaluateArithmeticExpression(rawExpression) {
+  const expression = String(rawExpression ?? "").trim();
+  if (!expression) return { ok: false, reason: "empty_expression" };
+
+  // Keep calculator lightweight while allowing only basic arithmetic characters.
+  if (!/^[0-9+\-*/().\s]+$/.test(expression)) {
+    return { ok: false, reason: "invalid_token" };
+  }
+
+  try {
+    const value = Function(`"use strict"; return (${expression});`)();
+    if (!Number.isFinite(Number(value))) {
+      return { ok: false, reason: "division_by_zero" };
+    }
+    return { ok: true, value: Number(value) };
+  } catch (_error) {
+    return { ok: false, reason: "invalid_expression" };
+  }
+}
+
 export function createChatProcessor({ beliefs, executor, logger, llmCaller = null }) {
   let lastEvaluatedChatId = 0;
   let chatClient = null;
@@ -71,6 +91,8 @@ export function createChatProcessor({ beliefs, executor, logger, llmCaller = nul
   const chatDiagnosticsFile = resolve(process.env.CHAT_DIAGNOSTICS_FILE || "logs/chat-diagnostics.jsonl");
   const maxToolIterations = Math.max(1, Number(process.env.CHAT_MAX_LLM_ITERATIONS ?? 8) || 8);
   const maxTotalToolCalls = Math.max(1, Number(process.env.CHAT_MAX_TOOL_CALLS ?? 16) || 16);
+  const maxCalculatorExpressions = Math.max(1, Number(process.env.CHAT_CALCULATOR_MAX_EXPRESSIONS ?? 12) || 12);
+  const maxCalculatorExpressionLength = Math.max(8, Number(process.env.CHAT_CALCULATOR_MAX_EXPR_LENGTH ?? 120) || 120);
 
   async function writeChatDiagnostics(entry) {
     if (!chatDiagnosticsEnabled) return;
@@ -134,6 +156,25 @@ export function createChatProcessor({ beliefs, executor, logger, llmCaller = nul
     }
   };
 
+  const calculateExpressionsTool = {
+    type: "function",
+    function: {
+      name: "calculate_expressions",
+      description: "Compute arithmetic expressions and return numeric results for subsequent tool calls.",
+      parameters: {
+        type: "object",
+        properties: {
+          expressions: {
+            type: "object",
+            additionalProperties: { type: "string" }
+          }
+        },
+        required: ["expressions"],
+        additionalProperties: false
+      }
+    }
+  };
+
   const setForbiddenTileTool = {
     type: "function",
     function: {
@@ -155,30 +196,6 @@ export function createChatProcessor({ beliefs, executor, logger, llmCaller = nul
           reason: { type: "string" }
         },
         required: ["goalType", "target"],
-        additionalProperties: false
-      }
-    }
-  };
-
-  const removeForbiddenTileTool = {
-    type: "function",
-    function: {
-      name: "remove_forbidden_tile",
-      description: "Remove a previously forbidden tile.",
-      parameters: {
-        type: "object",
-        properties: {
-          target: {
-            type: "object",
-            properties: {
-              x: { type: "integer" },
-              y: { type: "integer" }
-            },
-            required: ["x", "y"],
-            additionalProperties: false
-          }
-        },
-        required: ["target"],
         additionalProperties: false
       }
     }
@@ -207,27 +224,6 @@ export function createChatProcessor({ beliefs, executor, logger, llmCaller = nul
     }
   };
 
-  const removePickupTileMultiplierTool = {
-    type: "function",
-    function: {
-      name: "remove_pickup_tile_multiplier",
-      description: "Remove a sticky pickup-tile reward multiplier.",
-      parameters: {
-        type: "object",
-        properties: {
-          target: {
-            type: "object",
-            properties: { x: { type: "integer" }, y: { type: "integer" } },
-            required: ["x", "y"],
-            additionalProperties: false
-          }
-        },
-        required: ["target"],
-        additionalProperties: false
-      }
-    }
-  };
-
   const setDeliveryTileMultiplierTool = {
     type: "function",
     function: {
@@ -251,27 +247,6 @@ export function createChatProcessor({ beliefs, executor, logger, llmCaller = nul
     }
   };
 
-  const removeDeliveryTileMultiplierTool = {
-    type: "function",
-    function: {
-      name: "remove_delivery_tile_multiplier",
-      description: "Remove a sticky delivery-tile reward multiplier.",
-      parameters: {
-        type: "object",
-        properties: {
-          target: {
-            type: "object",
-            properties: { x: { type: "integer" }, y: { type: "integer" } },
-            required: ["x", "y"],
-            additionalProperties: false
-          }
-        },
-        required: ["target"],
-        additionalProperties: false
-      }
-    }
-  };
-
   const setDeliveryCountMultiplierTool = {
     type: "function",
     function: {
@@ -290,32 +265,13 @@ export function createChatProcessor({ beliefs, executor, logger, llmCaller = nul
     }
   };
 
-  const removeDeliveryCountMultiplierTool = {
-    type: "function",
-    function: {
-      name: "remove_delivery_count_multiplier",
-      description: "Remove a sticky delivery-count reward multiplier.",
-      parameters: {
-        type: "object",
-        properties: {
-          count: { type: "integer", minimum: 1 }
-        },
-        required: ["count"],
-        additionalProperties: false
-      }
-    }
-  };
-
   const chatTools = [
+    calculateExpressionsTool,
     explicitPlanTool,
     setForbiddenTileTool,
-    removeForbiddenTileTool,
     setPickupTileMultiplierTool,
-    removePickupTileMultiplierTool,
     setDeliveryTileMultiplierTool,
-    removeDeliveryTileMultiplierTool,
-    setDeliveryCountMultiplierTool,
-    removeDeliveryCountMultiplierTool
+    setDeliveryCountMultiplierTool
   ];
 
   function parseTarget(args) {
@@ -490,6 +446,36 @@ export function createChatProcessor({ beliefs, executor, logger, llmCaller = nul
     };
   }
 
+  function validateCalculatorArgs(args) {
+    if (!args || typeof args !== "object" || Array.isArray(args)) {
+      return { ok: false, reason: "invalid_payload" };
+    }
+    const expressions = args.expressions;
+    if (!expressions || typeof expressions !== "object" || Array.isArray(expressions)) {
+      return { ok: false, reason: "missing_expressions" };
+    }
+    const entries = Object.entries(expressions);
+    if (entries.length === 0) return { ok: false, reason: "empty_expressions" };
+    if (entries.length > maxCalculatorExpressions) {
+      return { ok: false, reason: "too_many_expressions", details: { max: maxCalculatorExpressions } };
+    }
+    const keyPattern = /^[A-Za-z_][A-Za-z0-9_]*$/;
+    for (const [key, expr] of entries) {
+      if (!keyPattern.test(key)) return { ok: false, reason: "invalid_expression_key", details: { key } };
+      if (typeof expr !== "string") return { ok: false, reason: "invalid_expression_type", details: { key } };
+      const trimmed = expr.trim();
+      if (!trimmed) return { ok: false, reason: "empty_expression", details: { key } };
+      if (trimmed.length > maxCalculatorExpressionLength) {
+        return {
+          ok: false,
+          reason: "expression_too_long",
+          details: { key, maxLength: maxCalculatorExpressionLength }
+        };
+      }
+    }
+    return { ok: true, value: { expressions } };
+  }
+
   async function callModel(messages) {
     const baseURL = process.env.LITELLM_BASE_URL || "https://llm.bears.disi.unitn.it/v1";
     const apiKey = process.env.LITELLM_API_KEY;
@@ -538,6 +524,45 @@ export function createChatProcessor({ beliefs, executor, logger, llmCaller = nul
     const toolName = String(call?.function?.name ?? "").trim();
     const rawArgs = call?.function?.arguments;
 
+    if (toolName === "calculate_expressions") {
+      const parsed = parseJsonArguments(rawArgs, "I could not parse calculator input. Please provide an expressions object.");
+      if (!parsed.ok) return asToolError(toolName, parsed.error);
+      const parsedArgs = parsed.value;
+      const validation = validateCalculatorArgs(parsedArgs);
+      if (!validation.ok) {
+        return asToolError(toolName, `Calculator input rejected: ${validation.reason}.`, {
+          toolArgs: parsedArgs,
+          data: {
+            reason: validation.reason,
+            details: validation.details ?? null
+          }
+        });
+      }
+      const results = {};
+      for (const [key, expression] of Object.entries(validation.value.expressions)) {
+        const evaluation = evaluateArithmeticExpression(expression);
+        if (!evaluation.ok) {
+          return asToolError(toolName, `Calculator failed for '${key}': ${evaluation.reason}.`, {
+            toolArgs: parsedArgs,
+            data: {
+              reason: evaluation.reason,
+              key,
+              details: evaluation.details ?? null
+            }
+          });
+        }
+        results[key] = evaluation.value;
+      }
+
+      return asToolSuccess(toolName, `Calculated ${Object.keys(results).join(", ")}.`, {
+        toolArgs: parsedArgs,
+        data: {
+          results,
+          expressionCount: Object.keys(results).length
+        }
+      });
+    }
+
     if (toolName === "set_explicit_plan") {
       const parsed = parseJsonArguments(rawArgs, "I could not parse your plan request. Please provide a tile like (x,y).");
       if (!parsed.ok) return asToolError(toolName, parsed.error);
@@ -582,7 +607,12 @@ export function createChatProcessor({ beliefs, executor, logger, llmCaller = nul
         {
           plan: plans[0] ?? null,
           plans,
-          toolArgs: parsedArgs
+          toolArgs: parsedArgs,
+          data: {
+            goalType: validation.value.goalType,
+            targets: validation.value.targets,
+            planIds: plans.map((plan) => plan.id)
+          }
         }
       );
     }
@@ -610,7 +640,8 @@ export function createChatProcessor({ beliefs, executor, logger, llmCaller = nul
           target: validation?.details ?? null
         });
         return asToolError(toolName, `Forbidden-tile instruction rejected: ${validation.reason}.`, {
-          toolArgs: parsedArgs
+          toolArgs: parsedArgs,
+          data: { reason: validation.reason }
         });
       }
 
@@ -634,7 +665,8 @@ export function createChatProcessor({ beliefs, executor, logger, llmCaller = nul
             target: validation.value.target
           });
           return asToolError(toolName, "Forbidden-tile instruction rejected: cannot_leave_tile_before_forbid.", {
-            toolArgs: parsedArgs
+            toolArgs: parsedArgs,
+            data: { reason: "cannot_leave_tile_before_forbid" }
           });
         }
       }
@@ -652,45 +684,9 @@ export function createChatProcessor({ beliefs, executor, logger, llmCaller = nul
       });
       return asToolSuccess(toolName, `Forbidden tile set at (${created.x},${created.y}). I will avoid it.`, {
         forbiddenTile: created,
-        toolArgs: parsedArgs
+        toolArgs: parsedArgs,
+        data: { forbiddenTile: created }
       });
-    }
-
-    if (toolName === "remove_forbidden_tile") {
-      const parsed = parseJsonArguments(rawArgs, "I could not parse the removal request. Please provide a tile like (x,y).");
-      if (!parsed.ok) return asToolError(toolName, parsed.error);
-
-      const parsedArgs = parsed.value;
-      const validation = validateForbiddenTileArgs(parsedArgs, { allowCurrentTile: true });
-      if (!validation.ok) {
-        return asToolError(toolName, `Forbidden-tile removal rejected: ${validation.reason}.`, {
-          toolArgs: parsedArgs
-        });
-      }
-      const removed = beliefs.removeForbiddenTile(validation.value.target, {
-        sourceChatId: Number(sourceChatId ?? 0) || null,
-        senderId
-      });
-      if (!removed) {
-        return asToolError(
-          toolName,
-          `Tile (${validation.value.target.x},${validation.value.target.y}) was not in the forbidden set.`,
-          { toolArgs: parsedArgs }
-        );
-      }
-      logger.info("forbidden tile removed", {
-        senderId,
-        chatId: sourceChatId,
-        tile: validation.value.target
-      });
-      return asToolSuccess(
-        toolName,
-        `Forbidden tile removed at (${validation.value.target.x},${validation.value.target.y}).`,
-        {
-          removedForbiddenTile: removed,
-          toolArgs: parsedArgs
-        }
-      );
     }
 
     if (toolName === "set_pickup_tile_multiplier") {
@@ -698,32 +694,23 @@ export function createChatProcessor({ beliefs, executor, logger, llmCaller = nul
       if (!parsed.ok) return asToolError(toolName, parsed.error);
       const parsedArgs = parsed.value;
       const validation = validateMultiplierArgs(parsedArgs);
-      if (!validation.ok) return asToolError(toolName, `Pickup multiplier rejected: ${validation.reason}.`, { toolArgs: parsedArgs });
+      if (!validation.ok) return asToolError(toolName, `Pickup multiplier rejected: ${validation.reason}.`, {
+        toolArgs: parsedArgs,
+        data: { reason: validation.reason }
+      });
       const entry = beliefs.setPickupTileMultiplier(validation.value.target, validation.value.multiplier, {
         reason: validation.value.reason,
         sourceChatId: Number(sourceChatId ?? 0) || null,
         senderId
       });
-      if (!entry) return asToolError(toolName, "Pickup multiplier rejected: invalid_multiplier.", { toolArgs: parsedArgs });
+      if (!entry) return asToolError(toolName, "Pickup multiplier rejected: invalid_multiplier.", {
+        toolArgs: parsedArgs,
+        data: { reason: "invalid_multiplier" }
+      });
       return asToolSuccess(toolName, `Pickup multiplier set at (${entry.x},${entry.y}) to ${entry.multiplier}x.`, {
         pickupMultiplierRule: entry,
-        toolArgs: parsedArgs
-      });
-    }
-
-    if (toolName === "remove_pickup_tile_multiplier") {
-      const parsed = parseJsonArguments(rawArgs, "I could not parse pickup multiplier removal request.");
-      if (!parsed.ok) return asToolError(toolName, parsed.error);
-      const parsedArgs = parsed.value;
-      const target = parseTarget(parsedArgs);
-      if (!target) return asToolError(toolName, "Pickup multiplier removal rejected: invalid_coordinates.", { toolArgs: parsedArgs });
-      const removed = beliefs.removePickupTileMultiplier(target, {
-        sourceChatId: Number(sourceChatId ?? 0) || null,
-        senderId
-      });
-      if (!removed) return asToolError(toolName, `No pickup multiplier rule found at (${target.x},${target.y}).`, { toolArgs: parsedArgs });
-      return asToolSuccess(toolName, `Pickup multiplier removed at (${target.x},${target.y}).`, {
-        toolArgs: parsedArgs
+        toolArgs: parsedArgs,
+        data: { pickupMultiplierRule: entry }
       });
     }
 
@@ -732,32 +719,23 @@ export function createChatProcessor({ beliefs, executor, logger, llmCaller = nul
       if (!parsed.ok) return asToolError(toolName, parsed.error);
       const parsedArgs = parsed.value;
       const validation = validateMultiplierArgs(parsedArgs);
-      if (!validation.ok) return asToolError(toolName, `Delivery multiplier rejected: ${validation.reason}.`, { toolArgs: parsedArgs });
+      if (!validation.ok) return asToolError(toolName, `Delivery multiplier rejected: ${validation.reason}.`, {
+        toolArgs: parsedArgs,
+        data: { reason: validation.reason }
+      });
       const entry = beliefs.setDeliveryTileMultiplier(validation.value.target, validation.value.multiplier, {
         reason: validation.value.reason,
         sourceChatId: Number(sourceChatId ?? 0) || null,
         senderId
       });
-      if (!entry) return asToolError(toolName, "Delivery multiplier rejected: invalid_multiplier.", { toolArgs: parsedArgs });
+      if (!entry) return asToolError(toolName, "Delivery multiplier rejected: invalid_multiplier.", {
+        toolArgs: parsedArgs,
+        data: { reason: "invalid_multiplier" }
+      });
       return asToolSuccess(toolName, `Delivery multiplier set at (${entry.x},${entry.y}) to ${entry.multiplier}x.`, {
         deliveryMultiplierRule: entry,
-        toolArgs: parsedArgs
-      });
-    }
-
-    if (toolName === "remove_delivery_tile_multiplier") {
-      const parsed = parseJsonArguments(rawArgs, "I could not parse delivery multiplier removal request.");
-      if (!parsed.ok) return asToolError(toolName, parsed.error);
-      const parsedArgs = parsed.value;
-      const target = parseTarget(parsedArgs);
-      if (!target) return asToolError(toolName, "Delivery multiplier removal rejected: invalid_coordinates.", { toolArgs: parsedArgs });
-      const removed = beliefs.removeDeliveryTileMultiplier(target, {
-        sourceChatId: Number(sourceChatId ?? 0) || null,
-        senderId
-      });
-      if (!removed) return asToolError(toolName, `No delivery multiplier rule found at (${target.x},${target.y}).`, { toolArgs: parsedArgs });
-      return asToolSuccess(toolName, `Delivery multiplier removed at (${target.x},${target.y}).`, {
-        toolArgs: parsedArgs
+        toolArgs: parsedArgs,
+        data: { deliveryMultiplierRule: entry }
       });
     }
 
@@ -770,38 +748,27 @@ export function createChatProcessor({ beliefs, executor, logger, llmCaller = nul
       const parsedArgs = parsed.value;
       const validation = validateDeliveryCountMultiplierArgs(parsedArgs);
       if (!validation.ok) return asToolError(toolName, `Delivery count multiplier rejected: ${validation.reason}.`, {
-        toolArgs: parsedArgs
+        toolArgs: parsedArgs,
+        data: { reason: validation.reason }
       });
       const entry = beliefs.setDeliveryCountMultiplier(validation.value.count, validation.value.multiplier, {
         reason: validation.value.reason,
         sourceChatId: Number(sourceChatId ?? 0) || null,
         senderId
       });
-      if (!entry) return asToolError(toolName, "Delivery count multiplier rejected: invalid_payload.", { toolArgs: parsedArgs });
+      if (!entry) return asToolError(toolName, "Delivery count multiplier rejected: invalid_payload.", {
+        toolArgs: parsedArgs,
+        data: { reason: "invalid_payload" }
+      });
       return asToolSuccess(
         toolName,
         `Delivery count multiplier set for ${entry.count} package(s) to ${entry.multiplier}x.`,
         {
           deliveryCountMultiplierRule: entry,
-          toolArgs: parsedArgs
+          toolArgs: parsedArgs,
+          data: { deliveryCountMultiplierRule: entry }
         }
       );
-    }
-
-    if (toolName === "remove_delivery_count_multiplier") {
-      const parsed = parseJsonArguments(rawArgs, "I could not parse delivery count multiplier removal request.");
-      if (!parsed.ok) return asToolError(toolName, parsed.error);
-      const parsedArgs = parsed.value;
-      const count = parsePositiveIntegerCount(parsedArgs);
-      if (count === null) return asToolError(toolName, "Delivery count multiplier removal rejected: invalid_count.", { toolArgs: parsedArgs });
-      const removed = beliefs.removeDeliveryCountMultiplier(count, {
-        sourceChatId: Number(sourceChatId ?? 0) || null,
-        senderId
-      });
-      if (!removed) return asToolError(toolName, `No delivery count multiplier rule found for count ${count}.`, { toolArgs: parsedArgs });
-      return asToolSuccess(toolName, `Delivery count multiplier removed for count ${count}.`, {
-        toolArgs: parsedArgs
-      });
     }
 
     return asToolError(
@@ -868,7 +835,9 @@ export function createChatProcessor({ beliefs, executor, logger, llmCaller = nul
             tool: outcome.toolName,
             message: outcome.message,
             data: {
+              ...(outcome?.data && typeof outcome.data === "object" ? outcome.data : {}),
               planId: outcome?.plan?.id ?? null,
+              planIds: Array.isArray(outcome?.plans) ? outcome.plans.map((plan) => plan?.id ?? null) : [],
               toolArgs: compactToolArgs(outcome?.toolArgs ?? null)
             }
           })
@@ -931,14 +900,16 @@ export function createChatProcessor({ beliefs, executor, logger, llmCaller = nul
         content: [
           "You are a Deliveroo chat agent inside a BDI loop.",
           "For actionable map/planner/task instructions, you MUST use matching tool calls and not plain JSON text.",
+          "If instruction arguments require arithmetic, call calculate_expressions first and then call actionable tools using computed numeric literals.",
           "You may call multiple tools sequentially when needed to complete a single user instruction.",
           "If a tool call fails, continue if additional tool calls can still make progress, then return a concise final status.",
           "Tool mapping:",
+          "- calculate_expressions: evaluate arithmetic expressions and return numeric results for later tool calls.",
           "- set_explicit_plan: explicit movement tasks like go to tile (x,y), optionally as a sequence with targets=[{x,y},...].",
-          "- set_forbidden_tile / remove_forbidden_tile: add/remove sticky forbidden tiles.",
-          "- set_pickup_tile_multiplier / remove_pickup_tile_multiplier: add/remove pickup reward multipliers.",
-          "- set_delivery_tile_multiplier / remove_delivery_tile_multiplier: add/remove delivery reward multipliers.",
-          "- set_delivery_count_multiplier / remove_delivery_count_multiplier: add/remove delivery reward multipliers by exact delivered package count.",
+          "- set_forbidden_tile: add sticky forbidden tiles.",
+          "- set_pickup_tile_multiplier: add pickup reward multipliers.",
+          "- set_delivery_tile_multiplier: add delivery reward multipliers.",
+          "- set_delivery_count_multiplier: add delivery reward multipliers by exact delivered package count.",
           "If the message is not an actionable instruction, reply briefly in plain text.",
           "Never output a raw JSON object in assistant text when a tool should be used."
         ].join("\n")

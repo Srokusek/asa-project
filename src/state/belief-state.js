@@ -177,22 +177,6 @@ export class BeliefState {
     return entry;
   }
 
-  removeForbiddenTile(position, meta = {}) {
-    const cell = roundTilePosition(position);
-    const key = positionKey(cell);
-    const existing = this.forbiddenTiles.get(key);
-    if (!existing) return null;
-    this.forbiddenTiles.delete(key);
-    this.pushEvent("FORBIDDEN_TILE_REMOVED", {
-      ...existing,
-      removedAtTick: this.time,
-      removedBy: meta.senderId ?? null,
-      sourceChatId: Number(meta.sourceChatId ?? 0) || existing.sourceChatId || null
-    });
-    this.markDirty();
-    return existing;
-  }
-
   isForbiddenTile(position) {
     return this.forbiddenTiles.has(positionKey(roundTilePosition(position)));
   }
@@ -222,22 +206,6 @@ export class BeliefState {
     return entry;
   }
 
-  removePickupTileMultiplier(position, meta = {}) {
-    const cell = roundTilePosition(position);
-    const key = positionKey(cell);
-    const existing = this.pickupTileMultipliers.get(key);
-    if (!existing) return null;
-    this.pickupTileMultipliers.delete(key);
-    this.pushEvent("PICKUP_MULTIPLIER_REMOVED", {
-      ...existing,
-      removedAtTick: this.time,
-      removedBy: meta.senderId ?? null,
-      sourceChatId: Number(meta.sourceChatId ?? 0) || existing.sourceChatId || null
-    });
-    this.markDirty();
-    return existing;
-  }
-
   setDeliveryTileMultiplier(position, multiplier, meta = {}) {
     const cell = roundTilePosition(position);
     const key = positionKey(cell);
@@ -259,22 +227,6 @@ export class BeliefState {
     return entry;
   }
 
-  removeDeliveryTileMultiplier(position, meta = {}) {
-    const cell = roundTilePosition(position);
-    const key = positionKey(cell);
-    const existing = this.deliveryTileMultipliers.get(key);
-    if (!existing) return null;
-    this.deliveryTileMultipliers.delete(key);
-    this.pushEvent("DELIVERY_MULTIPLIER_REMOVED", {
-      ...existing,
-      removedAtTick: this.time,
-      removedBy: meta.senderId ?? null,
-      sourceChatId: Number(meta.sourceChatId ?? 0) || existing.sourceChatId || null
-    });
-    this.markDirty();
-    return existing;
-  }
-
   setDeliveryCountMultiplier(count, multiplier, meta = {}) {
     const normalizedCount = Math.round(Number(count));
     const factor = Number(multiplier);
@@ -294,23 +246,6 @@ export class BeliefState {
     this.pushEvent("DELIVERY_COUNT_MULTIPLIER_SET", { ...entry });
     this.markDirty();
     return entry;
-  }
-
-  removeDeliveryCountMultiplier(count, meta = {}) {
-    const normalizedCount = Math.round(Number(count));
-    if (!Number.isFinite(normalizedCount) || normalizedCount < 1) return null;
-    const key = String(normalizedCount);
-    const existing = this.deliveryCountMultipliers.get(key);
-    if (!existing) return null;
-    this.deliveryCountMultipliers.delete(key);
-    this.pushEvent("DELIVERY_COUNT_MULTIPLIER_REMOVED", {
-      ...existing,
-      removedAtTick: this.time,
-      removedBy: meta.senderId ?? null,
-      sourceChatId: Number(meta.sourceChatId ?? 0) || existing.sourceChatId || null
-    });
-    this.markDirty();
-    return existing;
   }
 
   pickupMultiplierAt(position) {

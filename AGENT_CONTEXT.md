@@ -441,10 +441,10 @@ This exists for the LLM integration work, but it should remain a side concern in
 Actionable chat instructions are expected to map to tools, not raw JSON replies. Current tool families include:
 
 - explicit manual movement: `set_explicit_plan` (single target or sequence via `targets`),
-- sticky map constraints: `set_forbidden_tile`, `remove_forbidden_tile`,
-- sticky pickup-value rules: `set_pickup_tile_multiplier`, `remove_pickup_tile_multiplier`,
-- sticky delivery-tile rules: `set_delivery_tile_multiplier`, `remove_delivery_tile_multiplier`,
-- sticky delivery-count rules: `set_delivery_count_multiplier`, `remove_delivery_count_multiplier`,
+- sticky map constraints: `set_forbidden_tile`,
+- sticky pickup-value rules: `set_pickup_tile_multiplier`,
+- sticky delivery-tile rules: `set_delivery_tile_multiplier`,
+- sticky delivery-count rules: `set_delivery_count_multiplier`,
 
 These commands update belief overlays/events and trigger replanning through normal loop invalidation.
 

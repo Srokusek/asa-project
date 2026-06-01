@@ -25,13 +25,9 @@ const HARD_REPLAN_EVENTS = new Set([
   "PUTDOWN_FAILED",
   "TEMPORARY_BLOCKED_CELL",
   "FORBIDDEN_TILE_ADDED",
-  "FORBIDDEN_TILE_REMOVED",
   "PICKUP_MULTIPLIER_SET",
-  "PICKUP_MULTIPLIER_REMOVED",
   "DELIVERY_MULTIPLIER_SET",
-  "DELIVERY_MULTIPLIER_REMOVED",
-  "DELIVERY_COUNT_MULTIPLIER_SET",
-  "DELIVERY_COUNT_MULTIPLIER_REMOVED"
+  "DELIVERY_COUNT_MULTIPLIER_SET"
 ]);
 
 const PACKAGE_REPLAN_EVENTS = new Set([
@@ -1103,8 +1099,6 @@ export class AgentLoop {
         if (payload) {
           if (payload.type === "FORBIDDEN_TILE_ADDED") {
             this.telemetry.record("forbidden_tile_added", payload);
-          } else if (payload.type === "FORBIDDEN_TILE_REMOVED") {
-            this.telemetry.record("forbidden_tile_removed", payload);
           } else if (payload.type === "FORBIDDEN_TILE_REJECTED") {
             this.telemetry.record("forbidden_tile_rejected", payload);
           }
@@ -1113,16 +1107,10 @@ export class AgentLoop {
         if (multiplierPayload) {
           if (multiplierPayload.type === "PICKUP_MULTIPLIER_SET") {
             this.telemetry.record("pickup_multiplier_set", multiplierPayload);
-          } else if (multiplierPayload.type === "PICKUP_MULTIPLIER_REMOVED") {
-            this.telemetry.record("pickup_multiplier_removed", multiplierPayload);
           } else if (multiplierPayload.type === "DELIVERY_MULTIPLIER_SET") {
             this.telemetry.record("delivery_multiplier_set", multiplierPayload);
-          } else if (multiplierPayload.type === "DELIVERY_MULTIPLIER_REMOVED") {
-            this.telemetry.record("delivery_multiplier_removed", multiplierPayload);
           } else if (multiplierPayload.type === "DELIVERY_COUNT_MULTIPLIER_SET") {
             this.telemetry.record("delivery_count_multiplier_set", multiplierPayload);
-          } else if (multiplierPayload.type === "DELIVERY_COUNT_MULTIPLIER_REMOVED") {
-            this.telemetry.record("delivery_count_multiplier_removed", multiplierPayload);
           }
         }
       }
