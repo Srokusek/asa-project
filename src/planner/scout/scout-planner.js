@@ -243,13 +243,11 @@ export function buildUnifiedScoutPlan(state, profile, config, greenScores, check
       const green = greenById.get(greenId);
       if (!green) continue;
       const observedAt = state.lastObservedAtByGreen?.[positionKey(green.position)];
-      const rawStaleness =
-        observedAt === undefined ? stalenessCap : Math.max(0, asNumber(state.time, 0) - asNumber(observedAt, 0));
-      const cappedStaleness = Math.min(stalenessCap, rawStaleness);
-      const normalizedStaleness = cappedStaleness / stalenessCap;
+      const Staleness = 
+        observedAt === undefined ? Math.log(Math.max(1, asNumber(state.time, 0))) : Math.log(Math.max(1, asNumber(state.time, 0) - asNumber(observedAt, 0)));
       const multiplier = pickupMultiplierAt(state, green.position);
       multiplierComponent += multiplier;
-      stalenessComponent += multiplier * stalenessWeight * normalizedStaleness;
+      stalenessComponent += multiplier * stalenessWeight * Staleness;
       coveredGreenCount += 1;
     }
     if (coveredGreenCount === 0) continue;

@@ -48,7 +48,7 @@ export const CONFIG = {
     sensingRange: 5,
     scoutCooldownTicks: 8,
     scoutCongestionPenalty: 10,
-    maxStalenessValue: 30,
+    maxStalenessValue: 1000,
     greenInfoMultiplier: 4,
     redInfoMultiplier: 0.2,
     clusterPickupRadius: 3,
@@ -67,10 +67,10 @@ export const CONFIG = {
 
     // parameters used by unified scout
     unifiedScoutCheckpointCount: 24,
-    unifiedScoutStalenessWeight: 1.0,
-    unifiedScoutDistanceWeight: 0.5,
+    unifiedScoutStalenessWeight: 50.0,
+    unifiedScoutDistanceWeight: 0.2,
     unifiedScoutTopKForRedTieBreak: 5,
-    unifiedScoutRepeatTargetPenalty: 20,
+    unifiedScoutRepeatTargetPenalty: 50,
     unifiedScoutRepeatSectorPenalty: 10,
     trapPenalty: 10000,
     planningBudgetMs: 30,
@@ -83,6 +83,10 @@ export const CONFIG = {
     opportunisticMinGain: 5,
     opportunisticCongestionPenalty: 8,
     targetCongestionPenalty: 0,
+
+    // search parameters
+    beamWidth: 100,
+    maxPickupsBeforeDelivery: 5,
   }
 };
 
