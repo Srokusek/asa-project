@@ -2,7 +2,6 @@ import { Executor } from "../executor/executor.js";
 import { buildExecutablePlan } from "../planner/executable-plan.js";
 import {
   buildMapProfile,
-  computeDeliveredValue,
   getDirectedNeighbors,
   isMoveAllowed,
   isWalkable,
@@ -39,8 +38,7 @@ const IDLE_REPLAN_EVENTS = new Set([
 ]);
 
 const TARGET_PLAN_MODES = new Set([
-  "PICKUP_DELIVERY_UNIFIED",
-  "OPPORTUNISTIC_PICKUP"
+  "PICKUP_DELIVERY_UNIFIED"
 ]);
 const INVALID_TARGET_PLAN_LIMIT = 3;
 const SCOUT_PLAN_MODES = new Set([
@@ -215,7 +213,6 @@ export class AgentLoop {
     this.consecutiveMoveFailures = 0;
     this.lastBlockedMoveKey = null;
     this.sameBlockedMoveCount = 0;
-    this.lastOpportunisticCheckTick = -Infinity;
     this.lastReplanCause = "missing_plan";
     this.invalidNonIdleZeroActionCount = 0;
     this.chatProcessor = createChatProcessor({ beliefs: this.beliefs, executor: this.executor, logger: this.logger });
@@ -413,45 +410,6 @@ export class AgentLoop {
     this.sameBlockedMoveCount = 0;
   }
 
-  carriedValueEstimate() {
-    let value = 0;
-    for (const parcel of this.beliefs.carriedParcels.values()) {
-      value += Number(parcel.valueAtPickup ?? parcel.reward ?? parcel.value ?? 0);
-    }
-    return value;
-  }
-
-  movesUntilPutDown() {
-    if (!Array.isArray(this.currentExecutablePlan)) return Infinity;
-    let moves = 0;
-    for (const action of this.currentExecutablePlan.slice(this.actionIndex)) {
-      if (action.type === "move") moves += 1;
-      if (action.type === "put_down") return moves;
-    }
-    return Infinity;
-  }
-
-  upcomingPutDownContext() {
-    if (!Array.isArray(this.currentExecutablePlan)) return null;
-    let moves = 0;
-    for (const action of this.currentExecutablePlan.slice(this.actionIndex)) {
-      if (action.type === "move") moves += 1;
-      if (action.type === "put_down" && action.at) {
-        return {
-          moves,
-          position: copyPosition(action.at)
-        };
-      }
-    }
-    return null;
-  }
-
-  currentPlanTargetsParcel(parcelId) {
-    const id = String(parcelId);
-    if (this.currentRoutePlan?.sequence?.includes(`P_${id}`)) return true;
-    return (this.currentRoutePlan?.candidateGreens ?? []).some((green) => String(green.package?.id) === id);
-  }
-
   hasValidParcelInBelief() {
     const minConfidence = Number(this.config.planner.minParcelConfidence ?? 0.3);
     for (const parcel of this.beliefs.parcels.values()) {
@@ -489,279 +447,6 @@ export class AgentLoop {
         this.invalidNonIdleZeroActionCount >= INVALID_TARGET_PLAN_LIMIT ? "scout" : routePlan?.fallbackStage
     });
     this.invalidatePlan(reason);
-  }
-
-  futurePathPoints() {
-    const points = [];
-    const currentPosition = this.beliefs.me ? { x: this.beliefs.me.x, y: this.beliefs.me.y } : null;
-    if (currentPosition) points.push(copyPosition(currentPosition));
-
-    for (const action of this.currentExecutablePlan?.slice(this.actionIndex) ?? []) {
-      if (action.type === "move" && action.to) points.push(copyPosition(action.to));
-    }
-
-    return points;
-  }
-
-  hasNearbyOpportunisticParcel(pathPoints = this.futurePathPoints()) {
-    if (!this.beliefs.me) return false;
-
-    const config = this.config.planner;
-    const currentPosition = copyPosition(this.beliefs.me);
-    const maxDistance = Number(config.opportunisticMaxDistance ?? 3);
-    const pathRadius = Number(config.opportunisticPathRadius ?? 2);
-    const minConfidence = Number(config.minParcelConfidence ?? 0.3);
-
-    for (const parcel of this.beliefs.parcels.values()) {
-      if (parcel.carriedBy) continue;
-      if (Number(parcel.confidence ?? 0) < minConfidence) continue;
-      if (this.beliefs.estimateParcelReward(parcel) <= 0) continue;
-      if (this.currentPlanTargetsParcel(parcel.id)) continue;
-
-      const parcelPosition = copyPosition(parcel);
-      if (manhattan(currentPosition, parcelPosition) <= maxDistance) return true;
-      if (pathPoints.some((point) => manhattan(point, parcelPosition) <= pathRadius)) return true;
-    }
-
-    return false;
-  }
-
-  shouldCheckOpportunisticPickup(events = [], pathPoints = this.futurePathPoints()) {
-    if (this.currentRoutePlan?.mode === "MANUAL_GOTO") return false;
-    if (this.currentRoutePlan?.mode === "OPPORTUNISTIC_PICKUP") return false;
-    if (!this.hasNearbyOpportunisticParcel(pathPoints)) return false;
-
-    const tick = Number(this.telemetry.tick ?? 0);
-    const interval = Number(this.config.planner.opportunisticCheckIntervalTicks ?? 2);
-    const recentParcelEvent = events.some((event) => {
-      const type = eventType(event);
-      return type === "NEW_PACKAGE_SPAWN" || type === "PARCELS_SENSING";
-    });
-
-    return recentParcelEvent || tick - this.lastOpportunisticCheckTick >= interval;
-  }
-
-  enemyRacePenalty(parcelPosition, myDistance, config) {
-    let penalty = 0;
-    for (const enemy of this.beliefs.agents.values()) {
-      if (enemy.confidence < 0.5) continue;
-      const enemyPosition = { x: Math.round(Number(enemy.x)), y: Math.round(Number(enemy.y)) };
-      const enemyDistance = manhattan(enemyPosition, parcelPosition);
-      if (enemyDistance + Number(config.enemySafetyMargin ?? 0) < myDistance) return Infinity;
-      if (enemyDistance <= myDistance + 1) penalty += Number(config.opportunisticCongestionPenalty ?? 8);
-    }
-    return penalty;
-  }
-
-  findOpportunisticPickup(
-    currentRoutePlan = this.currentRoutePlan,
-    currentExecutablePlan = this.currentExecutablePlan,
-    pathPoints = this.futurePathPoints()
-  ) {
-    if (!this.beliefs.me || !currentRoutePlan || !currentExecutablePlan) return null;
-    if (currentRoutePlan.mode === "MANUAL_GOTO") return null;
-    if (currentRoutePlan.mode === "OPPORTUNISTIC_PICKUP") return null;
-
-    const config = this.config.planner;
-    const currentPosition = copyPosition(this.beliefs.me);
-    const plannerState = buildPlannerState(this.beliefs, this.config);
-    const profile = buildMapProfile(plannerState);
-    const futureRejoinPoints = pathPoints.slice(1);
-    const carriedValue = this.carriedValueEstimate();
-    const movesToPutDown = this.movesUntilPutDown();
-    const putDownContext = this.upcomingPutDownContext();
-    const baselineDeliveredAtPutDown =
-      putDownContext && Array.isArray(plannerState.carriedPackages) && plannerState.carriedPackages.length > 0
-        ? computeDeliveredValue(
-            plannerState.carriedPackages,
-            Number(this.beliefs.time ?? 0) + Number(putDownContext.moves ?? 0),
-            putDownContext.position,
-            plannerState
-          )
-        : null;
-    let best = null;
-
-    for (const parcel of this.beliefs.parcels.values()) {
-      const parcelId = String(parcel.id);
-      const parcelPosition = copyPosition(parcel);
-      const confidence = Number(parcel.confidence ?? 0);
-      const reward = this.beliefs.estimateParcelReward(parcel);
-      let reason = null;
-
-      if (parcel.carriedBy) reason = "carried";
-      else if (confidence < Number(config.minParcelConfidence ?? 0.3)) reason = "low_confidence";
-      else if (reward <= 0) reason = "zero_reward";
-      else if (this.currentPlanTargetsParcel(parcelId)) reason = "already_in_plan";
-
-      const currentDistanceCheap = manhattan(currentPosition, parcelPosition);
-      const pathProximity = Math.min(...pathPoints.map((point) => manhattan(point, parcelPosition)));
-      if (!reason && currentDistanceCheap > config.opportunisticMaxDistance && pathProximity > config.opportunisticPathRadius) {
-        reason = "not_near_position_or_path";
-      }
-
-      if (!reason && movesToPutDown <= 2 && carriedValue >= reward) {
-        reason = "near_delivery_with_high_carried_value";
-      }
-
-      const edgeToParcel = !reason
-        ? shortestGridPath(plannerState, currentPosition, parcelPosition, profile)
-        : { cost: Infinity, path: [] };
-      if (!reason && !Number.isFinite(edgeToParcel.cost)) reason = "unreachable";
-
-      const rejoinCandidates = futureRejoinPoints.length > 0 ? futureRejoinPoints : [currentRoutePlan.path?.at?.(-1)].filter(Boolean);
-      let bestRejoin = null;
-      if (!reason) {
-        for (const rejoin of rejoinCandidates) {
-          const direct = shortestGridPath(plannerState, currentPosition, rejoin, profile);
-          const parcelToRejoin = shortestGridPath(plannerState, parcelPosition, rejoin, profile);
-          if (!Number.isFinite(direct.cost) || !Number.isFinite(parcelToRejoin.cost)) continue;
-          const detourCost = edgeToParcel.cost + parcelToRejoin.cost - direct.cost;
-          if (!bestRejoin || detourCost < bestRejoin.detourCost) {
-            bestRejoin = { position: rejoin, direct, parcelToRejoin, detourCost };
-          }
-        }
-        if (!bestRejoin) reason = "no_rejoin";
-      }
-
-      const congestionPenalty =
-        !reason && [...this.beliefs.agents.values()].some((enemy) => {
-          if (enemy.confidence < 0.5) return false;
-          return manhattan({ x: Math.round(enemy.x), y: Math.round(enemy.y) }, parcelPosition) <= config.opportunisticPathRadius;
-        })
-          ? Number(config.opportunisticCongestionPenalty ?? 8)
-          : 0;
-      const enemyPenalty = !reason ? this.enemyRacePenalty(parcelPosition, edgeToParcel.cost, config) : 0;
-      if (!reason && !Number.isFinite(enemyPenalty)) reason = "enemy_wins_race";
-
-      const decayRate = Number(config.decayRate ?? 0);
-      const pickupMultiplier = Number(this.beliefs.pickupMultiplierAt?.(parcelPosition) ?? 1);
-      const pickupConfidence = Math.max(0, Math.min(1, confidence));
-      const valueAtPickup = Math.max(0, reward - decayRate * Math.max(0, edgeToParcel.cost)) * pickupMultiplier * pickupConfidence;
-      const projectedDeliveredAtPutDown =
-        !reason && putDownContext && baselineDeliveredAtPutDown !== null
-          ? computeDeliveredValue(
-              [
-                ...(plannerState.carriedPackages ?? []),
-                {
-                  greenId: `OP_${parcelId}`,
-                  pickupSourceId: `L_${parcelPosition.x}_${parcelPosition.y}`,
-                  packageId: parcelId,
-                  valueAtPickup,
-                  pickupTime: Number(this.beliefs.time ?? 0) + Math.max(0, edgeToParcel.cost),
-                  decayRate,
-                  confidence: pickupConfidence,
-                  pickupPosition: copyPosition(parcelPosition)
-                }
-              ],
-              Number(this.beliefs.time ?? 0) +
-                Number(putDownContext.moves ?? 0) +
-                Math.max(0, bestRejoin.detourCost),
-              putDownContext.position,
-              plannerState
-            )
-          : null;
-      const projectedDeliveredGain =
-        projectedDeliveredAtPutDown !== null && baselineDeliveredAtPutDown !== null
-          ? projectedDeliveredAtPutDown - baselineDeliveredAtPutDown
-          : reward;
-      const estimatedGain = !reason
-        ? projectedDeliveredGain -
-          Number(config.moveWeight ?? 1) * Math.max(0, bestRejoin.detourCost) -
-          congestionPenalty -
-          enemyPenalty
-        : -Infinity;
-      const chosen = estimatedGain > Number(config.opportunisticMinGain ?? 5);
-
-      this.logger.debug("opportunistic pickup candidate", {
-        parcelId,
-        reward,
-        detourCost: bestRejoin?.detourCost,
-        baselineDeliveredAtPutDown,
-        projectedDeliveredAtPutDown,
-        projectedDeliveredGain,
-        estimatedGain,
-        chosen,
-        reason
-      });
-
-      if (!chosen) continue;
-      if (!best || estimatedGain > best.estimatedGain) {
-        best = {
-          parcel,
-          parcelId,
-          parcelPosition,
-          reward,
-          estimatedGain,
-          detourCost: bestRejoin.detourCost,
-          edgeToParcel
-        };
-      }
-    }
-
-    if (!best) return null;
-
-    const targetId = `OP_${best.parcelId}`;
-    const startPoint = { id: "START", type: "start", position: currentPosition };
-    const parcelPoint = {
-      id: targetId,
-      type: "green",
-      position: best.parcelPosition,
-      package: {
-        id: best.parcelId,
-        value: best.reward,
-        reward: best.reward,
-        confidence: best.parcel.confidence
-      }
-    };
-    const routePlan = {
-      mode: "OPPORTUNISTIC_PICKUP",
-      sequence: ["START", targetId],
-      path: best.edgeToParcel.path,
-      value: best.estimatedGain,
-      profile,
-      config,
-      candidateGreens: [parcelPoint],
-      scoutTarget: null,
-      oracle: {
-        entries: new Map([
-          [
-            `START->${targetId}`,
-            {
-              fromId: "START",
-              toId: targetId,
-              cost: best.edgeToParcel.cost,
-              path: best.edgeToParcel.path
-            }
-          ]
-        ]),
-        points: [startPoint, parcelPoint],
-        pointsById: new Map([
-          ["START", startPoint],
-          [targetId, parcelPoint]
-        ]),
-        profile
-      },
-      state: plannerState,
-      generatedAtTime: this.beliefs.time,
-      opportunistic: {
-        parcelId: best.parcelId,
-        reward: best.reward,
-        detourCost: best.detourCost,
-        estimatedGain: best.estimatedGain
-      }
-    };
-    const executablePlan = buildExecutablePlan(routePlan);
-    if (executablePlan.length === 0) return null;
-
-    this.logger.info("opportunistic pickup chosen", routePlan.opportunistic);
-    this.telemetry.record("opportunistic_pickup", {
-      mode: routePlan.mode,
-      target: best.parcelPosition,
-      actionCount: executablePlan.length,
-      ...routePlan.opportunistic
-    });
-
-    return { routePlan, executablePlan };
   }
 
   mustReplan(events = []) {
@@ -1140,21 +825,6 @@ export class AgentLoop {
 
       // stop if we have no executable route plan
       if (!this.currentRoutePlan || !this.currentExecutablePlan) return;
-
-      // collect future path points
-      const pathPoints = this.futurePathPoints();
-      // check whether the agent should check for pickups outside the original plan
-      if (this.shouldCheckOpportunisticPickup(events, pathPoints)) {
-        this.lastOpportunisticCheckTick = Number(this.telemetry.tick ?? 0);
-        // if yes, create an opportunistic plan that picks up the package
-        const opportunistic = this.findOpportunisticPickup(this.currentRoutePlan, this.currentExecutablePlan, pathPoints);
-        if (opportunistic) { 
-          // set the opportunistic plan as the new plan
-          this.currentRoutePlan = opportunistic.routePlan;
-          this.currentExecutablePlan = opportunistic.executablePlan;
-          this.actionIndex = 0;
-        }
-      }
 
       // get the next action in plan
       const action = this.currentExecutablePlan?.[this.actionIndex];

@@ -40,8 +40,8 @@ export const CONFIG = {
     kWin: 1,
     moveWeight: 1,
     betaCarry: 0.5,
-    periodicReplanTicks: 20,
-    timeTickMs: 1000,
+    periodicReplanTicks: 20000,
+    timeTickMs: 50,
     minParcelConfidence: 0.3,
     enemySafetyMargin: 0,
     beliefDecayRate: 0.08,
@@ -73,20 +73,15 @@ export const CONFIG = {
     unifiedScoutRepeatTargetPenalty: 50,
     unifiedScoutRepeatSectorPenalty: 10,
     trapPenalty: 10000,
-    planningBudgetMs: 100,
+    planningBudgetMs: 200,
     topKRedCandidates: 5,
     enableEdgeTemporaryBlocks: true,
     temporaryEdgeBlockTtlTicks: 2,
     maxRepeatedBlockedMovesBeforeReplan: 2,
-    opportunisticMaxDistance: 3,
-    opportunisticPathRadius: 2,
-    opportunisticCheckIntervalTicks: 2,
-    opportunisticMinGain: 5,
-    opportunisticCongestionPenalty: 8,
     targetCongestionPenalty: 0,
 
     // search parameters
-    beamWidth: 200,
+    beamWidth: 100,
     topK: 16,
   }
 };

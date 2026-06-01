@@ -245,12 +245,9 @@ Main responsibilities:
 The agent can produce several route modes:
 
 - `PICKUP_DELIVERY_UNIFIED`: unified pickup+delivery search plan,
-- `OPPORTUNISTIC_PICKUP`: take a nearby parcel while already moving,
 - `SCOUT_UNIFIED`: information-gain scouting plan,
 - `LOCAL_EXPLORE`: simple local fallback movement,
 - `IDLE`: no useful action found.
-
-`OPPORTUNISTIC_PICKUP` now uses multiplier-aware projected delivery gain when evaluating whether to detour, so opportunistic behavior is aligned with the same delivery-value model used by planner search.
 
 ### Candidate Green Selection
 
@@ -385,7 +382,6 @@ The planner parameters cover:
 - scouting and exploration weights,
 - enemy safety margins,
 - blocked tile behavior,
-- opportunistic pickup thresholds,
 - map density thresholds,
 - replanning intervals and budgets.
 
@@ -537,8 +533,7 @@ Recent additions relevant to planner behavior:
 
 - sticky forbidden-tile overlay is enforced by planner/path walkability checks,
 - explicit goto tasks are queued and consumed through `manualTasks`,
-- reward shaping supports pickup tile, delivery tile, and delivery count multipliers,
-- opportunistic pickup selection estimates projected delivery gain using multiplier-aware delivery scoring rather than raw parcel reward only.
+- reward shaping supports pickup tile, delivery tile, and delivery count multipliers.
 
 ## Verification Notes
 

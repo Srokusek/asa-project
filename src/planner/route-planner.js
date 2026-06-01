@@ -179,8 +179,7 @@ export {
 export { reconstructGridPath };
 
 const TARGET_PLAN_MODES = new Set([
-  "PICKUP_DELIVERY_UNIFIED",
-  "OPPORTUNISTIC_PICKUP"
+  "PICKUP_DELIVERY_UNIFIED"
 ]);
 
 function routePlanWouldHaveExecutableActions(routePlan) {
