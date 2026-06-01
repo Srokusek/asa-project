@@ -70,12 +70,8 @@ import {
   buildScoutCheckpointIndex,
   buildScoutCheckpointSignature,
   buildUnifiedScoutPlan,
-  buildGreenClusters,
   buildLocalExplorePlan,
-  informationValueAtWaypoint,
-  tileInformationValue,
-  visibleAvailablePackages,
-  visibleCellsFromPosition
+  visibleAvailablePackages
 } from "./scout/scout-planner.js";
 
 const EPSILON = 1e-9;
@@ -135,8 +131,6 @@ function rankingDistance(state, from, to) {
 export { buildMapProfile };
 
 export { sigmoid, logSumExp, winProbability, currentGreenValue, futureGreenValue, computeGreenScore, computeGreenScores, selectCandidateGreens };
-
-export { buildGreenClusters, informationValueAtWaypoint, tileInformationValue, visibleCellsFromPosition };
 
 export function buildPointsOfInterest(state, candidateGreens) {
   return [

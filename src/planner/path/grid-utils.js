@@ -454,8 +454,6 @@ export function buildMapProfile(state) {
 
   const totalWalkableCells = Math.max(0, totalCells - obstacleCount);
   const greenDensity = totalWalkableCells > 0 ? state.greens.length / totalWalkableCells : 0;
-  const denseGreenThreshold = asNumber(state.params?.denseGreenThreshold, DEFAULT_PARAMS.denseGreenThreshold);
-  const denseGreenMinGreens = asNumber(state.params?.denseGreenMinGreens, DEFAULT_PARAMS.denseGreenMinGreens);
   const obstacleDensity = totalCells > 0 ? obstacleCount / totalCells : 0;
   const mazeObstacleDensityThreshold = asNumber(
     state.params?.mazeObstacleDensityThreshold,
@@ -474,7 +472,6 @@ export function buildMapProfile(state) {
     greenDensity,
     redDensity: totalCells > 0 ? state.reds.length / totalCells : 0,
     obstacleDensity,
-    isDenseGreen: greenDensity >= denseGreenThreshold && state.greens.length >= denseGreenMinGreens,
     isMazeLike: obstacleDensity >= mazeObstacleDensityThreshold || directionalConstraintCount > 0,
     hasDecay,
     hasObstacles: obstacleCount > 0,

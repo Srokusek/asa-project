@@ -42,9 +42,6 @@ const TARGET_PLAN_MODES = new Set(["PICKUP_DELIVERY", "DELIVERY_ONLY", "PICKUP_O
 const INVALID_TARGET_PLAN_LIMIT = 3;
 const SCOUT_PLAN_MODES = new Set([
   "SCOUT_UNIFIED",
-  "SCOUT",
-  "DENSE_SCOUT",
-  "GREEN_EXPOSURE_SCOUT",
   "LOCAL_EXPLORE"
 ]);
 
@@ -147,30 +144,22 @@ function summarizeScoutTarget(target) {
   if (!target) return null;
   const rawId = String(target.id ?? "");
   const compactId = // compact id usefu for logging
-    rawId.length > 80 && target.size
-      ? `CLUSTER_size_${target.size}_centroid_${target.centroid?.x ?? "?"}_${target.centroid?.y ?? "?"}`
-      : rawId.length > 80
-        ? `${rawId.slice(0, 60)}...`
-        : rawId;
+    rawId.length > 80 ? `${rawId.slice(0, 60)}...` : rawId;
   return {
     id: compactId,
-    size: target.size,
-    centroid: target.centroid,
-    staleness: target.staleness,
-    infoValue: target.infoValue,
-    scoutScore: target.scoutScore ?? target.score,
     score: target.score,
+    primaryScore: target.primaryScore,
     position: target.position,
     distanceFromMe: target.distanceFromMe,
-    distanceToNearestRed: target.distanceToNearestRed ?? target.redDistance,
+    distanceToNearestRed: target.distanceToNearestRed,
     trapPenaltyApplied: target.trapPenaltyApplied,
-    sampleGreenIds: Array.isArray(target.greenIds) ? target.greenIds.slice(0, 5) : undefined,
-    clusterBonus: target.clusterBonus,
-    debtBonus: target.debtBonus,
-    redPenalty: target.redPenalty,
-    congestionPenalty: target.congestionPenalty,
-    recentlyVisitedPenalty: target.recentlyVisitedPenalty,
-    sameTargetPenalty: target.sameTargetPenalty
+    pathCost: target.pathCost,
+    checkpointValue: target.checkpointValue,
+    stalenessComponent: target.stalenessComponent,
+    multiplierComponent: target.multiplierComponent,
+    repeatPenalty: target.repeatPenalty,
+    coveredGreenCount: target.coveredGreenCount,
+    sampleGreenIds: Array.isArray(target.sampleGreenIds) ? target.sampleGreenIds.slice(0, 5) : undefined
   };
 }
 
@@ -1059,7 +1048,6 @@ export class AgentLoop {
       temporaryBlockedCells: this.beliefs.temporaryBlockedCells?.size ?? 0,
       scoutTarget: compactScoutTargetId(routePlan.scoutTarget?.id),
       scoutTargetDetails: scoutTarget,
-      scoutInfoValue: routePlan.scoutTarget?.infoValue,
       candidateCount: routePlan.candidateGreens?.length ?? 0,
       invalidPlanDetected: Boolean(routePlan.invalidPlanDetected),
       fallbackStage: routePlan.fallbackStage ?? "full_plan",
