@@ -1,7 +1,29 @@
+import { appendFile, mkdir } from "node:fs/promises";
+import { dirname, resolve } from "node:path";
+
 export function createChatProcessor({ beliefs, executor, logger }) {
   let lastEvaluatedChatId = 0;
   let chatClient = null;
   let chatModel = null;
+  let chatLogReady = false;
+  const chatDiagnosticsEnabled = process.env.CHAT_DIAGNOSTICS_ENABLED !== "0";
+  const chatDiagnosticsFile = resolve(process.env.CHAT_DIAGNOSTICS_FILE || "logs/chat-diagnostics.jsonl");
+
+  async function writeChatDiagnostics(entry) {
+    if (!chatDiagnosticsEnabled) return;
+    try {
+      if (!chatLogReady) {
+        await mkdir(dirname(chatDiagnosticsFile), { recursive: true });
+        chatLogReady = true;
+      }
+      await appendFile(chatDiagnosticsFile, `${JSON.stringify({
+        ts: new Date().toISOString(),
+        ...entry
+      })}\n`, "utf8");
+    } catch (error) {
+      logger.warn("chat diagnostics write failed", { error: error.message });
+    }
+  }
 
   const explicitPlanTool = {
     type: "function",
@@ -401,6 +423,7 @@ export function createChatProcessor({ beliefs, executor, logger }) {
       chatModel = model;
     }
 
+    const llmStartedAt = Date.now();
     const response = await chatClient.chat.completions.create({
       model: chatModel,
       messages,
@@ -418,6 +441,7 @@ export function createChatProcessor({ beliefs, executor, logger }) {
       tool_choice: "auto",
       temperature: 0
     });
+    const llmLatencyMs = Date.now() - llmStartedAt;
 
     const message = response.choices?.[0]?.message ?? {};
     const call = message.tool_calls?.[0];
@@ -458,7 +482,8 @@ export function createChatProcessor({ beliefs, executor, logger }) {
           ? `Plan accepted: moving to (${plans[0].payload.target.x},${plans[0].payload.target.y}).`
           : `Plan accepted: queued ${plans.length} steps (${plans.map((plan) => `(${plan.payload.target.x},${plan.payload.target.y})`).join(" -> ")}).`,
         plan: plans[0] ?? null,
-        plans
+        plans,
+        meta: { toolName: "set_explicit_plan", llmLatencyMs, toolArgs: parsedArgs }
       };
     }
 
@@ -523,7 +548,8 @@ export function createChatProcessor({ beliefs, executor, logger }) {
       });
       return {
         response: `Forbidden tile set at (${created.x},${created.y}). I will avoid it.`,
-        forbiddenTile: created
+        forbiddenTile: created,
+        meta: { toolName: "set_forbidden_tile", llmLatencyMs, toolArgs: parsedArgs }
       };
     }
 
@@ -554,7 +580,8 @@ export function createChatProcessor({ beliefs, executor, logger }) {
       });
       return {
         response: `Forbidden tile removed at (${validation.value.target.x},${validation.value.target.y}).`,
-        removedForbiddenTile: removed
+        removedForbiddenTile: removed,
+        meta: { toolName: "remove_forbidden_tile", llmLatencyMs, toolArgs: parsedArgs }
       };
     }
 
@@ -579,7 +606,8 @@ export function createChatProcessor({ beliefs, executor, logger }) {
       if (!entry) return { response: "Pickup multiplier rejected: invalid_multiplier." };
       return {
         response: `Pickup multiplier set at (${entry.x},${entry.y}) to ${entry.multiplier}x.`,
-        pickupMultiplierRule: entry
+        pickupMultiplierRule: entry,
+        meta: { toolName: "set_pickup_tile_multiplier", llmLatencyMs, toolArgs: parsedArgs }
       };
     }
 
@@ -597,7 +625,10 @@ export function createChatProcessor({ beliefs, executor, logger }) {
         senderId
       });
       if (!removed) return { response: `No pickup multiplier rule found at (${target.x},${target.y}).` };
-      return { response: `Pickup multiplier removed at (${target.x},${target.y}).` };
+      return {
+        response: `Pickup multiplier removed at (${target.x},${target.y}).`,
+        meta: { toolName: "remove_pickup_tile_multiplier", llmLatencyMs, toolArgs: parsedArgs }
+      };
     }
 
     if (call?.function?.name === "set_delivery_tile_multiplier") {
@@ -621,7 +652,8 @@ export function createChatProcessor({ beliefs, executor, logger }) {
       if (!entry) return { response: "Delivery multiplier rejected: invalid_multiplier." };
       return {
         response: `Delivery multiplier set at (${entry.x},${entry.y}) to ${entry.multiplier}x.`,
-        deliveryMultiplierRule: entry
+        deliveryMultiplierRule: entry,
+        meta: { toolName: "set_delivery_tile_multiplier", llmLatencyMs, toolArgs: parsedArgs }
       };
     }
 
@@ -639,7 +671,10 @@ export function createChatProcessor({ beliefs, executor, logger }) {
         senderId
       });
       if (!removed) return { response: `No delivery multiplier rule found at (${target.x},${target.y}).` };
-      return { response: `Delivery multiplier removed at (${target.x},${target.y}).` };
+      return {
+        response: `Delivery multiplier removed at (${target.x},${target.y}).`,
+        meta: { toolName: "remove_delivery_tile_multiplier", llmLatencyMs, toolArgs: parsedArgs }
+      };
     }
 
     if (call?.function?.name === "set_delivery_count_multiplier") {
@@ -663,7 +698,8 @@ export function createChatProcessor({ beliefs, executor, logger }) {
       if (!entry) return { response: "Delivery count multiplier rejected: invalid_payload." };
       return {
         response: `Delivery count multiplier set for ${entry.count} package(s) to ${entry.multiplier}x.`,
-        deliveryCountMultiplierRule: entry
+        deliveryCountMultiplierRule: entry,
+        meta: { toolName: "set_delivery_count_multiplier", llmLatencyMs, toolArgs: parsedArgs }
       };
     }
 
@@ -681,7 +717,10 @@ export function createChatProcessor({ beliefs, executor, logger }) {
         senderId
       });
       if (!removed) return { response: `No delivery count multiplier rule found for count ${count}.` };
-      return { response: `Delivery count multiplier removed for count ${count}.` };
+      return {
+        response: `Delivery count multiplier removed for count ${count}.`,
+        meta: { toolName: "remove_delivery_count_multiplier", llmLatencyMs, toolArgs: parsedArgs }
+      };
     }
 
     return { response: String(message?.content ?? "").trim() };
@@ -690,6 +729,7 @@ export function createChatProcessor({ beliefs, executor, logger }) {
   async function processPendingChatMessage() {
     const [message] = beliefs.pendingChatMessages?.(lastEvaluatedChatId, 1) ?? [];
     if (!message) return false;
+    const startedAt = Date.now();
 
     const senderId = message.fromId ?? message.id ?? message.from ?? null;
     if (senderId && beliefs.me?.id && senderId === beliefs.me.id) {
@@ -722,6 +762,7 @@ export function createChatProcessor({ beliefs, executor, logger }) {
     try {
       const evaluated = await evaluateChatPrompt(prompt, senderId, message.chatId);
       const response = String(evaluated?.response ?? "").trim();
+      const totalLatencyMs = Date.now() - startedAt;
       if (response && senderId) {
         const status = await executor.writeMessage({
           toId: senderId,
@@ -734,16 +775,46 @@ export function createChatProcessor({ beliefs, executor, logger }) {
           response,
           manualTaskId: evaluated?.plan?.id ?? null
         });
+        await writeChatDiagnostics({
+          event: "chat_processed",
+          chatId: Number(message.chatId ?? 0) || null,
+          senderId,
+          incomingMessage: String(message?.content ?? message?.text ?? "").slice(0, 400),
+          response: response.slice(0, 600),
+          toolName: evaluated?.meta?.toolName ?? null,
+          toolArgs: evaluated?.meta?.toolArgs ?? null,
+          fallbackKind: evaluated?.meta?.fallbackKind ?? null,
+          llmLatencyMs: Number(evaluated?.meta?.llmLatencyMs ?? 0) || null,
+          totalLatencyMs,
+          writeStatus: status
+        });
       } else {
         logger.warn("chat evaluated with empty response", {
           chatId: message.chatId,
           senderId
+        });
+        await writeChatDiagnostics({
+          event: "chat_empty_response",
+          chatId: Number(message.chatId ?? 0) || null,
+          senderId,
+          incomingMessage: String(message?.content ?? message?.text ?? "").slice(0, 400),
+          toolName: evaluated?.meta?.toolName ?? null,
+          llmLatencyMs: Number(evaluated?.meta?.llmLatencyMs ?? 0) || null,
+          totalLatencyMs
         });
       }
     } catch (error) {
       logger.error("chat evaluation failed", {
         chatId: message.chatId,
         senderId,
+        error: error.message
+      });
+      await writeChatDiagnostics({
+        event: "chat_failed",
+        chatId: Number(message.chatId ?? 0) || null,
+        senderId,
+        incomingMessage: String(message?.content ?? message?.text ?? "").slice(0, 400),
+        totalLatencyMs: Date.now() - startedAt,
         error: error.message
       });
     } finally {

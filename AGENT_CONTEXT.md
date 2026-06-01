@@ -193,6 +193,16 @@ Important concepts:
 - `events`: replanning triggers,
 - `chatInbox`: queued messages for the chat path.
 
+It also stores sticky manual overlays and tasks:
+
+- `manualTasks`: queued explicit goto tasks from chat tools,
+- `forbiddenTiles`: manually forbidden walkability overrides,
+- `pickupTileMultipliers`: pickup-value multipliers by tile,
+- `deliveryTileMultipliers`: delivery-value multipliers by tile,
+- `deliveryCountMultipliers`: delivery-value multipliers by delivered package count.
+
+These overlays are planner-facing constraints/preferences. They are intentionally separate from base map observation updates.
+
 Beliefs are deliberately mutable and event-driven. The planner reads them, but does not own them.
 
 ### Planner-State Conversion
@@ -244,6 +254,8 @@ The agent can produce several route modes:
 - `LOCAL_EXPLORE`: simple local fallback movement,
 - `IDLE`: no useful action found.
 
+`OPPORTUNISTIC_PICKUP` now uses multiplier-aware projected delivery gain when evaluating whether to detour, so opportunistic behavior is aligned with the same delivery-value model used by planner search.
+
 ### Candidate Green Selection
 
 The planner uses `src/planner/scoring/green-scorer.js` to rank parcel opportunities.
@@ -286,6 +298,12 @@ Core search concepts:
 - `findBestSequence(...)`: beam search over sequence candidates.
 
 The search is not a full-state solver. It is a guided sequence search over a reduced set of points of interest.
+
+Delivery scoring (`computeDeliveredValue(...)`) applies:
+
+- delivery tile multipliers,
+- delivery count multipliers (exact count rules like `1 -> 0x`, `3 -> 3x`),
+- multiplicative composition between both.
 
 ### Distance Oracle and Path Reconstruction
 
@@ -418,6 +436,18 @@ That path:
 
 This exists for the LLM integration work, but it should remain a side concern in the documentation and code structure.
 
+### Current Chat Tooling Surface
+
+Actionable chat instructions are expected to map to tools, not raw JSON replies. Current tool families include:
+
+- explicit manual movement: `set_explicit_plan` (single target or sequence via `targets`),
+- sticky map constraints: `set_forbidden_tile`, `remove_forbidden_tile`,
+- sticky pickup-value rules: `set_pickup_tile_multiplier`, `remove_pickup_tile_multiplier`,
+- sticky delivery-tile rules: `set_delivery_tile_multiplier`, `remove_delivery_tile_multiplier`,
+- sticky delivery-count rules: `set_delivery_count_multiplier`, `remove_delivery_count_multiplier`,
+
+These commands update belief overlays/events and trigger replanning through normal loop invalidation.
+
 ## Deliveroo.js Environment Context
 
 The agent runs inside Deliveroo.js, a grid-based educational parcel game.
@@ -503,6 +533,13 @@ The loop is:
 9. replan when the world changes.
 
 That is the main architecture. The LLM chat layer is a small adjacent feature, not the center of the repo.
+
+Recent additions relevant to planner behavior:
+
+- sticky forbidden-tile overlay is enforced by planner/path walkability checks,
+- explicit goto tasks are queued and consumed through `manualTasks`,
+- reward shaping supports pickup tile, delivery tile, and delivery count multipliers,
+- opportunistic pickup selection estimates projected delivery gain using multiplier-aware delivery scoring rather than raw parcel reward only.
 
 ## Verification Notes
 

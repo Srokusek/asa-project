@@ -1,0 +1,1 @@
+{"ts":"2026-06-01T08:37:17.631Z","event":"chat_processed","chatId":2,"senderId":"6fdca1","incomingMessage":"move to 10,10","response":"Plan accepted: moving to (10,10).","toolName":"set_explicit_plan","toolArgs":{"goalType":"goto_tile","target":{"x":10,"y":10}},"fallbackKind":null,"llmLatencyMs":70737,"totalLatencyMs":70738,"writeStatus":"successful"}
