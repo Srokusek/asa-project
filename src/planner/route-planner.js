@@ -7,7 +7,7 @@
  */
 
 import { directionFromPositions, manhattan } from "../utils/geometry.js";
-import { DEFAULT_PARAMS } from "./default-params.js";
+import { choosePlannerConfig } from "../config.js";
 import {
   asNumber,
   clamp,
@@ -80,8 +80,6 @@ import {
 
 const EPSILON = 1e-9;
 
-export { DEFAULT_PARAMS };
-
 function pairKey(fromId, toId) {
   return `${fromId}->${toId}`;
 }
@@ -117,187 +115,6 @@ function rankingDistance(state, from, to) {
 }
 
 export { buildMapProfile };
-
-export function chooseConfig(profile, params = {}) {
-  let mode = "DENSE_BEAM";
-  let topK = 4;
-  let beamWidth = 4;
-  let maxPickupsBeforeDelivery = 3;
-
-  if (profile.greenCount <= 15) {
-    mode = "SMALL_EXACT";
-    topK = profile.greenCount;
-    beamWidth = 10;
-    maxPickupsBeforeDelivery = 3;
-  } else if (profile.greenCount <= 60) {
-    mode = "MEDIUM_BEAM";
-    topK = 8;
-    beamWidth = 20;
-    maxPickupsBeforeDelivery = 5;
-  }
-
-  const periodicBase = Math.max(
-    0,
-    Math.round(asNumber(params.periodicReplanTicks, DEFAULT_PARAMS.periodicReplanTicks))
-  );
-  const periodicReplanTicks =
-    profile.hasDecay && periodicBase > 1 ? Math.max(1, Math.floor(periodicBase / 2)) : periodicBase;
-
-  return {
-    mode: params.mode ?? mode,
-    topK: Math.max(0, Math.min(profile.greenCount, asNumber(params.topK, topK))),
-    beamWidth: Math.max(1, Math.round(asNumber(params.beamWidth, beamWidth))),
-    maxPickupsBeforeDelivery: Math.max(
-      0,
-      Math.round(asNumber(params.maxPickupsBeforeDelivery, maxPickupsBeforeDelivery))
-    ),
-    kSmoothMax: asNumber(params.kSmoothMax, DEFAULT_PARAMS.kSmoothMax), // used for comparing current vs. future value
-    kWin: asNumber(params.kWin, DEFAULT_PARAMS.kWin), // used for calculating probability of beating oponents to package
-    rhoGeneration: asNumber(params.rhoGeneration, DEFAULT_PARAMS.rhoGeneration),
-    moveWeight: asNumber(params.moveWeight, DEFAULT_PARAMS.moveWeight),
-    betaCarry: asNumber(params.betaCarry, DEFAULT_PARAMS.betaCarry),
-    decayRate: asNumber(params.decayRate, DEFAULT_PARAMS.decayRate),
-    meanPackageValue: asNumber(params.meanPackageValue, DEFAULT_PARAMS.meanPackageValue),
-    generationMeanTime: params.generationMeanTime ?? DEFAULT_PARAMS.generationMeanTime,
-    generationProbability: params.generationProbability ?? DEFAULT_PARAMS.generationProbability,
-    maxPackages:
-      params.maxPackages === null || params.maxPackages === undefined
-        ? DEFAULT_PARAMS.maxPackages
-        : asNumber(params.maxPackages, DEFAULT_PARAMS.maxPackages),
-    minParcelConfidence: asNumber(params.minParcelConfidence, DEFAULT_PARAMS.minParcelConfidence),
-    enemySafetyMargin: asNumber(params.enemySafetyMargin, DEFAULT_PARAMS.enemySafetyMargin),
-    maxPlanningTimeMs: asNumber(params.maxPlanningTimeMs, DEFAULT_PARAMS.maxPlanningTimeMs),
-    scoutCooldownTicks: asNumber(params.scoutCooldownTicks, DEFAULT_PARAMS.scoutCooldownTicks),
-    sameScoutTargetPenalty: asNumber(params.sameScoutTargetPenalty, DEFAULT_PARAMS.sameScoutTargetPenalty),
-    recentScoutPenalty: asNumber(params.recentScoutPenalty, DEFAULT_PARAMS.recentScoutPenalty),
-    scoutDistanceWeight: asNumber(params.scoutDistanceWeight, DEFAULT_PARAMS.scoutDistanceWeight),
-    scoutRedDistanceWeight: asNumber(params.scoutRedDistanceWeight, DEFAULT_PARAMS.scoutRedDistanceWeight),
-    scoutFutureWeight: asNumber(params.scoutFutureWeight, DEFAULT_PARAMS.scoutFutureWeight),
-    scoutCongestionDistance: asNumber(
-      params.scoutCongestionDistance ?? params.scoutEnemyDistance,
-      DEFAULT_PARAMS.scoutCongestionDistance
-    ),
-    scoutEnemyDistance: asNumber(params.scoutEnemyDistance, DEFAULT_PARAMS.scoutEnemyDistance),
-    scoutCongestionPenalty: asNumber(params.scoutCongestionPenalty, DEFAULT_PARAMS.scoutCongestionPenalty),
-    noveltyBonus: asNumber(params.noveltyBonus, DEFAULT_PARAMS.noveltyBonus),
-    emptyGreenFutureWeight: asNumber(params.emptyGreenFutureWeight, DEFAULT_PARAMS.emptyGreenFutureWeight),
-    maxStalenessValue: asNumber(params.maxStalenessValue, DEFAULT_PARAMS.maxStalenessValue),
-    greenInfoMultiplier: asNumber(params.greenInfoMultiplier, DEFAULT_PARAMS.greenInfoMultiplier),
-    redInfoMultiplier: asNumber(params.redInfoMultiplier, DEFAULT_PARAMS.redInfoMultiplier),
-    infoValueWeight: asNumber(params.infoValueWeight, DEFAULT_PARAMS.infoValueWeight),
-    sensingRange: asNumber(params.sensingRange, DEFAULT_PARAMS.sensingRange),
-    clusterPickupRadius: asNumber(params.clusterPickupRadius, DEFAULT_PARAMS.clusterPickupRadius),
-    clusterPickupBonusWeight: asNumber(params.clusterPickupBonusWeight, DEFAULT_PARAMS.clusterPickupBonusWeight),
-    minClusterPackageValue: asNumber(params.minClusterPackageValue, DEFAULT_PARAMS.minClusterPackageValue),
-    greenClusterDistance: asNumber(params.greenClusterDistance, DEFAULT_PARAMS.greenClusterDistance),
-    clusterSizeWeight: asNumber(params.clusterSizeWeight, DEFAULT_PARAMS.clusterSizeWeight),
-    explorationDebtThreshold: asNumber(params.explorationDebtThreshold, DEFAULT_PARAMS.explorationDebtThreshold),
-    explorationDebtBonus: asNumber(params.explorationDebtBonus, DEFAULT_PARAMS.explorationDebtBonus),
-    localCandidateRadius: asNumber(params.localCandidateRadius, DEFAULT_PARAMS.localCandidateRadius),
-    localCandidateLimit: Math.max(
-      0,
-      Math.round(asNumber(params.localCandidateLimit, DEFAULT_PARAMS.localCandidateLimit))
-    ),
-    clusterExpansionRadius: asNumber(params.clusterExpansionRadius, DEFAULT_PARAMS.clusterExpansionRadius),
-    clusterExpansionLimit: Math.max(
-      0,
-      Math.round(asNumber(params.clusterExpansionLimit, DEFAULT_PARAMS.clusterExpansionLimit))
-    ),
-    maxCandidateGreens: Math.max(
-      0,
-      Math.round(asNumber(params.maxCandidateGreens, DEFAULT_PARAMS.maxCandidateGreens))
-    ),
-    localExploreReversePenalty: asNumber(
-      params.localExploreReversePenalty,
-      DEFAULT_PARAMS.localExploreReversePenalty
-    ),
-    localExploreInfoWeight: asNumber(params.localExploreInfoWeight, DEFAULT_PARAMS.localExploreInfoWeight),
-    denseGreenThreshold: asNumber(params.denseGreenThreshold, DEFAULT_PARAMS.denseGreenThreshold),
-    denseGreenMinGreens: asNumber(params.denseGreenMinGreens, DEFAULT_PARAMS.denseGreenMinGreens),
-    denseScoutRadius: asNumber(params.denseScoutRadius, DEFAULT_PARAMS.denseScoutRadius),
-    denseScoutMaxWaypoints: Math.max(
-      1,
-      Math.round(asNumber(params.denseScoutMaxWaypoints, DEFAULT_PARAMS.denseScoutMaxWaypoints))
-    ),
-    denseScoutMinDistanceFromLastDelivery: asNumber(
-      params.denseScoutMinDistanceFromLastDelivery,
-      DEFAULT_PARAMS.denseScoutMinDistanceFromLastDelivery
-    ),
-    greenExposureDepth: Math.max(1, Math.round(asNumber(params.greenExposureDepth, DEFAULT_PARAMS.greenExposureDepth))),
-    greenExposureBeamWidth: Math.max(
-      1,
-      Math.round(asNumber(params.greenExposureBeamWidth, DEFAULT_PARAMS.greenExposureBeamWidth))
-    ),
-    greenExposureMaxExpanded: Math.max(
-      1,
-      Math.round(asNumber(params.greenExposureMaxExpanded, DEFAULT_PARAMS.greenExposureMaxExpanded))
-    ),
-    greenExposureMinPlanLength: Math.max(
-      1,
-      Math.round(asNumber(params.greenExposureMinPlanLength, DEFAULT_PARAMS.greenExposureMinPlanLength))
-    ),
-    greenExposureStaleWeight: asNumber(params.greenExposureStaleWeight, DEFAULT_PARAMS.greenExposureStaleWeight),
-    greenExposureNewTileWeight: asNumber(params.greenExposureNewTileWeight, DEFAULT_PARAMS.greenExposureNewTileWeight),
-    greenExposureGreenWeight: asNumber(params.greenExposureGreenWeight, DEFAULT_PARAMS.greenExposureGreenWeight),
-    greenExposureDistanceWeight: asNumber(
-      params.greenExposureDistanceWeight,
-      DEFAULT_PARAMS.greenExposureDistanceWeight
-    ),
-    greenExposureBacktrackPenalty: asNumber(
-      params.greenExposureBacktrackPenalty,
-      DEFAULT_PARAMS.greenExposureBacktrackPenalty
-    ),
-    minGreenExposureScore: asNumber(params.minGreenExposureScore, DEFAULT_PARAMS.minGreenExposureScore),
-    positionRevisitPenalty: asNumber(params.positionRevisitPenalty, DEFAULT_PARAMS.positionRevisitPenalty),
-    edgeRevisitPenalty: asNumber(params.edgeRevisitPenalty, DEFAULT_PARAMS.edgeRevisitPenalty),
-    sameTargetPenalty: asNumber(params.sameTargetPenalty, DEFAULT_PARAMS.sameTargetPenalty),
-    sameSectorPenalty: asNumber(params.sameSectorPenalty, DEFAULT_PARAMS.sameSectorPenalty),
-    failedScoutTargetPenalty: asNumber(params.failedScoutTargetPenalty, DEFAULT_PARAMS.failedScoutTargetPenalty),
-    failedScoutTargetCooldownTicks: asNumber(
-      params.failedScoutTargetCooldownTicks,
-      DEFAULT_PARAMS.failedScoutTargetCooldownTicks
-    ),
-    edgeCooldownTicks: asNumber(params.edgeCooldownTicks, DEFAULT_PARAMS.edgeCooldownTicks),
-    positionCooldownTicks: asNumber(params.positionCooldownTicks, DEFAULT_PARAMS.positionCooldownTicks),
-    coverageSectorSize: Math.max(1, Math.round(asNumber(params.coverageSectorSize, DEFAULT_PARAMS.coverageSectorSize))),
-    returnToRedWeight: asNumber(params.returnToRedWeight, DEFAULT_PARAMS.returnToRedWeight),
-    trapPenalty: asNumber(params.trapPenalty, DEFAULT_PARAMS.trapPenalty),
-    planningBudgetMs: asNumber(params.planningBudgetMs, DEFAULT_PARAMS.planningBudgetMs),
-    hardPlanningBudgetMs: asNumber(params.hardPlanningBudgetMs, DEFAULT_PARAMS.hardPlanningBudgetMs),
-    mazeObstacleDensityThreshold: asNumber(
-      params.mazeObstacleDensityThreshold,
-      DEFAULT_PARAMS.mazeObstacleDensityThreshold
-    ),
-    enableEdgeTemporaryBlocks: params.enableEdgeTemporaryBlocks ?? DEFAULT_PARAMS.enableEdgeTemporaryBlocks,
-    temporaryEdgeBlockTtlTicks: Math.max(
-      1,
-      Math.round(asNumber(params.temporaryEdgeBlockTtlTicks, DEFAULT_PARAMS.temporaryEdgeBlockTtlTicks))
-    ),
-    maxRepeatedBlockedMovesBeforeReplan: Math.max(
-      1,
-      Math.round(
-        asNumber(
-          params.maxRepeatedBlockedMovesBeforeReplan,
-          DEFAULT_PARAMS.maxRepeatedBlockedMovesBeforeReplan
-        )
-      )
-    ),
-    opportunisticMaxDistance: asNumber(params.opportunisticMaxDistance, DEFAULT_PARAMS.opportunisticMaxDistance),
-    opportunisticPathRadius: asNumber(params.opportunisticPathRadius, DEFAULT_PARAMS.opportunisticPathRadius),
-    opportunisticCheckIntervalTicks: Math.max(
-      1,
-      Math.round(asNumber(params.opportunisticCheckIntervalTicks, DEFAULT_PARAMS.opportunisticCheckIntervalTicks))
-    ),
-    opportunisticMinGain: asNumber(params.opportunisticMinGain, DEFAULT_PARAMS.opportunisticMinGain),
-    opportunisticCongestionPenalty: asNumber(
-      params.opportunisticCongestionPenalty,
-      DEFAULT_PARAMS.opportunisticCongestionPenalty
-    ),
-    targetCongestionPenalty: asNumber(params.targetCongestionPenalty, DEFAULT_PARAMS.targetCongestionPenalty),
-    deliveryUrgencyWeight: asNumber(params.deliveryUrgencyWeight, DEFAULT_PARAMS.deliveryUrgencyWeight),
-    periodicReplanTicks
-  };
-}
 
 export { sigmoid, logSumExp, winProbability, currentGreenValue, futureGreenValue, computeGreenScore, computeGreenScores, selectCandidateGreens };
 
@@ -603,7 +420,7 @@ export function replan(state) {
     value: buildNearestRedDistanceMap(planningState, profile),
     enumerable: false
   });
-  const config = chooseConfig(profile, planningState.params);
+  const config = choosePlannerConfig(profile);
   const greenScores = computeGreenScores(planningState, config);
   // candidate greens only include possible packages
   const candidateGreens = selectCandidateGreens(planningState, greenScores, config);

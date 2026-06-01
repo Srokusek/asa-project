@@ -25,8 +25,8 @@ function normalizeId(prefix, id, position) {
   return `${prefix}_${position.x}_${position.y}`;
 }
 
-function normalizeParams(params = {}) {
-  return { ...DEFAULT_PARAMS, ...params };
+function normalizeParams() {
+  return { ...DEFAULT_PARAMS };
 }
 
 function normalizeVisitedGreenAt(value) {
@@ -273,7 +273,7 @@ function applyExplicitPoisToGrid(state) { //  not sure why we would need these e
  */
 export function parseMap(json) {
   const input = typeof json === "string" ? JSON.parse(json) : json ?? {};
-  const params = normalizeParams(input.params);
+  const params = normalizeParams();
   const { grid, width, height } = normalizeGrid(input, input.width, input.height);
   const me = normalizeMe(input);
   const parcelByPosition = new Map();

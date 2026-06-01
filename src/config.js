@@ -15,6 +15,11 @@ function normalizeHost(host) {
   return `http://${raw}`;
 }
 
+function asFinite(value, fallback = 0) {
+  const n = Number(value);
+  return Number.isFinite(n) ? n : fallback;
+}
+
 export const CONFIG = {
   host: normalizeHost(process.env.HOST),
   token: process.env.TOKEN ?? "",
@@ -116,3 +121,22 @@ export const CONFIG = {
     maxPlanningTimeMs: 30
   }
 };
+
+export function choosePlannerConfig(profile = {}, planner = CONFIG.planner) {
+  const mode = "CONFIG_STATIC";
+  const topK = Math.max(0, Math.min(asFinite(profile.greenCount, 0), asFinite(planner.topK, asFinite(profile.greenCount, 0))));
+  const beamWidth = Math.max(1, Math.round(asFinite(planner.beamWidth, 1)));
+  const maxPickupsBeforeDelivery = Math.max(0, Math.round(asFinite(planner.maxPickupsBeforeDelivery, 0)));
+  const periodicBase = Math.max(0, Math.round(asFinite(planner.periodicReplanTicks, 0)));
+  const periodicReplanTicks =
+    Boolean(profile.hasDecay) && periodicBase > 1 ? Math.max(1, Math.floor(periodicBase / 2)) : periodicBase;
+
+  return {
+    ...planner,
+    mode,
+    topK,
+    beamWidth,
+    maxPickupsBeforeDelivery,
+    periodicReplanTicks
+  };
+}
