@@ -38,7 +38,6 @@ import {
   computeGreenScore,
   computeGreenScores,
   currentGreenValue,
-  futureGreenValue,
   hasAvailablePackage,
   nearestRedDistance,
   packageConfidence,
@@ -46,7 +45,6 @@ import {
   packageReward,
   selectCandidateGreens,
   sigmoid,
-  logSumExp,
   winProbability
 } from "./scoring/green-scorer.js";
 import {
@@ -130,7 +128,7 @@ function rankingDistance(state, from, to) {
 
 export { buildMapProfile };
 
-export { sigmoid, logSumExp, winProbability, currentGreenValue, futureGreenValue, computeGreenScore, computeGreenScores, selectCandidateGreens };
+export { sigmoid, winProbability, currentGreenValue, computeGreenScore, computeGreenScores, selectCandidateGreens };
 
 export function buildPointsOfInterest(state, candidateGreens) {
   return [

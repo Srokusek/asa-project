@@ -17,12 +17,6 @@ export function sigmoid(x) {
   return 1 / (1 + Math.exp(-x));
 }
 
-export function logSumExp(C, F, k) {
-  if (k <= EPSILON) return Math.max(C, F);
-  const maxValue = Math.max(C, F);
-  return maxValue + Math.log(Math.exp(k * (C - maxValue)) + Math.exp(k * (F - maxValue))) / k;
-}
-
 function estimateDistance(_state, from, to) {
   return manhattan(from, to);
 }
@@ -61,15 +55,6 @@ export function winProbability(state, green, etaMe, config) {
     probability = Math.min(probability, sigmoid(config.kWin * (enemyEta - etaMe)));
   }
   return probability;
-}
-
-function generationProbabilityForGreen(state, config) {
-  const greenCount = Math.max(1, state.greens.length);
-  return 1 / greenCount;
-}
-
-function expectedGenerationWait(config) {
-  return 0;
 }
 
 export function packageConfidence(green) {
@@ -177,28 +162,8 @@ export function currentGreenValue(state, green, config) {
   return packageConfidence(green) * winProbability(state, green, etaMe, config) * adjustedValue;
 }
 
-export function futureGreenValue(state, green, config) {
-  if (!green.package && config.emptyGreenFutureWeight <= EPSILON) return 0;
-
-  const etaMe = rankingDistance(state, state.me.position, green.position);
-  if (!Number.isFinite(etaMe)) return 0;
-
-  const etaRed = nearestRedDistance(state, green.position);
-  if (!Number.isFinite(etaRed)) return 0;
-
-  const wait = expectedGenerationWait(config);
-  if (!Number.isFinite(wait)) return 0;
-
-  const travelAfterSpawn = etaMe + etaRed;
-  const expectedValue = Math.max(0, config.meanPackageValue - config.decayRate * travelAfterSpawn);
-  const q = generationProbabilityForGreen(state, config);
-  return q * expectedValue * Math.exp(-config.rhoGeneration * wait);
-}
-
 export function computeGreenScore(state, green, config) {
-  const C = currentGreenValue(state, green, config);
-  const F = futureGreenValue(state, green, config);
-  return logSumExp(C, F, config.kSmoothMax);
+  return currentGreenValue(state, green, config);
 }
 
 export function computeGreenScores(state, config) {
