@@ -36,7 +36,7 @@ export const CONFIG = {
   planner: {
     meanPackageValue: 10,
     packageVariance: 0,
-    decayRate: 1,
+    decayRate: 0.05,
     kWin: 1,
     moveWeight: 1,
     betaCarry: 0.5,
