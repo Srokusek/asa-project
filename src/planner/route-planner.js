@@ -131,9 +131,9 @@ export function chooseConfig(profile, params = {}) {
     maxPickupsBeforeDelivery = 3;
   } else if (profile.greenCount <= 60) {
     mode = "MEDIUM_BEAM";
-    topK = 4;
-    beamWidth = 4;
-    maxPickupsBeforeDelivery = 3;
+    topK = 8;
+    beamWidth = 20;
+    maxPickupsBeforeDelivery = 5;
   }
 
   const periodicBase = Math.max(
@@ -350,7 +350,7 @@ function routePlanWouldHaveExecutableActions(routePlan) {
   for (let i = 0; i < routePlan.sequence.length - 1; i += 1) {
     const fromId = routePlan.sequence[i];
     const toId = routePlan.sequence[i + 1];
-    const edge = getOracleEdge(routePlan.oracle, fromId, toId);
+    const edge = getOracleEdge(routePlan.oracle, fromId, toId, { requirePath: true });
     const toPoint = routePlan.oracle.pointsById?.get(toId) ?? routePlan.oracle.points?.find((point) => point.id === toId);
     if (!edge || !toPoint) continue;
     if (Array.isArray(edge.path) && edge.path.length > 1) return true;
@@ -492,7 +492,7 @@ export function buildPickupOnlyPlan(state, candidateGreens, oracle, config, prof
     if (!hasAvailablePackage(green, config)) continue;
 
     const edge = getOracleEdge(oracle, "START", green.id);
-    if (!edge || !Number.isFinite(edge.cost) || edge.path.length === 0) continue;
+    if (!edge || !Number.isFinite(edge.cost)) continue;
 
     const pickupTime = asNumber(state.time, 0) + edge.cost;
     const valueAtPickup = packageValueAtPickup(state, green, pickupTime, config);
@@ -524,17 +524,19 @@ export function buildPickupOnlyPlan(state, candidateGreens, oracle, config, prof
       needsDeliveryAfterPickup: true
     };
 
-    if (!best || value > best.value + EPSILON || (Math.abs(value - best.value) <= EPSILON && edge.cost < best.edge.cost)) {
-      best = { green, edge, plan: pickupPlan, value };
+    if (!best || value > best.value + EPSILON || (Math.abs(value - best.value) <= EPSILON && edge.cost < best.edgeCost)) {
+      best = { green, edgeCost: edge.cost, plan: pickupPlan, value };
     }
   }
 
   if (!best) return null;
+  const bestEdge = getOracleEdge(oracle, "START", best.green.id, { requirePath: true });
+  if (!bestEdge || !Array.isArray(bestEdge.path) || bestEdge.path.length === 0) return null;
 
   const routePlan = baseRoutePlan({
     mode: "PICKUP_ONLY",
     sequence: ["START", best.green.id],
-    path: best.edge.path.map(copyPosition),
+    path: bestEdge.path.map(copyPosition),
     value: best.value,
     plan: best.plan,
     profile,
@@ -586,8 +588,15 @@ export function replan(state) {
   const profile = buildMapProfile(planningState);
   Object.defineProperty(planningState, "__mapProfile", { value: profile, enumerable: false });
   Object.defineProperty(planningState, "__rankingDistanceCache", { value: new Map(), enumerable: false });
+  const directedStart = Date.now();
+  const directedDistanceFields = buildDirectedDistanceFields(planningState);
+  const startSingleSourceMs = Date.now() - directedStart;
   Object.defineProperty(planningState, "__directedDistanceFields", {
-    value: buildDirectedDistanceFields(planningState),
+    value: directedDistanceFields,
+    enumerable: false
+  });
+  Object.defineProperty(planningState, "__startSingleSourceMs", {
+    value: startSingleSourceMs,
     enumerable: false
   });
   Object.defineProperty(planningState, "__redDistanceMap", {

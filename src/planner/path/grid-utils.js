@@ -254,6 +254,8 @@ function uniqueByPosition(items) { // filter out duplicates by position uniquene
 
 function applyExplicitPoisToGrid(state) { //  not sure why we would need these explicit POIs, they should be within the grid itself
   for (const green of state.greens) {
+    // dynamic parcels on non-green tiles (P_*) must not mutate static map topology.
+    if (String(green.id ?? "").startsWith("P_")) continue;
     if (inBounds(state, green.position) && !state.grid[green.position.y][green.position.x].blocked) {
       state.grid[green.position.y][green.position.x] = { ...state.grid[green.position.y][green.position.x], type: "green" };
     }

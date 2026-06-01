@@ -69,8 +69,8 @@ export function buildPlannerState(beliefs, config) {
   for (let y = 0; y < height; y += 1) {
     const row = [];
     for (let x = 0; x < width; x += 1) {
-      // construct a representation of the map where temporarily blocked tiles are treated as unwalkable
-      const tile = beliefs.isTemporarilyBlocked?.({ x, y }) ? "0" : tileAt(beliefs, x, y);
+      // keep the static map topology unchanged; temporary blocks are enforced via overlays.
+      const tile = tileAt(beliefs, x, y);
       const type = tileType(tile);
       row.push(tile);
     
