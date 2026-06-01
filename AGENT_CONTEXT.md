@@ -244,13 +244,9 @@ Main responsibilities:
 
 The agent can produce several route modes:
 
-- `PICKUP_DELIVERY`: collect parcels and deliver them,
-- `DELIVERY_ONLY`: go deliver carried parcels,
-- `PICKUP_ONLY`: move to a parcel without delivery completion yet,
+- `PICKUP_DELIVERY_UNIFIED`: unified pickup+delivery search plan,
 - `OPPORTUNISTIC_PICKUP`: take a nearby parcel while already moving,
-- `SCOUT`: general exploration scouting,
-- `DENSE_SCOUT`: targeted exploration in dense green regions,
-- `GREEN_EXPOSURE_SCOUT`: short path that reveals new parcel information,
+- `SCOUT_UNIFIED`: information-gain scouting plan,
 - `LOCAL_EXPLORE`: simple local fallback movement,
 - `IDLE`: no useful action found.
 
@@ -295,7 +291,7 @@ Core search concepts:
 - `extendToRed(...)`: append a delivery target,
 - `planValue(...)`: objective for partial plans,
 - `finalObjective(...)`: objective for completed plans,
-- `findBestSequence(...)`: beam search over sequence candidates.
+- `findBestSequenceUnderBudget(...)`: beam search over sequence candidates with budget control.
 
 The search is not a full-state solver. It is a guided sequence search over a reduced set of points of interest.
 
@@ -376,9 +372,9 @@ This module is deliberately narrow: it does not decide the route, only how to re
 
 This exposes the default planner tuning values by freezing the planner config from `CONFIG.planner`.
 
-### `src/config/tunable-params.js`
+### `src/config.js`
 
-This file documents or centralizes which parameters can be tuned. The exact values matter less than the fact that the planner is parameterized rather than hard-coded.
+This file is the single source for runtime/environment config, including planner tuning knobs. The exact values matter less than the fact that the planner is parameterized rather than hard-coded.
 
 ### Major Tuning Areas
 
@@ -440,11 +436,14 @@ This exists for the LLM integration work, but it should remain a side concern in
 
 Actionable chat instructions are expected to map to tools, not raw JSON replies. Current tool families include:
 
+- arithmetic helper: `calculate_expressions` (used before actionable calls when numeric args need computation),
 - explicit manual movement: `set_explicit_plan` (single target or sequence via `targets`),
 - sticky map constraints: `set_forbidden_tile`,
 - sticky pickup-value rules: `set_pickup_tile_multiplier`,
 - sticky delivery-tile rules: `set_delivery_tile_multiplier`,
 - sticky delivery-count rules: `set_delivery_count_multiplier`,
+
+The chat processor executes tool calls in a bounded multi-step loop (`CHAT_MAX_LLM_ITERATIONS`, `CHAT_MAX_TOOL_CALLS`) and logs optional diagnostics (`CHAT_DIAGNOSTICS_*` env vars).
 
 These commands update belief overlays/events and trigger replanning through normal loop invalidation.
 
