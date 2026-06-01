@@ -490,7 +490,7 @@ export function replan(state) {
     }
   }
 
-  if ((planningState.carriedPackages ?? []).length === 0 && candidateGreens.length === 0 && visiblePackages.length === 0) {
+  if ((planningState.carriedPackages ?? []).length === 0 ) {
     const checkpointIndex = scoutCheckpointIndexFor(planningState, config, profile);
     const scoutPlan = buildUnifiedScoutPlan(planningState, profile, config, greenScores, checkpointIndex);
     if (scoutPlan) {
