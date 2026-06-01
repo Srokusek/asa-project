@@ -630,8 +630,10 @@ export class BeliefState {
       if (!previous && !carriedBy) { // push new package event if it was not seen before
         this.pushEvent("NEW_PACKAGE_SPAWN", { id: parcel.id, x: position.x, y: position.y }); 
       }
-      if (carriedBy && previous && !previous.carriedBy) { // push package stolen event if another agent picked up the package
-        this.pushEvent("PACKAGE_STOLEN", { id: parcel.id, carriedBy });
+      const carriedById = carriedBy !== null && carriedBy !== undefined ? String(carriedBy) : null;
+      const selfId = this.me?.id !== null && this.me?.id !== undefined ? String(this.me.id) : null;
+      if (carriedById && previous && !previous.carriedBy && carriedById !== selfId) { // push package stolen event if another agent picked up the package
+        this.pushEvent("PACKAGE_STOLEN", { id: parcel.id, carriedBy: carriedById });
       }
     }
 
