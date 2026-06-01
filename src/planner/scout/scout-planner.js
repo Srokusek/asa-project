@@ -11,7 +11,7 @@ import {
   pathFromBfsAll,
   shortestGridPath
 } from "../path/pathfinder.js";
-import { hasAvailablePackage, packageConfidence, packageReward } from "../scoring/green-scorer.js";
+import { hasAvailablePackage, packageConfidence, packageReward, pickupMultiplierAt } from "../scoring/green-scorer.js";
 
 const EPSILON = 1e-9;
 
@@ -281,6 +281,224 @@ function routePlanForScoutPoint({ mode, state, profile, config, greenScores, poi
     },
     oracle,
     state
+  });
+}
+
+function checkpointId(position, config) {
+  const sector = sectorIdFor(position, config);
+  return `SCOUT_UNIFIED_${position.x}_${position.y}_S${sector}`;
+}
+
+function centerDistance(position, center) {
+  return manhattan(position, center);
+}
+
+function stableCheckpointSort(a, b, center) {
+  if (a.coveredGreenIds.length !== b.coveredGreenIds.length) return b.coveredGreenIds.length - a.coveredGreenIds.length;
+  const centerDelta = centerDistance(a.position, center) - centerDistance(b.position, center);
+  if (centerDelta !== 0) return centerDelta;
+  return a.id.localeCompare(b.id);
+}
+
+export function buildScoutCheckpointSignature(state, config, profile = null) {
+  const greens = [...(state.greens ?? [])]
+    .map((green) => `${green.position.x},${green.position.y}`)
+    .sort()
+    .join("|");
+  const walkableGreens = [...(state.greens ?? [])]
+    .map((green) => copyPosition(green.position))
+    .filter((position) => isWalkable(state, position))
+    .map((position) => `${position.x},${position.y}`)
+    .sort()
+    .join("|");
+  const sensingRange = Math.max(0, asNumber(config.sensingRange, DEFAULT_PARAMS.sensingRange));
+  return [
+    state.width,
+    state.height,
+    sensingRange,
+    Boolean(profile?.hasDirectionalTiles),
+    Boolean(profile?.hasObstacles),
+    greens,
+    walkableGreens
+  ].join("::");
+}
+
+export function buildScoutCheckpointIndex(state, config, profile = null, signature = null) {
+  const maxCheckpoints = Math.max(1, Math.round(asNumber(config.unifiedScoutCheckpointCount, 24)));
+  const sensingRange = Math.max(0, asNumber(config.sensingRange, DEFAULT_PARAMS.sensingRange));
+  const center = { x: Math.floor(state.width / 2), y: Math.floor(state.height / 2) };
+  const greenById = new Map((state.greens ?? []).map((green) => [green.id, green]));
+  const candidates = [];
+
+  for (const green of state.greens ?? []) {
+    const position = copyPosition(green.position);
+    if (!isWalkable(state, position)) continue;
+    const coveredGreenIds = [];
+    for (const target of state.greens ?? []) {
+      if (manhattan(position, target.position) <= sensingRange) coveredGreenIds.push(target.id);
+    }
+    if (coveredGreenIds.length === 0) continue;
+    const id = checkpointId(position, config);
+    candidates.push({
+      id,
+      position,
+      coveredGreenIds: coveredGreenIds.sort(),
+      staticCoverageSize: coveredGreenIds.length
+    });
+  }
+
+  candidates.sort((a, b) => stableCheckpointSort(a, b, center));
+  const uncovered = new Set([...greenById.keys()]);
+  const selected = [];
+
+  while (selected.length < maxCheckpoints) {
+    let best = null;
+    let bestGain = -1;
+
+    for (const candidate of candidates) {
+      if (selected.some((entry) => entry.id === candidate.id)) continue;
+      let uncoveredGain = 0;
+      for (const greenId of candidate.coveredGreenIds) {
+        if (uncovered.has(greenId)) uncoveredGain += 1;
+      }
+      if (uncoveredGain <= 0) continue;
+      if (uncoveredGain > bestGain) {
+        best = candidate;
+        bestGain = uncoveredGain;
+        continue;
+      }
+      if (uncoveredGain === bestGain && best) {
+        const centerDelta = centerDistance(candidate.position, center) - centerDistance(best.position, center);
+        if (centerDelta < 0 || (centerDelta === 0 && candidate.id.localeCompare(best.id) < 0)) {
+          best = candidate;
+        }
+      }
+    }
+
+    if (!best) break;
+    selected.push(best);
+    for (const greenId of best.coveredGreenIds) uncovered.delete(greenId);
+  }
+
+  return {
+    signature: signature ?? buildScoutCheckpointSignature(state, config, profile),
+    checkpointCount: selected.length,
+    checkpoints: selected,
+    uncoveredGreenCount: uncovered.size
+  };
+}
+
+function unifiedScoutRepeatPenalty(state, checkpointIdValue, sectorId, config) {
+  const now = asNumber(state.time, 0);
+  const cooldown = asNumber(config.failedScoutTargetCooldownTicks, DEFAULT_PARAMS.failedScoutTargetCooldownTicks);
+  const attempt = state.scoutTargetAttempts?.[checkpointIdValue];
+  const targetRecent = attempt && now - asNumber(attempt.lastAttemptTick, -Infinity) <= cooldown;
+  const sectorRecent = (state.recentScoutTargets ?? []).some((id) => String(id).includes(`_S${sectorId}`));
+  return (
+    (targetRecent ? asNumber(config.unifiedScoutRepeatTargetPenalty, 20) : 0) +
+    (sectorRecent ? asNumber(config.unifiedScoutRepeatSectorPenalty, 10) : 0)
+  );
+}
+
+export function buildUnifiedScoutPlan(state, profile, config, greenScores, checkpointIndex) {
+  const checkpoints = checkpointIndex?.checkpoints ?? [];
+  if (checkpoints.length === 0) return null;
+
+  const start = copyPosition(state.me.position);
+  const stalenessCap = Math.max(1, asNumber(config.maxStalenessValue, DEFAULT_PARAMS.maxStalenessValue));
+  const stalenessWeight = asNumber(config.unifiedScoutStalenessWeight, 1);
+  const distanceWeight = asNumber(config.unifiedScoutDistanceWeight, 0.5);
+  const topK = Math.max(1, Math.round(asNumber(config.unifiedScoutTopKForRedTieBreak, 5)));
+  const startSearch = profile.hasUniformCosts ? bfsAllDistancesFrom(state, state.me.position) : null;
+  const greenById = new Map((state.greens ?? []).map((green) => [green.id, green]));
+  const candidates = [];
+
+  for (const checkpoint of checkpoints) {
+    const position = copyPosition(checkpoint.position);
+    const edge = startSearch
+      ? pathFromBfsAll(startSearch, position)
+      : shortestGridPath(state, start, position, profile);
+    if (!Number.isFinite(edge.cost) || edge.path.length <= 1) continue;
+
+    let stalenessComponent = 0;
+    let multiplierComponent = 0;
+    let coveredGreenCount = 0;
+    for (const greenId of checkpoint.coveredGreenIds ?? []) {
+      const green = greenById.get(greenId);
+      if (!green) continue;
+      const observedAt = state.lastObservedAtByGreen?.[positionKey(green.position)];
+      const rawStaleness =
+        observedAt === undefined ? stalenessCap : Math.max(0, asNumber(state.time, 0) - asNumber(observedAt, 0));
+      const cappedStaleness = Math.min(stalenessCap, rawStaleness);
+      const normalizedStaleness = cappedStaleness / stalenessCap;
+      const multiplier = pickupMultiplierAt(state, green.position);
+      multiplierComponent += multiplier;
+      stalenessComponent += multiplier * stalenessWeight * normalizedStaleness;
+      coveredGreenCount += 1;
+    }
+    if (coveredGreenCount === 0) continue;
+
+    const checkpointValue = multiplierComponent + stalenessComponent;
+    const redInfo = returnToRedPenalty(state, position, config);
+    if (redInfo.trapPenaltyApplied) continue;
+    const sector = sectorIdFor(position, config);
+    const repeatPenalty = unifiedScoutRepeatPenalty(state, checkpoint.id, sector, config);
+    const primaryScore = checkpointValue - distanceWeight * edge.cost - repeatPenalty;
+
+    candidates.push({
+      checkpoint,
+      position,
+      edge,
+      checkpointValue,
+      stalenessComponent,
+      multiplierComponent,
+      coveredGreenCount,
+      repeatPenalty,
+      distanceToNearestRed: redInfo.distanceToNearestRed,
+      primaryScore
+    });
+  }
+
+  if (candidates.length === 0) return null;
+  candidates.sort((a, b) => b.primaryScore - a.primaryScore || a.edge.cost - b.edge.cost || a.checkpoint.id.localeCompare(b.checkpoint.id));
+  const top = candidates.slice(0, topK);
+  top.sort(
+    (a, b) =>
+      a.distanceToNearestRed - b.distanceToNearestRed ||
+      a.edge.cost - b.edge.cost ||
+      a.checkpoint.id.localeCompare(b.checkpoint.id)
+  );
+  const best = top[0];
+
+  return routePlanForScoutPoint({
+    mode: "SCOUT_UNIFIED",
+    state,
+    profile,
+    config,
+    greenScores,
+    pointId: best.checkpoint.id,
+    point: best.position,
+    edge: best.edge,
+    value: best.primaryScore,
+    scoutTarget: {
+      id: best.checkpoint.id,
+      position: copyPosition(best.position),
+      score: best.primaryScore,
+      primaryScore: best.primaryScore,
+      checkpointValue: best.checkpointValue,
+      stalenessComponent: best.stalenessComponent,
+      multiplierComponent: best.multiplierComponent,
+      repeatPenalty: best.repeatPenalty,
+      coveredGreenCount: best.coveredGreenCount,
+      sampleGreenIds: (best.checkpoint.coveredGreenIds ?? []).slice(0, 8),
+      staticCoverageSize: best.checkpoint.staticCoverageSize,
+      checkpointSignature: checkpointIndex?.signature ?? null,
+      checkpointCount: checkpointIndex?.checkpointCount ?? checkpoints.length,
+      checkpointUncoveredGreenCount: checkpointIndex?.uncoveredGreenCount ?? null,
+      distanceFromMe: best.edge.cost,
+      pathCost: best.edge.cost,
+      distanceToNearestRed: best.distanceToNearestRed
+    }
   });
 }
 

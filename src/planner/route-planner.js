@@ -67,11 +67,11 @@ import {
 } from "./search/plan-search.js";
 import { baseRoutePlan } from "./route-plan.js";
 import {
-  buildDenseGreenScoutPlan,
+  buildScoutCheckpointIndex,
+  buildScoutCheckpointSignature,
+  buildUnifiedScoutPlan,
   buildGreenClusters,
-  buildGreenExposureScoutPlan,
   buildLocalExplorePlan,
-  buildScoutPlan,
   informationValueAtWaypoint,
   tileInformationValue,
   visibleAvailablePackages,
@@ -79,9 +79,27 @@ import {
 } from "./scout/scout-planner.js";
 
 const EPSILON = 1e-9;
+const UNIFIED_SCOUT_CHECKPOINT_CACHE = new Map();
 
 function pairKey(fromId, toId) {
   return `${fromId}->${toId}`;
+}
+
+function scoutCheckpointIndexFor(state, config, profile) {
+  const signature = buildScoutCheckpointSignature(state, config, profile);
+  const cached = UNIFIED_SCOUT_CHECKPOINT_CACHE.get(signature);
+  if (cached) {
+    return { ...cached, cacheHit: true };
+  }
+
+  const built = buildScoutCheckpointIndex(state, config, profile, signature);
+  UNIFIED_SCOUT_CHECKPOINT_CACHE.set(signature, built);
+  if (UNIFIED_SCOUT_CHECKPOINT_CACHE.size > 16) {
+    const oldest = UNIFIED_SCOUT_CHECKPOINT_CACHE.keys().next().value;
+    UNIFIED_SCOUT_CHECKPOINT_CACHE.delete(oldest);
+  }
+
+  return { ...built, cacheHit: false };
 }
 
 export { parseMap, inBounds, getCell, isWalkable, isMoveAllowed };
@@ -472,63 +490,18 @@ export function replan(state) {
     }
   }
 
-  // if no pacakges are visible or carried and the map profile is dense of greens
-  if (
-    (planningState.carriedPackages ?? []).length === 0 &&
-    candidateGreens.length === 0 &&
-    visiblePackages.length === 0 &&
-    profile.isDenseGreen
-  ) {
-    const denseScoutPlan = buildDenseGreenScoutPlan(planningState, profile, config, greenScores);
-    if (denseScoutPlan) {
+  if ((planningState.carriedPackages ?? []).length === 0 && candidateGreens.length === 0 && visiblePackages.length === 0) {
+    const checkpointIndex = scoutCheckpointIndexFor(planningState, config, profile);
+    const scoutPlan = buildUnifiedScoutPlan(planningState, profile, config, greenScores, checkpointIndex);
+    if (scoutPlan) {
       return {
-        ...denseScoutPlan,
+        ...scoutPlan,
+        invalidPlanDetected,
         fallbackStage: "scout",
-        candidateDiagnostics
+        candidateDiagnostics,
+        scoutCheckpointCacheHit: checkpointIndex.cacheHit
       };
     }
-
-    const localExplorePlan = buildLocalExplorePlan(planningState, profile, config);
-    if (localExplorePlan) {
-      return {
-        ...localExplorePlan,
-        fallbackStage: "local_explore",
-        candidateDiagnostics
-      };
-    }
-
-    return {
-      ...buildIdlePlan(planningState, profile, config, greenScores),
-      fallbackStage: "idle",
-      candidateDiagnostics
-    };
-  }
-
-  if (
-    (planningState.carriedPackages ?? []).length === 0 &&
-    candidateGreens.length === 0 &&
-    planningState.greens.length > 0 &&
-    visiblePackages.length === 0 &&
-    (config.sensingRange <= 1 || profile.isMazeLike)
-  ) {
-    const exposurePlan = buildGreenExposureScoutPlan(planningState, profile, config, greenScores);
-    if (exposurePlan) {
-      return {
-        ...exposurePlan,
-        fallbackStage: "scout",
-        candidateDiagnostics
-      };
-    }
-  }
-
-  const scoutPlan = buildScoutPlan(planningState, profile, config, greenScores);
-  if (scoutPlan) {
-    return {
-      ...scoutPlan,
-      invalidPlanDetected,
-      fallbackStage: "scout",
-      candidateDiagnostics
-    };
   }
 
   const localExplorePlan = buildLocalExplorePlan(planningState, profile, config);

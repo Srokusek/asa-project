@@ -41,6 +41,7 @@ const IDLE_REPLAN_EVENTS = new Set([
 const TARGET_PLAN_MODES = new Set(["PICKUP_DELIVERY", "DELIVERY_ONLY", "PICKUP_ONLY", "OPPORTUNISTIC_PICKUP"]);
 const INVALID_TARGET_PLAN_LIMIT = 3;
 const SCOUT_PLAN_MODES = new Set([
+  "SCOUT_UNIFIED",
   "SCOUT",
   "DENSE_SCOUT",
   "GREEN_EXPOSURE_SCOUT",
@@ -313,7 +314,7 @@ export class AgentLoop {
   }
 
   markScoutTargetVisitedIfInRange() {
-    if (this.currentRoutePlan?.mode !== "SCOUT") return;
+    if (!SCOUT_PLAN_MODES.has(this.currentRoutePlan?.mode)) return;
     const scoutTarget = this.currentRoutePlan.scoutTarget;
     const target = scoutTarget?.position;
     if (!target || !this.beliefs.me) return;
@@ -1311,7 +1312,7 @@ export class AgentLoop {
       if (this.actionIndex >= this.currentExecutablePlan.length) {
         const completedManualTask = this.currentRoutePlan?.mode === "MANUAL_GOTO" ? this.activeManualTask : null;
         // if this has finished the plan:
-        if (this.currentRoutePlan?.mode === "SCOUT" && this.currentRoutePlan.scoutTarget) {
+        if (SCOUT_PLAN_MODES.has(this.currentRoutePlan?.mode) && this.currentRoutePlan.scoutTarget) {
           // if the plan was a scouting plan, mark target location as scouted
           this.beliefs.markScoutVisited(
             this.currentRoutePlan.scoutTarget.id,
