@@ -117,6 +117,7 @@ function checkpointCoverageSort(a, b) {
 }
 
 export function buildScoutCheckpointSignature(state, config, profile = null) {
+  // get an id for each if the generated checkpoints
   const greens = [...(state.greens ?? [])]
     .map((green) => `${green.position.x},${green.position.y}`)
     .sort()
@@ -233,22 +234,27 @@ export function buildUnifiedScoutPlan(state, profile, config, greenScores, check
       : shortestGridPath(state, start, position, profile);
     if (!Number.isFinite(edge.cost) || edge.path.length <= 1) continue;
 
-    let stalenessComponent = 0;
+    let normalizedStalenessSum = 0;
     let multiplierComponent = 0;
     let coveredGreenCount = 0;
     for (const greenId of checkpoint.coveredGreenIds ?? []) {
       const green = greenById.get(greenId);
       if (!green) continue;
       const observedAt = state.lastObservedAtByGreen?.[positionKey(green.position)];
-      const Staleness = 
-        observedAt === undefined ? Math.log(Math.max(1, asNumber(state.time, 0))) : Math.log(Math.max(1, asNumber(state.time, 0) - asNumber(observedAt, 0)));
+      const staleness =
+        observedAt === undefined
+          ? stalenessCap
+          : Math.max(0, asNumber(state.time, 0) - asNumber(observedAt, 0));
+      const normalizedStaleness = Math.min(stalenessCap, staleness) / stalenessCap;
       const multiplier = pickupMultiplierAt(state, green.position);
       multiplierComponent += multiplier;
-      stalenessComponent += multiplier * stalenessWeight * Staleness;
+      normalizedStalenessSum += normalizedStaleness;
       coveredGreenCount += 1;
     }
     if (coveredGreenCount === 0) continue;
 
+    const checkpointStaleness = normalizedStalenessSum / coveredGreenCount; // average staleness green tiles around checkpoint
+    const stalenessComponent = stalenessWeight * checkpointStaleness * coveredGreenCount;
     const checkpointValue = multiplierComponent + stalenessComponent;
     const redInfo = returnToRedPenalty(state, position, config);
     if (redInfo.trapPenaltyApplied) continue;
@@ -261,6 +267,7 @@ export function buildUnifiedScoutPlan(state, profile, config, greenScores, check
       position,
       edge,
       checkpointValue,
+      checkpointStaleness,
       stalenessComponent,
       multiplierComponent,
       coveredGreenCount,
