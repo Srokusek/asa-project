@@ -96,6 +96,7 @@ export function createConfig(env = process.env) {
     host: normalizeHost(env.HOST),
     token: env.TOKEN ?? "",
     agentName: env.AGENT_NAME ?? "PlannerAgent",
+    teammateId: env.TEAMMATE_ID ?? null,
     logLevel: env.LOG_LEVEL ?? "info",
     agentType,
     actionDelayMs: numberFromEnv(env, "ACTION_DELAY_MS", 100),

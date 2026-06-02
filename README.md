@@ -13,12 +13,31 @@ npm install
 Create `.env` from `.env.example`:
 
 ```env
+AGENT_TYPE=bdi
 HOST=deliveroojs.azurewebsites.net
 TOKEN=INSERISCI_TOKEN
 AGENT_NAME=PlannerAgent
+TEAMMATE_ID=paired_agent_id
 LOG_LEVEL=info
 ACTION_DELAY_MS=100
 ```
+
+`AGENT_TYPE` is required and must be either `bdi` or `llm`.
+
+For `llm` mode, also configure an admin id and model access:
+
+```env
+AGENT_TYPE=llm
+ADMIN_ID=your_admin_id
+TEAMMATE_ID=your_bdi_teammate_id
+LITELLM_API_KEY=your_key
+LITELLM_BASE_URL=https://llm.bears.disi.unitn.it/v1
+LOCAL_MODEL=llama-3.3-70b-lmstudio
+```
+
+If `AGENT_TYPE=llm` and `ADMIN_ID` is missing, the agent still runs the BDI loop but chat is disabled.
+
+For a paired `llm` + `bdi` team, set `TEAMMATE_ID` in each agent's env file to the other agent's Deliveroo id. The `llm` agent uses it to send normalized JSON teammate sync envelopes for durable tool side effects, and the `bdi` agent uses it to accept only sync messages from that source.
 
 For competition runs, set `ACTION_DELAY_MS` around `20`-`30` for a smoother action loop. The loop still enforces a `20ms` minimum.
 

@@ -1,4 +1,5 @@
 import { chatTools } from "./tool-definitions.js";
+import { buildTeammateSyncMessage } from "../utils/teammate-sync.js";
 
 function asToolError(toolName, message, extra = {}) {
   return {
@@ -78,6 +79,7 @@ export function compactToolArgs(args) {
 
 export function createToolExecutor({ beliefs, executor, logger, config }) {
   const llmConfig = config?.llm ?? {};
+  const teammateId = config?.teammateId ?? null;
   const maxCalculatorExpressions = Math.max(1, Number(llmConfig.maxCalculatorExpressions ?? 12) || 12);
   const maxCalculatorExpressionLength = Math.max(8, Number(llmConfig.maxCalculatorExpressionLength ?? 120) || 120);
 
@@ -124,6 +126,35 @@ export function createToolExecutor({ beliefs, executor, logger, config }) {
     }
 
     return { ok: false };
+  }
+
+  async function syncToolResultWithTeammate({ type, entry }) {
+    if (!teammateId || !entry) return;
+
+    const message = buildTeammateSyncMessage({ type, entry });
+
+    if (!message) return;
+
+    try {
+      const status = await executor.writeMessage({
+        toId: teammateId,
+        message
+      });
+      if (status === false) {
+        logger.warn("teammate tool sync failed", {
+          teammateId,
+          type,
+          entry
+        });
+      }
+    } catch (error) {
+      logger.warn("teammate tool sync failed", {
+        teammateId,
+        type,
+        entry,
+        error: error.message
+      });
+    }
   }
 
   function validateExplicitPlanArgs(args) {
@@ -434,6 +465,7 @@ export function createToolExecutor({ beliefs, executor, logger, config }) {
           data: { reason: "invalid_multiplier" }
         });
       }
+      await syncToolResultWithTeammate({ type: "pickup_tile_multiplier_set", entry });
       return asToolSuccess(toolName, `Pickup multiplier set at (${entry.x},${entry.y}) to ${entry.multiplier}x.`, {
         pickupMultiplierRule: entry,
         toolArgs: parsed.value,
@@ -462,6 +494,7 @@ export function createToolExecutor({ beliefs, executor, logger, config }) {
           data: { reason: "invalid_multiplier" }
         });
       }
+      await syncToolResultWithTeammate({ type: "delivery_tile_multiplier_set", entry });
       return asToolSuccess(toolName, `Delivery multiplier set at (${entry.x},${entry.y}) to ${entry.multiplier}x.`, {
         deliveryMultiplierRule: entry,
         toolArgs: parsed.value,

@@ -1,4 +1,5 @@
 import { normalizeSensingRange } from "./belief-state.js";
+import { applyTeammateSyncMessage } from "../utils/teammate-sync.js";
 
 function asArray(value) {
   return Array.isArray(value) ? value : [];
@@ -62,7 +63,7 @@ function observedSensingRange(config) {
   return normalizeSensingRange(config?.GAME?.player?.observation_distance, null);
 }
 
-export function registerSdkListeners(socket, beliefs, config) {
+export function registerSdkListeners(socket, beliefs, config, logger = null) {
   socket.on("connect", () => {
     beliefs.pushEvent("CONNECTED");
   });
@@ -114,10 +115,23 @@ export function registerSdkListeners(socket, beliefs, config) {
   });
 
   socket.on("msg", (...args) => {
-    if (!config?.llm?.chatEnabled) return;
-
     const normalized = normalizeChatArgs(args);
-    if (String(normalized.fromId ?? "") !== String(config.llm.adminId)) return;
+    const fromId = String(normalized.fromId ?? "");
+    const teammateId = String(config?.teammateId ?? "");
+
+    if (config?.agentType === "bdi") {
+      if (!teammateId || fromId !== teammateId) return;
+      applyTeammateSyncMessage({
+        rawText: normalized.text,
+        fromId: normalized.fromId ?? null,
+        beliefs,
+        logger
+      });
+      return;
+    }
+
+    if (!config?.llm?.chatEnabled) return;
+    if (fromId !== String(config.llm.adminId)) return;
     beliefs.pushChatMessage(normalized);
   });
 }
