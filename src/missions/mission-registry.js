@@ -27,6 +27,10 @@ export class MissionRegistry {
       createdAtTick: this.currentTick(),
       ...specInput
     });
+    if (spec.validationError) {
+      this.notify("reject", spec, { reason: spec.validationError });
+      return { ...spec, status: MISSION_STATUS.REJECTED };
+    }
     this.missions.set(spec.id, spec);
     this.notify("add", spec);
     return { ...spec };
@@ -49,6 +53,11 @@ export class MissionRegistry {
     return { ...updated };
   }
 
+  getMission(id) {
+    const mission = this.missions.get(String(id));
+    return mission ? { ...mission } : null;
+  }
+
   activeMissions(currentTick = this.currentTick()) {
     this.expireMissions(currentTick);
     return [...this.missions.values()]
@@ -58,6 +67,24 @@ export class MissionRegistry {
 
   activeDeliveryRules(currentTick = this.currentTick()) {
     return buildDeliveryRules(this.activeMissions(currentTick), currentTick);
+  }
+
+  activeLevel1(currentTick = this.currentTick()) {
+    return this.activeMissions(currentTick).filter((mission) => Number(mission.level) === 1);
+  }
+
+  activeLevel2(currentTick = this.currentTick()) {
+    return this.activeMissions(currentTick).filter((mission) => Number(mission.level) === 2);
+  }
+
+  activeLevel3(currentTick = this.currentTick()) {
+    return this.activeMissions(currentTick).filter((mission) => Number(mission.level) === 3);
+  }
+
+  activeCoordinationPlans(currentTick = this.currentTick()) {
+    return this.activeLevel3(currentTick)
+      .map((mission) => mission.macroPlan ?? mission.objective?.coordinationPlan ?? null)
+      .filter(Boolean);
   }
 
   activeForbiddenTiles(currentTick = this.currentTick()) {
@@ -82,8 +109,20 @@ export class MissionRegistry {
     return this.updateMission(id, { status: MISSION_STATUS.COMPLETED });
   }
 
+  markAccepted(id) {
+    return this.updateMission(id, { status: MISSION_STATUS.ACCEPTED });
+  }
+
   markRejected(id, reason = "mission_rejected") {
     return this.updateMission(id, { status: MISSION_STATUS.REJECTED, reason });
+  }
+
+  markFailed(id, reason = "mission_failed") {
+    return this.updateMission(id, { status: MISSION_STATUS.FAILED, reason });
+  }
+
+  markCancelled(id, reason = "mission_cancelled") {
+    return this.updateMission(id, { status: MISSION_STATUS.CANCELLED, reason });
   }
 }
 

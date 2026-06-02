@@ -205,7 +205,7 @@ function copyPosition(position) {
 }
 
 export class AgentLoop {
-  constructor(socket, beliefs, config) {
+  constructor(socket, beliefs, config, options = {}) {
     this.socket = socket;
     this.beliefs = beliefs;
     this.config = config;
@@ -226,8 +226,12 @@ export class AgentLoop {
     this.sameBlockedMoveCount = 0;
     this.lastReplanCause = "missing_plan";
     this.invalidNonIdleZeroActionCount = 0;
-    this.chatProcessor = createChatProcessor({ beliefs: this.beliefs, executor: this.executor, logger: this.logger });
+    this.chatProcessor = options.enableChatProcessor === false
+      ? null
+      : createChatProcessor({ beliefs: this.beliefs, executor: this.executor, logger: this.logger });
     this.zoneMemory = new ZoneMemory(config.planner);
+    this.teamMessageHandler = options.teamMessageHandler ?? null;
+    this.coordinationController = options.coordinationController ?? null;
     this.activeManualTask = null;
   }
 
@@ -891,19 +895,22 @@ export class AgentLoop {
           }
         }
       }
+      this.teamMessageHandler?.({ beliefs: this.beliefs, events, loop: this });
       this.beliefs.missionRegistry?.expireMissions?.(this.beliefs.time);
       this.beliefs.zoneMemorySummary = this.zoneMemory.updateFromBeliefs(this.beliefs);
+      this.coordinationController?.update?.();
       // events is a list of all events that the agent has sensed since the last tick
       if (!this.beliefs.ready) return; // stop if connection, map or other crucial steps have not been resolved yet
 
-      this.chatProcessor.kick?.();
+      this.chatProcessor?.kick?.();
 
       const reactive = tryImmediateAction({
         beliefs: this.beliefs,
         currentRoutePlan: this.currentRoutePlan,
         currentExecutablePlan: this.currentExecutablePlan,
         actionIndex: this.actionIndex,
-        config: this.config
+        config: this.config,
+        coordinationController: this.coordinationController
       });
       let keepCurrentPlanForReactiveAction = false;
       if (reactive?.routePlan && reactive?.executablePlan) {
@@ -960,6 +967,15 @@ export class AgentLoop {
         action,
         sequence: compactSequence(this.currentRoutePlan?.sequence).text
       });
+
+      if (this.coordinationController?.movementBlocked?.(action)) {
+        this.telemetry.record("coordination_movement_blocked", {
+          mode: this.currentRoutePlan?.mode,
+          action,
+          reason: this.coordinationController.redLightReason ?? "coordination_constraint"
+        });
+        return;
+      }
 
       // take note if there is another agent in the target tile of a move action
       if (action.type === "move" && action.to && this.enemyOccupies(action.to)) {

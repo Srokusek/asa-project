@@ -4,6 +4,8 @@
   "type": "module",
   "scripts": {
     "start": "node src/index.js",
+    "start:bdi": "node -e \"process.env.AGENT_ROLE='bdi'; import('./src/index.js').then(m=>m.startAgent())\"",
+    "start:llm": "node -e \"process.env.AGENT_ROLE='llm'; import('./src/index.js').then(m=>m.startAgent())\"",
     "chat:llm": "node src/llm-chat-agent.js",
     "dev": "node src/index.js",
     "test": "node --test"

@@ -119,7 +119,14 @@ export function buildImmediatePickupPlan(plannerState, config = {}) {
   };
 }
 
-export function tryImmediateAction({ beliefs, currentRoutePlan, currentExecutablePlan, actionIndex = 0, config } = {}) {
+export function tryImmediateAction({
+  beliefs,
+  currentRoutePlan,
+  currentExecutablePlan,
+  actionIndex = 0,
+  config,
+  coordinationController = null
+} = {}) {
   if (!beliefs?.ready || !beliefs?.me) return null;
   const plannerState = buildPlannerState(beliefs, config);
   const position = roundTilePosition(beliefs.me);
@@ -149,6 +156,7 @@ export function tryImmediateAction({ beliefs, currentRoutePlan, currentExecutabl
   }
 
   const nextAction = currentExecutablePlan?.[actionIndex] ?? null;
+  if (coordinationController?.movementBlocked?.(nextAction)) return null;
   if (currentRoutePlan?.mode === "MANUAL_GOTO") {
     if (currentActionIsValid(plannerState, beliefs, nextAction)) {
       return { action: nextAction, fromCurrentPlan: true };
@@ -157,7 +165,7 @@ export function tryImmediateAction({ beliefs, currentRoutePlan, currentExecutabl
   }
 
   const localParcel = visibleParcelAt(beliefs, position);
-  if (localParcel) {
+  if (localParcel && !coordinationController?.movementBlocked?.({ type: "pick_up" })) {
     return {
       action: {
         type: "pick_up",
@@ -176,6 +184,9 @@ export function tryImmediateAction({ beliefs, currentRoutePlan, currentExecutabl
   if (currentRoutePlan && !PREEMPTABLE_MODES.has(currentRoutePlan.mode)) return null;
 
   const immediatePickup = buildImmediatePickupPlan(plannerState, config?.planner ?? config ?? {});
+  if (immediatePickup?.executablePlan?.[0] && coordinationController?.movementBlocked?.(immediatePickup.executablePlan[0])) {
+    return null;
+  }
   if (immediatePickup) return immediatePickup;
   return null;
 }

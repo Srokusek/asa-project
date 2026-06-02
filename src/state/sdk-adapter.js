@@ -59,7 +59,9 @@ function normalizeChatArgs(args) {
   return { text: String(args[0] ?? "") };
 }
 
-export function registerSdkListeners(socket, beliefs, _loop = null) {
+export function registerSdkListeners(socket, beliefs, _loop = null, options = {}) {
+  const messageRouter = options.messageRouter ?? null;
+  const routeNaturalChat = options.routeNaturalChat !== false;
   socket.on("connect", () => {
     beliefs.pushEvent("CONNECTED");
   });
@@ -102,6 +104,7 @@ export function registerSdkListeners(socket, beliefs, _loop = null) {
     const normalized = normalizeChatArgs(args);
     const teamMessage = parseTeamMessage(normalized.text);
     if (teamMessage) {
+      messageRouter?.routeTeamMessage?.(teamMessage, beliefs.time);
       beliefs.pushTeamMessage({
         ...teamMessage,
         from: teamMessage.from ?? normalized.fromId ?? null,
@@ -109,6 +112,7 @@ export function registerSdkListeners(socket, beliefs, _loop = null) {
       });
       return;
     }
+    if (routeNaturalChat) messageRouter?.routeIncomingChat?.(normalized, beliefs.time);
     // ignore non-admin messages
     if (CONFIG.adminId) {
       if (String(normalized.fromId ?? "") !== String(CONFIG.adminId)) return;
