@@ -35,7 +35,7 @@ export function visibleAvailablePackages(state, config) {
   });
 }
 
-function returnToRedPenalty(state, position, config) {
+function returnToRedPenalty(state, position, config) { // penalty for getting trapped or long travel distance
   const distance = distanceToNearestReachableRed(state, position);
   if (!Number.isFinite(distance)) {
     return {
@@ -105,15 +105,15 @@ function checkpointId(position, config) {
   return `SCOUT_UNIFIED_${position.x}_${position.y}_S${sector}`;
 }
 
-function centerDistance(position, center) {
-  return manhattan(position, center);
+function shuffleInPlace(items) {
+  for (let i = items.length - 1; i > 0; i -= 1) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [items[i], items[j]] = [items[j], items[i]];
+  }
 }
 
-function stableCheckpointSort(a, b, center) {
-  if (a.coveredGreenIds.length !== b.coveredGreenIds.length) return b.coveredGreenIds.length - a.coveredGreenIds.length;
-  const centerDelta = centerDistance(a.position, center) - centerDistance(b.position, center);
-  if (centerDelta !== 0) return centerDelta;
-  return a.id.localeCompare(b.id);
+function checkpointCoverageSort(a, b) {
+  return b.coveredGreenIds.length - a.coveredGreenIds.length;
 }
 
 export function buildScoutCheckpointSignature(state, config, profile = null) {
@@ -142,7 +142,6 @@ export function buildScoutCheckpointSignature(state, config, profile = null) {
 export function buildScoutCheckpointIndex(state, config, profile = null, signature = null) {
   const maxCheckpoints = Math.max(1, Math.round(asNumber(config.unifiedScoutCheckpointCount, 24)));
   const sensingRange = Math.max(0, asNumber(config.sensingRange, DEFAULT_PARAMS.sensingRange));
-  const center = { x: Math.floor(state.width / 2), y: Math.floor(state.height / 2) };
   const greenById = new Map((state.greens ?? []).map((green) => [green.id, green]));
   const candidates = [];
 
@@ -163,7 +162,8 @@ export function buildScoutCheckpointIndex(state, config, profile = null, signatu
     });
   }
 
-  candidates.sort((a, b) => stableCheckpointSort(a, b, center));
+  shuffleInPlace(candidates);
+  candidates.sort(checkpointCoverageSort);
   const uncovered = new Set([...greenById.keys()]);
   const selected = [];
 
@@ -183,11 +183,8 @@ export function buildScoutCheckpointIndex(state, config, profile = null, signatu
         bestGain = uncoveredGain;
         continue;
       }
-      if (uncoveredGain === bestGain && best) {
-        const centerDelta = centerDistance(candidate.position, center) - centerDistance(best.position, center);
-        if (centerDelta < 0 || (centerDelta === 0 && candidate.id.localeCompare(best.id) < 0)) {
-          best = candidate;
-        }
+      if (uncoveredGain === bestGain && best && Math.random() < 0.5) {
+        best = candidate;
       }
     }
 
