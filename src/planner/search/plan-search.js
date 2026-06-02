@@ -70,7 +70,7 @@ export function packageValueAtPickup(state, green, pickupTime, config) {
 }
 
 export function beatsEnemiesToGreen(state, green, etaMe, config) {
-  if (!state.enemies || state.enemies.length === 0) return true;
+  if (!state.enemies || state.enemies.length === 0 || config.ignoreEnemyEta) return true;
   const margin = asNumber(config.enemySafetyMargin, 0);
   return state.enemies.every((enemy) => {
     const enemyEta = rankingDistance(state, enemy.position, green.position);
