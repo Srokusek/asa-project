@@ -6,7 +6,6 @@
     "start": "node src/index.js",
     "start:bdi": "cross-env AGENT_ROLE=bdi node src/index.js",
     "start:llm": "cross-env AGENT_ROLE=llm node src/index.js",
-    "chat:llm": "node src/llm-chat-agent.js",
     "dev": "node src/index.js",
     "test": "node --test"
   },

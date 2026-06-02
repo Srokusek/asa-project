@@ -86,6 +86,12 @@ function lightFrom(role = {}, plan = {}) {
   return TEAM_MESSAGE_TYPES.RED_LIGHT;
 }
 
+function messageExpired(message, currentTick = 0) {
+  const ttl = Number(message?.ttl ?? 0);
+  if (ttl <= 0) return false;
+  return Number(currentTick) > Number(message?.tick ?? 0) + ttl;
+}
+
 export class CoordinationController {
   constructor({ agentId, aliases = [], beliefs, missionRegistry = null, sendTeamMessage = null } = {}) {
     this.agentId = agentId;
@@ -120,6 +126,13 @@ export class CoordinationController {
     return messages;
   }
 
+  resetForNewMap() {
+    this.plans.clear();
+    this.redLight = false;
+    this.redLightReason = null;
+    this.outbox = [];
+  }
+
   movementBlocked(action = null) {
     if (!this.redLight) return false;
     if (!action || action.type !== "move") return false;
@@ -128,6 +141,7 @@ export class CoordinationController {
 
   receiveTeamMessage(message) {
     if (!message) return null;
+    if (messageExpired(message, this.beliefs?.time ?? 0)) return { accepted: false, reason: "expired_team_message" };
     if (message.type === TEAM_MESSAGE_TYPES.POSITION_HEARTBEAT) {
       const teammate = this.beliefs?.updateTeamHeartbeat?.(message.payload, {
         receivedAtTick: this.beliefs?.time ?? message.tick,
@@ -157,6 +171,25 @@ export class CoordinationController {
     if (message.type === TEAM_MESSAGE_TYPES.SUBGOAL_ASSIGNMENT) {
       return this.receiveSubgoal(message.payload?.subgoal ?? message.payload, message.from);
     }
+    if (message.type === TEAM_MESSAGE_TYPES.RENDEZVOUS_READY) {
+      return this.receiveReady(message.payload ?? {}, message.from);
+    }
+    if (message.type === TEAM_MESSAGE_TYPES.STATUS_UPDATE && String(message.payload?.status ?? "").toUpperCase() === "READY") {
+      return this.receiveReady(message.payload ?? {}, message.from);
+    }
+    if (message.type === TEAM_MESSAGE_TYPES.MISSION_COMPLETED) {
+      const entry = this.findPlanForPayload(message.payload ?? {});
+      if (!entry) return { accepted: false, reason: "unrelated_completion" };
+      entry.state = COORDINATION_STATES.COMPLETED;
+      this.missionRegistry?.markCompleted?.(entry.plan?.missionId ?? entry.id);
+      return { accepted: true, state: entry.state };
+    }
+    if (message.type === TEAM_MESSAGE_TYPES.MISSION_FAILED) {
+      const entry = this.findPlanForPayload(message.payload ?? {});
+      if (!entry) return { accepted: false, reason: "unrelated_failure" };
+      this.failPlan(entry, message.payload?.reason ?? "teammate_failed", message.from);
+      return { accepted: true, state: entry.state };
+    }
     if (message.type === TEAM_MESSAGE_TYPES.HANDOFF_REQUEST) {
       return this.failHandoff(message.payload, message.from);
     }
@@ -185,6 +218,97 @@ export class CoordinationController {
     return entry;
   }
 
+  completePlan(entry, to = entry?.from ?? null) {
+    if (!entry) return null;
+    if (entry.state === COORDINATION_STATES.COMPLETED) return entry;
+    if (entry.state === COORDINATION_STATES.FAILED || entry.state === COORDINATION_STATES.ABORTED) return entry;
+    entry.state = COORDINATION_STATES.COMPLETED;
+    entry.reason = "coordination_completed";
+    this.missionRegistry?.markCompleted?.(entry.plan?.missionId ?? entry.id);
+    this.emit(TEAM_MESSAGE_TYPES.MISSION_COMPLETED, {
+      missionId: entry.plan?.missionId ?? entry.id,
+      coordinationPlanId: entry.id
+    }, to);
+    return entry;
+  }
+
+  findPlanForPayload(payload = {}) {
+    const coordinationPlanId = payload.coordinationPlanId ?? payload.planId ?? payload.id ?? null;
+    const missionId = payload.missionId ?? null;
+    if (coordinationPlanId && this.plans.has(String(coordinationPlanId))) {
+      return this.plans.get(String(coordinationPlanId));
+    }
+    if (!missionId) return null;
+    for (const entry of this.plans.values()) {
+      if (String(entry.plan?.missionId ?? entry.id) === String(missionId)) return entry;
+    }
+    return null;
+  }
+
+  receiveReady(payload = {}, from = null) {
+    const entry = this.findPlanForPayload(payload);
+    if (!entry) return { accepted: false, reason: "ready_not_correlated" };
+    const now = this.beliefs?.time ?? 0;
+    if (Number.isFinite(Number(entry.expiresAtTick)) && now > Number(entry.expiresAtTick)) {
+      this.failPlan(entry, "coordination_plan_expired", from);
+      return { accepted: false, reason: "coordination_plan_expired" };
+    }
+    if ([COORDINATION_STATES.FAILED, COORDINATION_STATES.COMPLETED, COORDINATION_STATES.ABORTED].includes(entry.state)) {
+      return { accepted: false, reason: "plan_not_active" };
+    }
+    entry.teammateReady = true;
+    entry.teammateReadyFrom = from;
+    entry.teammateReadyTick = now;
+    if (entry.localReady) {
+      this.completePlan(entry, from);
+      return { accepted: true, state: entry.state };
+    }
+    entry.state = COORDINATION_STATES.WAITING_TEAMMATE;
+    return { accepted: true, state: entry.state };
+  }
+
+  markLocalReady(entry, reason = "ready") {
+    if (!entry) return null;
+    entry.localReady = true;
+    entry.localReadyTick = this.beliefs?.time ?? 0;
+    if (entry.readySent !== true) {
+      if ([MISSION_TYPES.RENDEZVOUS, MISSION_TYPES.BOTH_NEAR_POSITION].includes(roleType(entry.role, entry.plan))) {
+        this.emit(TEAM_MESSAGE_TYPES.RENDEZVOUS_READY, {
+          missionId: entry.plan.missionId ?? entry.id,
+          coordinationPlanId: entry.id,
+          target: targetFrom(entry.role ?? entry.plan),
+          position: this.beliefs?.me ? { x: this.beliefs.me.x, y: this.beliefs.me.y } : null
+        }, entry.from);
+      }
+      this.emit(TEAM_MESSAGE_TYPES.STATUS_UPDATE, {
+        status: "READY",
+        missionId: entry.plan.missionId ?? entry.id,
+        coordinationPlanId: entry.id,
+        reason
+      }, entry.from);
+      entry.readySent = true;
+    }
+    if (entry.requiresTeammate && !entry.teammateReady) {
+      entry.state = COORDINATION_STATES.WAITING_TEAMMATE;
+      return entry;
+    }
+    this.completePlan(entry, entry.from);
+    return entry;
+  }
+
+  validateRolePlan(plan, role) {
+    const type = roleType(role, plan);
+    if ([MISSION_TYPES.RENDEZVOUS, MISSION_TYPES.BOTH_NEAR_POSITION].includes(type)) {
+      return targetFrom(role ?? plan)
+        ? { ok: true, type }
+        : { ok: false, reason: "missing_target" };
+    }
+    if (type === MISSION_TYPES.COORDINATED_WAIT) return { ok: true, type };
+    if (type === MISSION_TYPES.RED_LIGHT_GREEN_LIGHT) return { ok: true, type };
+    if (type === MISSION_TYPES.HANDOFF) return { ok: true, type };
+    return { ok: false, reason: "unsupported_coordination_plan_type" };
+  }
+
   receiveCoordinationPlan(plan, from = null, meta = {}) {
     if (!plan || typeof plan !== "object") return { accepted: false, reason: "invalid_coordination_plan" };
     const aliases = uniqueAliases([this.agentId, ...this.aliases]);
@@ -201,6 +325,7 @@ export class CoordinationController {
     }
 
     const now = this.beliefs?.time ?? Number(meta.tick ?? 0) ?? 0;
+    const validation = this.validateRolePlan(plan, role);
     const entry = {
       id,
       plan,
@@ -210,12 +335,30 @@ export class CoordinationController {
       createdAtTick: now,
       expiresAtTick: expiresAtTick(plan, now, meta),
       currentPhase: plan.phases?.[0]?.id ?? null,
-      requiresTeammate: planRoleCount(plan) > 1
+      requiresTeammate: planRoleCount(plan) > 1,
+      localReady: false,
+      teammateReady: false,
+      readySent: false
     };
+    if (!validation.ok) {
+      entry.state = COORDINATION_STATES.FAILED;
+      entry.reason = validation.reason;
+      this.plans.set(id, entry);
+      this.emit(TEAM_MESSAGE_TYPES.MISSION_FAILED, {
+        missionId: plan.missionId ?? id,
+        coordinationPlanId: id,
+        reason: validation.reason
+      }, from);
+      return { accepted: false, planId: id, state: entry.state, reason: validation.reason };
+    }
     this.plans.set(id, entry);
     entry.state = COORDINATION_STATES.ACCEPTED;
-    this.emit(TEAM_MESSAGE_TYPES.MISSION_ACCEPTED, { missionId: plan.missionId ?? id, coordinationPlanId: id }, from);
     const applied = this.applyPlanRole(entry);
+    if (applied.accepted === false) {
+      this.failPlan(entry, applied.reason ?? "coordination_plan_apply_failed", from);
+      return { accepted: false, planId: id, state: entry.state, reason: entry.reason };
+    }
+    this.emit(TEAM_MESSAGE_TYPES.MISSION_ACCEPTED, { missionId: plan.missionId ?? id, coordinationPlanId: id }, from);
     return { accepted: applied.accepted !== false, planId: id, state: entry.state, task: applied.task ?? null, reason: applied.reason };
   }
 
@@ -297,16 +440,10 @@ export class CoordinationController {
       entry.state = COORDINATION_STATES.FAILED;
       entry.reason = "handoff_not_supported_by_environment";
       return { accepted: false, reason: entry.reason };
-    } else {
-      entry.state = COORDINATION_STATES.FAILED;
-      entry.reason = "unsupported_coordination_plan_type";
-      this.emit(TEAM_MESSAGE_TYPES.MISSION_FAILED, {
-        missionId: plan.missionId ?? entry.id,
-        coordinationPlanId: entry.id,
-        reason: entry.reason
-      }, entry.from);
-      return { accepted: false, reason: entry.reason };
     }
+    entry.state = COORDINATION_STATES.FAILED;
+    entry.reason = "unsupported_coordination_plan_type";
+    return { accepted: false, reason: entry.reason };
   }
 
   failHandoff(payload = {}, to = null) {
@@ -338,13 +475,7 @@ export class CoordinationController {
       }
       if (entry.state === COORDINATION_STATES.WAITING_TEAMMATE && Number.isFinite(Number(entry.waitUntilTick))) {
         if (currentTick >= Number(entry.waitUntilTick)) {
-          entry.state = COORDINATION_STATES.READY;
-          readyMessages.push(this.emit(TEAM_MESSAGE_TYPES.STATUS_UPDATE, {
-            status: "READY",
-            missionId: entry.plan.missionId ?? entry.id,
-            coordinationPlanId: entry.id,
-            reason: "coordinated_wait_complete"
-          }, entry.from));
+          this.markLocalReady(entry, "coordinated_wait_complete");
         }
         continue;
       }
@@ -352,19 +483,7 @@ export class CoordinationController {
       const target = targetFrom(entry.role ?? entry.plan);
       const maxDistance = Number(entry.role?.maxDistance ?? entry.plan?.goal?.maxDistance ?? 0);
       if (target && distance(this.beliefs.me, target) <= maxDistance) {
-        entry.state = COORDINATION_STATES.READY;
-        readyMessages.push(this.emit(TEAM_MESSAGE_TYPES.RENDEZVOUS_READY, {
-          missionId: entry.plan.missionId ?? entry.id,
-          coordinationPlanId: entry.id,
-          target,
-          position: { x: this.beliefs.me.x, y: this.beliefs.me.y }
-        }, entry.from));
-        readyMessages.push(this.emit(TEAM_MESSAGE_TYPES.STATUS_UPDATE, {
-          status: "READY",
-          missionId: entry.plan.missionId ?? entry.id,
-          coordinationPlanId: entry.id,
-          reason: "coordination_target_reached"
-        }, entry.from));
+        this.markLocalReady(entry, "coordination_target_reached");
       }
     }
     return readyMessages;

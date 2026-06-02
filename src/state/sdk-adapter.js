@@ -1,4 +1,3 @@
-import { CONFIG } from "../config.js";
 import { hasTeamProtocolEnvelope, parseTeamMessage } from "../communication/team-protocol.js";
 
 function asArray(value) {
@@ -62,6 +61,7 @@ function normalizeChatArgs(args) {
 export function registerSdkListeners(socket, beliefs, _loop = null, options = {}) {
   const messageRouter = options.messageRouter ?? null;
   const routeNaturalChat = options.routeNaturalChat !== false;
+  const config = options.config ?? beliefs.config ?? {};
   socket.on("connect", () => {
     beliefs.pushEvent("CONNECTED");
   });
@@ -115,10 +115,12 @@ export function registerSdkListeners(socket, beliefs, _loop = null, options = {}
       }
       return;
     }
-    if (routeNaturalChat) messageRouter?.routeIncomingChat?.(normalized, beliefs.time);
+    if (!routeNaturalChat) return;
+
+    messageRouter?.routeIncomingChat?.(normalized, beliefs.time);
     // ignore non-admin messages
-    if (CONFIG.adminId) {
-      if (String(normalized.fromId ?? "") !== String(CONFIG.adminId)) return;
+    if (config.adminId) {
+      if (String(normalized.fromId ?? "") !== String(config.adminId)) return;
     }
     beliefs.pushChatMessage(normalized);
   });

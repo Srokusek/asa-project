@@ -34,6 +34,12 @@ export class ZoneMemory {
     this.pickedParcelIds = new Set();
   }
 
+  reset() {
+    this.zones.clear();
+    this.seenParcelIds.clear();
+    this.pickedParcelIds.clear();
+  }
+
   zoneFor(position) {
     const id = zoneIdFor(position, this.zoneSize);
     if (!this.zones.has(id)) this.zones.set(id, emptyZone(id));

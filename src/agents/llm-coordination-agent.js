@@ -159,7 +159,12 @@ export class CoordinationBDIAgent {
       ], { toolChoice: "none", temperature: 0 });
       parsed = parseLlmMissionOutput(retry.message?.content ?? retry.message, parseOptions);
     }
-    if (!parsed.ok) return fallback ? { missionSpecs: [fallback] } : { unsupported: true, reason: parsed.reason };
+    if (!parsed.ok) {
+      return {
+        unsupported: true,
+        reason: parsed.reason === "invalid_json" ? "invalid_llm_output" : parsed.reason
+      };
+    }
     for (const warning of parsed.value.warnings ?? []) {
       this.logger.warn("LLM structured output warning", warning);
     }
@@ -229,7 +234,21 @@ export class CoordinationBDIAgent {
 
   async publishStructuredOutput(output, sourceMessage = null) {
     if (output?.unsupported) {
-      this.logger.info("LLM request unsupported", { reason: output.reason ?? "unsupported" });
+      const reason = output.reason ?? "unsupported";
+      this.logger.info("LLM request unsupported", { reason });
+      await this.reply(TEAM_MESSAGE_TYPES.MISSION_REJECTED, sourceMessage?.fromId ?? null, {
+        missionId: output.missionId ?? sourceMessage?.missionId ?? null,
+        sourceChatId: sourceMessage?.chatId ?? null,
+        reason
+      });
+      return;
+    }
+    if (output?.clarification) {
+      await this.reply(TEAM_MESSAGE_TYPES.STATUS_UPDATE, sourceMessage?.fromId ?? null, {
+        status: "CLARIFICATION_REQUESTED",
+        sourceChatId: sourceMessage?.chatId ?? null,
+        reason: String(output.clarification)
+      });
       return;
     }
     for (const rejected of output.rejectedMissionSpecs ?? []) {
@@ -449,6 +468,7 @@ export class CoordinationBDIAgent {
 
     for (const reply of this.messageRouter.consumeTeamReplies(this.beliefs.time)) {
       if (aliases.includes(String(reply.from ?? "").trim().toLowerCase())) continue;
+      this.coordinationController.receiveTeamMessage(reply);
       this.logger.info("team reply received", {
         type: reply.type,
         from: reply.from,
@@ -483,7 +503,7 @@ export class CoordinationBDIAgent {
   start() {
     if (this.started) return;
     this.started = true;
-    registerSdkListeners(this.socket, this.beliefs, this.loop, { messageRouter: this.messageRouter });
+    registerSdkListeners(this.socket, this.beliefs, this.loop, { messageRouter: this.messageRouter, config: this.config });
     this.registerNaturalChatListener();
     this.sidecarTimer = setInterval(() => this.kickSidecar(), 100);
     this.socket.on("connect", () => {

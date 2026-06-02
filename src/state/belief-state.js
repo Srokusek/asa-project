@@ -49,6 +49,19 @@ function inferDimensions(width, height, tiles) {
   };
 }
 
+function mapSignatureFor(width, height, tiles = []) {
+  const dimensions = inferDimensions(width, height, tiles);
+  const cells = tiles
+    .map((tile) => {
+      const position = roundTilePosition(tile);
+      const normalized = normalizeTileRecord(tile);
+      return `${position.x},${position.y}:${JSON.stringify(normalized)}`;
+    })
+    .sort()
+    .join("|");
+  return `${dimensions.width}x${dimensions.height}|${cells}`;
+}
+
 function eventPayload(type, payload) {
   return { type, payload, createdAt: Date.now() };
 }
@@ -109,6 +122,7 @@ export class BeliefState {
     this.recentPositions = []; // list of recent posiitons
     this.lastObservedAtByTile = new Map(); // last observation of a given tile
     this.lastObservedAtByGreen = new Map(); // last observation of a given green tile
+    this.mapSignature = null;
     this.chatInbox = []; // recent chat messages seen in Deliveroo.js
     this.chatSequence = 0;
     this.forbiddenTiles = new Map(); // sticky manually forbidden tiles overlay
@@ -144,6 +158,41 @@ export class BeliefState {
 
     this.markDirty();
     return entry;
+  }
+
+  resetForNewMap(mapSignature = null) {
+    const previousSignature = this.mapSignature;
+    this.mapSignature = mapSignature ?? null;
+    this.parcels.clear();
+    this.carriedParcels.clear();
+    this.agents.clear();
+    this.temporaryBlockedCells.clear();
+    this.temporaryBlockedEdges.clear();
+    this.visitedPositions.clear();
+    this.visitedEdges.clear();
+    this.scoutTargetAttempts.clear();
+    this.recentScoutTargets = [];
+    this.temporaryBlockVersion += 1;
+    this.visitedGreenAt.clear();
+    this.lastScoutTargetId = null;
+    this.lastDeliveryPosition = null;
+    this.lastPosition = null;
+    this.recentPositions = [];
+    this.lastObservedAtByTile.clear();
+    this.lastObservedAtByGreen.clear();
+    this.chatInbox = [];
+    this.chatSequence = 0;
+    this.teamMessages = [];
+    this.teamState = { teammates: {} };
+    this.manualTasks = [];
+    this.manualTaskSequence = 0;
+    this.forbiddenTiles.clear();
+    this.pickupTileMultipliers.clear();
+    this.deliveryTileMultipliers.clear();
+    this.deliveryCountMultipliers.clear();
+    this.missionRegistry?.clear?.("new_map");
+    this.pushEvent("NEW_MAP_RESET", { previousSignature, mapSignature: this.mapSignature });
+    this.markDirty();
   }
 
   pushTeamMessage(message) {
@@ -616,14 +665,14 @@ export class BeliefState {
 
   updateMap(width, height, tiles = []) { // update map, should only happen when loading new map
     // important: this does not consider tile events such as packages or agents, it is only the static features
+    const signature = mapSignatureFor(width, height, tiles);
+    const newMap = this.mapSignature !== signature;
+    if (newMap) this.resetForNewMap(signature);
+
     const dimensions = inferDimensions(width, height, tiles); // sometimes the information in the JSON is inaccurate
     this.width = dimensions.width;
     this.height = dimensions.height;
     this.tiles.clear();
-    this.forbiddenTiles.clear();
-    this.pickupTileMultipliers.clear();
-    this.deliveryTileMultipliers.clear();
-    this.deliveryCountMultipliers.clear();
 
     for (const tile of tiles) { // iteratively add tiles along with their type
       const position = roundTilePosition(tile);
@@ -637,7 +686,7 @@ export class BeliefState {
 
     this.updateReady();
     this.markDirty();
-    this.pushEvent("MAP_READY", { width: this.width, height: this.height }); // push event payload
+    this.pushEvent("MAP_READY", { width: this.width, height: this.height, mapSignature: signature, newMap }); // push event payload
   }
 
   updateTile(tile) { // update a type of tile on a map

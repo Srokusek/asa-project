@@ -1,9 +1,8 @@
 import assert from "node:assert/strict";
-import { existsSync } from "node:fs";
+import { readFileSync } from "node:fs";
 import { test } from "node:test";
 import { buildRoleConfig, CONFIG } from "../src/config.js";
 import { AgentLoop, normalizeActionDelayMs } from "../src/control/agent-loop.js";
-import { createChatProcessor } from "../src/control/chat-processor.js";
 import { COORDINATION_STATES, CoordinationController } from "../src/coordination/coordination-controller.js";
 import { createPositionHeartbeatMessage } from "../src/communication/team-heartbeat.js";
 import { createAgentForRole, normalizeAgentRole } from "../src/index.js";
@@ -22,6 +21,7 @@ import { buildImmediatePickupPlan, tryImmediateAction } from "../src/strategy/re
 import { ZoneMemory } from "../src/strategy/zone-memory.js";
 import { BeliefState } from "../src/state/belief-state.js";
 import { registerSdkListeners } from "../src/state/sdk-adapter.js";
+import { buildPlannerState } from "../src/state/planner-state.js";
 import { positionKey } from "../src/utils/geometry.js";
 
 process.env.CHAT_DIAGNOSTICS_ENABLED = "0";
@@ -161,6 +161,13 @@ test("ACTION_DELAY_MS=0 is not forced to 20", () => {
   assert.equal(normalizeActionDelayMs({ actionDelayMs: 0 }), 0);
 });
 
+test("competitive defaults are enabled but still overrideable", () => {
+  assert.equal(CONFIG.actionDelayMs, 0);
+  assert.ok(CONFIG.planner.planningBudgetMs <= 50);
+  assert.ok(CONFIG.planner.shortHarvestBudgetMs <= 20);
+  assert.equal(normalizeActionDelayMs({ actionDelayMs: 17 }), 17);
+});
+
 test("AGENT_ROLE=bdi uses BDI_TOKEN and BDI_AGENT_NAME", () => withEnv({
   AGENT_ROLE: "bdi",
   BDI_TOKEN: "bdi-token",
@@ -219,33 +226,6 @@ test("buildRoleConfig warns when both agent roles resolve to the same token", ()
 
   assert.ok(warnings.some((message) => message.includes("same Deliveroo token")));
 }));
-
-test("ChatProcessor kick does not block on LLM work", async () => {
-  let release;
-  const llmCaller = () => new Promise((resolve) => {
-    release = () => resolve({ message: { content: "ok" } });
-  });
-  const beliefs = {
-    me: { id: "me" },
-    time: 0,
-    pendingChatMessages: (sinceChatId) => (sinceChatId < 1 ? [{ chatId: 1, fromId: "admin", text: "hello" }] : []),
-    advanceTimeFromClock() {},
-    pushEvent() {},
-    markDirty() {}
-  };
-  const executor = { writeMessage: async () => true };
-  const processor = createChatProcessor({ beliefs, executor, logger: logger(), llmCaller });
-
-  const startedAt = Date.now();
-  assert.equal(processor.kick(), true);
-  assert.equal(processor.isInFlight(), true);
-  assert.ok(Date.now() - startedAt < 20);
-  assert.equal(processor.kick(), false);
-
-  release();
-  await processor.inFlightPromise();
-  assert.equal(processor.isInFlight(), false);
-});
 
 test("role selection creates operational BDI loops without default chat LLM", () => {
   assert.equal(normalizeAgentRole("coordination"), "llm");
@@ -382,6 +362,50 @@ test("TeamProtocol messages are not routed to natural LLM chat", () => {
   assert.equal(beliefs.chatInbox.length, 0);
   assert.equal(beliefs.teamMessages.length, 1);
   assert.equal(router.consumeTeamMessagesForAliases(["coordination-agent", "llm-agent"], 0).length, 1);
+});
+
+test("sdk-adapter routeNaturalChat=false drops natural chat but keeps TeamProtocol", () => {
+  const socket = fakeSocket();
+  const beliefs = new BeliefState(CONFIG);
+  const router = createMessageRouter({ role: "bdi", aliases: ["standard-bdi-agent"] });
+  const message = createTeamMessage(
+    TEAM_MESSAGE_TYPES.STATUS_UPDATE,
+    "coordination-agent",
+    "standard-bdi-agent",
+    { status: "READY" },
+    { id: "route-false-team", tick: 0, ttl: 10 }
+  );
+
+  registerSdkListeners(socket, beliefs, null, {
+    messageRouter: router,
+    routeNaturalChat: false,
+    config: { ...CONFIG, adminId: "admin" }
+  });
+  socket.emit("msg", { fromId: "admin", text: "natural instruction" });
+  socket.emit("msg", { fromId: "coordination-agent", text: stringifyTeamMessage(message) });
+
+  assert.equal(beliefs.chatInbox.length, 0);
+  assert.equal(router.consumeMissionMessages().length, 0);
+  assert.equal(beliefs.teamMessages.length, 1);
+  assert.equal(router.consumeTeamMessagesForAliases(["standard-bdi-agent"], 0).length, 1);
+});
+
+test("sdk-adapter routeNaturalChat=true routes natural chat without CONFIG global", () => {
+  const socket = fakeSocket();
+  const beliefs = new BeliefState({ ...CONFIG, adminId: null });
+  const router = createMessageRouter({ role: "llm", aliases: ["coordination-agent"] });
+
+  registerSdkListeners(socket, beliefs, null, {
+    messageRouter: router,
+    routeNaturalChat: true,
+    config: { ...CONFIG, adminId: null }
+  });
+  socket.emit("msg", { fromId: "admin", text: "coordinate rendezvous" });
+
+  assert.equal(beliefs.chatInbox.length, 1);
+  assert.equal(router.consumeMissionMessages().length, 1);
+  const source = readFileSync(new URL("../src/state/sdk-adapter.js", import.meta.url), "utf8");
+  assert.equal(source.includes("CONFIG"), false);
 });
 
 test("MessageRouter consumeTeamMessagesForAliases receives any matching alias", () => {
@@ -834,7 +858,54 @@ test("LLM unsupported output is handled without crash", async () => {
   await agent.publishStructuredOutput(output, { fromId: "admin" });
 
   assert.equal(output.unsupported, true);
-  assert.equal(socket.shouts.length, 0);
+  assert.equal(parseTeamMessage(socket.shouts[0]).type, TEAM_MESSAGE_TYPES.MISSION_REJECTED);
+  assert.equal(parseTeamMessage(socket.shouts[0]).payload.reason, "not_supported");
+  assert.equal(agent.beliefs.missionRegistry.activeMissions(agent.beliefs.time).length, 0);
+});
+
+test("LLM clarification produces response without side effects", async () => {
+  const socket = fakeSocket();
+  const agent = createAgentForRole("llm", { ...CONFIG, agentName: "CoordinationBDIAgent" }, {
+    socket,
+    logger: logger(),
+    llmClient: { isMock: true, call: async () => ({ message: { content: "{\"unsupported\":true}" } }) }
+  });
+
+  await agent.publishStructuredOutput({ clarification: "Which target tile?" }, { fromId: "admin", chatId: 7 });
+  const message = parseTeamMessage(socket.shouts[0]);
+
+  assert.equal(message.type, TEAM_MESSAGE_TYPES.STATUS_UPDATE);
+  assert.equal(message.payload.status, "CLARIFICATION_REQUESTED");
+  assert.equal(message.payload.reason, "Which target tile?");
+  assert.equal(agent.beliefs.missionRegistry.activeMissions(agent.beliefs.time).length, 0);
+});
+
+test("LLM invalid JSON after retry becomes unsupported response", async () => {
+  const socket = fakeSocket();
+  let calls = 0;
+  const agent = createAgentForRole("llm", {
+    ...CONFIG,
+    agentName: "CoordinationBDIAgent",
+    llm: { apiKey: "test-key", model: "test-model" }
+  }, {
+    socket,
+    logger: logger(),
+    llmClient: {
+      isMock: true,
+      call: async () => {
+        calls += 1;
+        return { message: { content: "still not json" } };
+      }
+    }
+  });
+
+  const output = await agent.translateChat({ fromId: "admin", text: "please coordinate" });
+  await agent.publishStructuredOutput(output, { fromId: "admin" });
+
+  assert.equal(calls, 2);
+  assert.equal(output.unsupported, true);
+  assert.equal(output.reason, "invalid_llm_output");
+  assert.equal(parseTeamMessage(socket.shouts[0]).payload.reason, "invalid_llm_output");
   assert.equal(agent.beliefs.missionRegistry.activeMissions(agent.beliefs.time).length, 0);
 });
 
@@ -880,8 +951,8 @@ test("CoordinationBDIAgent applies locally generated CoordinationPlan for its ow
   assert.equal(agent.beliefs.manualTasks.length, 1);
   assert.deepEqual(agent.beliefs.manualTasks[0].payload.target, { x: 2, y: 2 });
   assert.deepEqual(socket.shouts.map((raw) => parseTeamMessage(raw).type), [
-    TEAM_MESSAGE_TYPES.MISSION_ACCEPTED,
     TEAM_MESSAGE_TYPES.RENDEZVOUS_ACK,
+    TEAM_MESSAGE_TYPES.MISSION_ACCEPTED,
     TEAM_MESSAGE_TYPES.COORDINATION_PLAN
   ]);
 });
@@ -935,12 +1006,13 @@ test("RENDEZVOUS near position creates goto subgoal and ready status", () => {
     },
     ttl: 20
   }), "coordination-agent");
-  const messages = controller.update();
+  controller.update();
 
   assert.equal(beliefs.manualTasks.length, 1);
-  assert.equal(controller.plans.get("rendezvous-ready-plan").state, COORDINATION_STATES.READY);
-  assert.equal(messages.some((message) => message.type === TEAM_MESSAGE_TYPES.RENDEZVOUS_READY), true);
-  assert.equal(messages.some((message) => message.type === TEAM_MESSAGE_TYPES.STATUS_UPDATE), true);
+  assert.equal(controller.plans.get("rendezvous-ready-plan").state, COORDINATION_STATES.COMPLETED);
+  assert.equal(controller.outbox.some((message) => message.type === TEAM_MESSAGE_TYPES.RENDEZVOUS_READY), true);
+  assert.equal(controller.outbox.some((message) => message.type === TEAM_MESSAGE_TYPES.STATUS_UPDATE), true);
+  assert.equal(controller.outbox.some((message) => message.type === TEAM_MESSAGE_TYPES.MISSION_COMPLETED), true);
 });
 
 test("COORDINATED_WAIT creates wait state and ready status after wait", () => {
@@ -968,7 +1040,7 @@ test("COORDINATED_WAIT creates wait state and ready status after wait", () => {
 
   beliefs.time = 2;
   controller.update();
-  assert.equal(controller.plans.get("wait-plan").state, COORDINATION_STATES.READY);
+  assert.equal(controller.plans.get("wait-plan").state, COORDINATION_STATES.COMPLETED);
   assert.equal(controller.outbox.some((message) => message.payload?.reason === "coordinated_wait_complete"), true);
 });
 
@@ -1051,6 +1123,132 @@ test("CoordinationPlan ttl expiration fails the plan", () => {
   assert.equal(entry.state, COORDINATION_STATES.FAILED);
   assert.equal(entry.reason, "coordination_plan_expired");
   assert.equal(failed.payload.reason, "coordination_plan_expired");
+});
+
+test("Level 3 completes only after local and teammate READY match active plan", () => {
+  const beliefs = new BeliefState(CONFIG);
+  beliefs.updateMap(1, 1, [{ x: 0, y: 0, type: "3" }]);
+  beliefs.updateSelf({ id: "runtime-bdi", name: "bdi", x: 0, y: 0 });
+  const controller = new CoordinationController({
+    agentId: "StandardBDIAgent",
+    aliases: ["standard-bdi-agent"],
+    beliefs,
+    missionRegistry: beliefs.missionRegistry
+  });
+  controller.receiveCoordinationPlan(sampleCoordinationPlan({
+    id: "both-ready-plan",
+    missionId: "mission-both-ready",
+    type: MISSION_TYPES.BOTH_NEAR_POSITION,
+    roles: {
+      "standard-bdi-agent": { type: MISSION_TYPES.BOTH_NEAR_POSITION, target: { x: 0, y: 0 }, maxDistance: 0 },
+      "coordination-agent": { type: MISSION_TYPES.BOTH_NEAR_POSITION, target: { x: 0, y: 0 }, maxDistance: 0 }
+    },
+    ttl: 20
+  }), "coordination-agent");
+
+  controller.update();
+  assert.equal(controller.plans.get("both-ready-plan").state, COORDINATION_STATES.WAITING_TEAMMATE);
+
+  const wrong = controller.receiveTeamMessage(createTeamMessage(
+    TEAM_MESSAGE_TYPES.RENDEZVOUS_READY,
+    "CoordinationBDIAgent",
+    "StandardBDIAgent",
+    { missionId: "wrong-mission", coordinationPlanId: "wrong-plan", position: { x: 0, y: 0 } },
+    { tick: beliefs.time, ttl: 20 }
+  ));
+  assert.equal(wrong.accepted, false);
+  assert.equal(controller.plans.get("both-ready-plan").state, COORDINATION_STATES.WAITING_TEAMMATE);
+
+  const ready = controller.receiveTeamMessage(createTeamMessage(
+    TEAM_MESSAGE_TYPES.RENDEZVOUS_READY,
+    "CoordinationBDIAgent",
+    "StandardBDIAgent",
+    { missionId: "mission-both-ready", coordinationPlanId: "both-ready-plan", position: { x: 0, y: 0 } },
+    { tick: beliefs.time, ttl: 20 }
+  ));
+  const completed = controller.outbox.find((message) =>
+    message.type === TEAM_MESSAGE_TYPES.MISSION_COMPLETED &&
+    message.payload.coordinationPlanId === "both-ready-plan"
+  );
+
+  assert.equal(ready.accepted, true);
+  assert.equal(controller.plans.get("both-ready-plan").state, COORDINATION_STATES.COMPLETED);
+  assert.ok(completed);
+});
+
+test("expired READY is ignored and does not complete plan", () => {
+  const beliefs = new BeliefState(CONFIG);
+  beliefs.updateSelf({ id: "runtime-bdi", name: "bdi", x: 0, y: 0 });
+  const controller = new CoordinationController({
+    agentId: "StandardBDIAgent",
+    aliases: ["standard-bdi-agent"],
+    beliefs,
+    missionRegistry: beliefs.missionRegistry
+  });
+  controller.receiveCoordinationPlan(sampleCoordinationPlan({
+    id: "expired-ready-plan",
+    missionId: "mission-expired-ready",
+    roles: {
+      "standard-bdi-agent": { target: { x: 0, y: 0 }, maxDistance: 0 },
+      "coordination-agent": { target: { x: 0, y: 0 }, maxDistance: 0 }
+    },
+    ttl: 20
+  }), "coordination-agent", { tick: 0, ttl: 20 });
+  controller.update();
+  beliefs.time = 3;
+
+  const result = controller.receiveTeamMessage(createTeamMessage(
+    TEAM_MESSAGE_TYPES.RENDEZVOUS_READY,
+    "CoordinationBDIAgent",
+    "StandardBDIAgent",
+    { missionId: "mission-expired-ready", coordinationPlanId: "expired-ready-plan", position: { x: 0, y: 0 } },
+    { tick: 0, ttl: 1 }
+  ));
+
+  assert.equal(result.accepted, false);
+  assert.equal(result.reason, "expired_team_message");
+  assert.notEqual(controller.plans.get("expired-ready-plan").state, COORDINATION_STATES.COMPLETED);
+});
+
+test("invalid CoordinationPlan fails atomically", () => {
+  const beliefs = new BeliefState(CONFIG);
+  beliefs.updateSelf({ id: "runtime-bdi", name: "bdi", x: 0, y: 0 });
+  const controller = new CoordinationController({
+    agentId: "StandardBDIAgent",
+    aliases: ["standard-bdi-agent"],
+    beliefs,
+    missionRegistry: beliefs.missionRegistry
+  });
+
+  const missingTarget = controller.receiveCoordinationPlan({
+    id: "invalid-no-target",
+    missionId: "mission-invalid-no-target",
+    type: MISSION_TYPES.RENDEZVOUS,
+    roles: { "standard-bdi-agent": { type: MISSION_TYPES.RENDEZVOUS } },
+    phases: [{ id: "meet", type: MISSION_TYPES.RENDEZVOUS }]
+  }, "coordination-agent");
+  const missingRole = controller.receiveCoordinationPlan({
+    id: "invalid-no-role",
+    missionId: "mission-invalid-no-role",
+    type: MISSION_TYPES.RENDEZVOUS,
+    roles: { "coordination-agent": { type: MISSION_TYPES.RENDEZVOUS, target: { x: 1, y: 1 } } },
+    phases: [{ id: "meet", type: MISSION_TYPES.RENDEZVOUS }]
+  }, "coordination-agent");
+  const unsupported = controller.receiveCoordinationPlan({
+    id: "invalid-unsupported",
+    missionId: "mission-invalid-unsupported",
+    type: "UNSUPPORTED_MACRO",
+    roles: { "standard-bdi-agent": { type: "UNSUPPORTED_MACRO" } },
+    phases: [{ id: "bad", type: "UNSUPPORTED_MACRO" }]
+  }, "coordination-agent");
+
+  assert.equal(missingTarget.accepted, false);
+  assert.equal(controller.plans.get("invalid-no-target").state, COORDINATION_STATES.FAILED);
+  assert.equal(missingRole.reason, "not_assigned");
+  assert.equal(controller.plans.has("invalid-no-role"), false);
+  assert.equal(unsupported.accepted, false);
+  assert.equal(controller.plans.get("invalid-unsupported").state, COORDINATION_STATES.FAILED);
+  assert.equal([...controller.plans.values()].some((entry) => entry.state === COORDINATION_STATES.ACCEPTED), false);
 });
 
 test("MissionSpec STACK_EXACTLY_N is registered", () => {
@@ -1469,6 +1667,116 @@ test("short harvest rollout builds pickup-pickup-deliver sequence for exact stac
   assert.equal(harvestPlan.sequence.filter((id) => id.startsWith("G_")).length, 2);
 });
 
+test("new map resets missions, overlays, manual tasks, team state, and delivery rules", () => {
+  const beliefs = new BeliefState(CONFIG);
+  beliefs.updateMap(2, 1, [
+    { x: 0, y: 0, type: "3" },
+    { x: 1, y: 0, type: "2" }
+  ]);
+  beliefs.missionRegistry.addMission({ type: MISSION_TYPES.STACK_EXACTLY_N, count: 2, hard: true });
+  beliefs.pushManualTask({ type: "goto_tile", payload: { target: { x: 1, y: 0 } } });
+  beliefs.setForbiddenTile({ x: 1, y: 0 }, { reason: "old_map" });
+  beliefs.setPickupTileMultiplier({ x: 0, y: 0 }, 2);
+  beliefs.setDeliveryTileMultiplier({ x: 1, y: 0 }, 2);
+  beliefs.setDeliveryCountMultiplier(2, 2);
+  beliefs.markTemporaryBlocked({ x: 1, y: 0 });
+  beliefs.updateTeamHeartbeat({
+    agentId: "teammate",
+    agentName: "CoordinationBDIAgent",
+    role: "llm",
+    position: { x: 1, y: 0 },
+    carriedCount: 0,
+    tick: beliefs.time
+  }, { receivedAtTick: beliefs.time, ttl: 10 });
+
+  beliefs.updateMap(3, 1, [
+    { x: 0, y: 0, type: "3" },
+    { x: 1, y: 0, type: "3" },
+    { x: 2, y: 0, type: "2" }
+  ]);
+
+  assert.equal(beliefs.missionRegistry.activeMissions(beliefs.time).length, 0);
+  assert.equal(beliefs.manualTasks.length, 0);
+  assert.equal(beliefs.forbiddenTiles.size, 0);
+  assert.equal(beliefs.pickupTileMultipliers.size, 0);
+  assert.equal(beliefs.deliveryTileMultipliers.size, 0);
+  assert.equal(beliefs.deliveryCountMultipliers.size, 0);
+  assert.equal(beliefs.temporaryBlockedCells.size, 0);
+  assert.equal(Object.keys(beliefs.teamState.teammates).length, 0);
+
+  const evaluation = evaluateDelivery({
+    state: { deliveryRules: beliefs.missionRegistry.activeDeliveryRules(beliefs.time) },
+    packages: [{ valueAtPickup: 10, pickupTime: 0, decayRate: 0 }],
+    deliveryTime: 0,
+    deliveryPosition: { x: 2, y: 0 },
+    config: CONFIG.planner
+  });
+  assert.equal(evaluation.allowed, true);
+  assert.equal(beliefs.isForbiddenTile({ x: 1, y: 0 }), false);
+});
+
+test("AgentLoop resets ZoneMemory and CoordinationController on new map", () => {
+  const beliefs = new BeliefState(CONFIG);
+  const controller = new CoordinationController({
+    agentId: "StandardBDIAgent",
+    aliases: ["standard-bdi-agent"],
+    beliefs,
+    missionRegistry: beliefs.missionRegistry
+  });
+  const loop = new AgentLoop(fakeSocket(), beliefs, CONFIG, {
+    enableChatProcessor: false,
+    coordinationController: controller
+  });
+
+  beliefs.updateMap(2, 1, [
+    { x: 0, y: 0, type: "3" },
+    { x: 1, y: 0, type: "1" }
+  ]);
+  beliefs.updateSelf({ id: "me", x: 0, y: 0 });
+  beliefs.updateParcelsSensing([{ id: "p1", x: 1, y: 0, reward: 10 }], [{ x: 1, y: 0 }]);
+  loop.zoneMemory.updateFromBeliefs(beliefs);
+  controller.receiveCoordinationPlan(sampleCoordinationPlan({
+    id: "old-map-plan",
+    roles: { "standard-bdi-agent": { target: { x: 1, y: 0 }, maxDistance: 0 } }
+  }), "coordination-agent");
+  assert.ok(loop.zoneMemory.zones.size > 0);
+  assert.ok(controller.plans.size > 0);
+
+  beliefs.updateMap(3, 1, [
+    { x: 0, y: 0, type: "3" },
+    { x: 1, y: 0, type: "3" },
+    { x: 2, y: 0, type: "2" }
+  ]);
+  const events = beliefs.consumeEvents();
+  loop.handleMapResetEvents(events);
+
+  assert.equal(loop.zoneMemory.zones.size, 0);
+  assert.equal(loop.zoneMemory.seenParcelIds.size, 0);
+  assert.equal(loop.zoneMemory.pickedParcelIds.size, 0);
+  assert.equal(controller.plans.size, 0);
+  assert.equal(loop.currentRoutePlan, null);
+});
+
+test("planner continues after new map reset", () => {
+  const beliefs = new BeliefState(CONFIG);
+  beliefs.updateMap(2, 1, [
+    { x: 0, y: 0, type: "3" },
+    { x: 1, y: 0, type: "2" }
+  ]);
+  beliefs.missionRegistry.addMission({ type: MISSION_TYPES.STACK_EXACTLY_N, count: 2, hard: true });
+  beliefs.updateMap(3, 1, [
+    { x: 0, y: 0, type: "3" },
+    { x: 1, y: 0, type: "1" },
+    { x: 2, y: 0, type: "2" }
+  ]);
+  beliefs.updateSelf({ id: "me", x: 0, y: 0 });
+  beliefs.updateParcelsSensing([{ id: "p1", x: 1, y: 0, reward: 10 }], [{ x: 1, y: 0 }]);
+  const routePlan = replan(buildPlannerState(beliefs, CONFIG));
+
+  assert.ok(routePlan);
+  assert.notEqual(routePlan.mode, "IDLE");
+});
+
 test("zone memory scores useful stale reward zones above current zone", () => {
   const memory = new ZoneMemory({ zoneMemorySectorSize: 5, zoneMemoryReturnToRedWeight: 0.5 });
   const beliefs = {
@@ -1540,8 +1848,4 @@ test("team protocol parse/stringify roundtrip works", () => {
   assert.equal(parsed.protocol, "ASA_TEAM_V1");
   assert.equal(parsed.type, TEAM_MESSAGE_TYPES.MISSION_SPEC);
   assert.equal(parsed.payload.missionSpec.assignedTo, "b");
-});
-
-test("chat:llm script points to a real file", () => {
-  assert.equal(existsSync(new URL("../src/llm-chat-agent.js", import.meta.url)), true);
 });

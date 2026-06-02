@@ -234,7 +234,6 @@ export function buildUnifiedScoutPlan(state, profile, config, greenScores, check
   if (checkpoints.length === 0) return null;
 
   const start = copyPosition(state.me.position);
-  const stalenessCap = Math.max(1, asNumber(config.maxStalenessValue, DEFAULT_PARAMS.maxStalenessValue));
   const stalenessWeight = asNumber(config.unifiedScoutStalenessWeight, 1);
   const distanceWeight = asNumber(config.unifiedScoutDistanceWeight, 0.5);
   const topK = Math.max(1, Math.round(asNumber(config.unifiedScoutTopKForRedTieBreak, 5)));
@@ -257,11 +256,11 @@ export function buildUnifiedScoutPlan(state, profile, config, greenScores, check
       const green = greenById.get(greenId);
       if (!green) continue;
       const observedAt = state.lastObservedAtByGreen?.[positionKey(green.position)];
-      const Staleness = 
+      const staleness =
         observedAt === undefined ? Math.log(Math.max(1, asNumber(state.time, 0))) : Math.log(Math.max(1, asNumber(state.time, 0) - asNumber(observedAt, 0)));
       const multiplier = pickupMultiplierAt(state, green.position);
       multiplierComponent += multiplier;
-      stalenessComponent += multiplier * stalenessWeight * Staleness;
+      stalenessComponent += multiplier * stalenessWeight * staleness;
       coveredGreenCount += 1;
     }
     if (coveredGreenCount === 0) continue;

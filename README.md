@@ -30,7 +30,7 @@ LLM_AGENT_NAME=CoordinationBDIAgent
 
 AGENT_ROLE=bdi
 LOG_LEVEL=info
-ACTION_DELAY_MS=100
+ACTION_DELAY_MS=0
 ```
 
 `AGENT_ROLE=bdi` starts `StandardBDIAgent`. `AGENT_ROLE=llm` starts `CoordinationBDIAgent`.
@@ -58,7 +58,7 @@ TEAM_HEARTBEAT_TICKS=5
 TEAM_HEARTBEAT_TTL_TICKS=15
 ```
 
-For fast competition runs, set `ACTION_DELAY_MS=0` to use the self-scheduled fastest safe loop.
+For fast competition runs, set `ACTION_DELAY_MS=0` to use the self-scheduled fastest safe loop. This is also the current default. Planner defaults are competitive but overrideable: `planningBudgetMs=50`, `shortHarvestBudgetMs=15`, `beamWidth=48`, and `topK=12`.
 
 ## Run
 
@@ -68,14 +68,6 @@ Start the two roles as two separate processes:
 npm run start:bdi
 npm run start:llm
 ```
-
-Compatibility entrypoint:
-
-```bash
-npm run chat:llm
-```
-
-`chat:llm` delegates to `CoordinationBDIAgent`; it is kept for compatibility and is not the preferred two-process startup path.
 
 ## Architecture
 
@@ -121,6 +113,7 @@ Important boundaries:
 - Planner/pathfinding is the existing implementation; coordination should not rewrite it.
 - `MissionRegistry`, `DeliveryRules`, and `RewardModel` own mission delivery constraints.
 - `ReactiveLayer` can take immediate actions only after validating current state.
+- Maps and missions are not persistent. Loading a new static map resets old missions, manual tasks, overlays, team state, temporary blocks, coordination plans, and zone/scout memory.
 
 Main files:
 
@@ -138,6 +131,7 @@ Main files:
 - `src/missions/delivery-rules.js`: mission-to-delivery-rule conversion.
 - `src/missions/reward-model.js`: delivery legality and value.
 - `src/strategy/reactive-layer.js`: guarded immediate actions.
+- `src/strategy/zone-memory.js`: scout/zone memory, reset on new map.
 
 ## Level Support
 

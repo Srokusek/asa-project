@@ -36,6 +36,14 @@ export class MissionRegistry {
     return { ...spec };
   }
 
+  clear(reason = "mission_registry_cleared") {
+    const count = this.missions.size;
+    this.missions.clear();
+    this.beliefs?.pushEvent?.("MISSION_REGISTRY_CLEARED", { reason, count });
+    this.beliefs?.markDirty?.();
+    return count;
+  }
+
   updateMission(id, patch = {}) {
     const key = String(id);
     const current = this.missions.get(key);

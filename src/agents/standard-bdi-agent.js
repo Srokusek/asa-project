@@ -183,7 +183,8 @@ export class StandardBDIAgent {
     this.started = true;
     registerSdkListeners(this.socket, this.beliefs, this.loop, {
       messageRouter: this.messageRouter,
-      routeNaturalChat: false
+      routeNaturalChat: false,
+      config: this.config
     });
     this.socket.on("connect", () => {
       this.logger.info("connected StandardBDIAgent");

@@ -17,7 +17,6 @@ import { ZoneMemory } from "../strategy/zone-memory.js";
 import { createTelemetry } from "../telemetry/telemetry.js";
 import { createLogger } from "../utils/logger.js";
 import { directionFromPositions, manhattan, positionKey, sameTile } from "../utils/geometry.js";
-import { createChatProcessor } from "./chat-processor.js";
 
 const HARD_REPLAN_EVENTS = new Set([
   "MOVE_FAILED",
@@ -56,8 +55,8 @@ function eventType(event) {
 }
 
 export function normalizeActionDelayMs(config = {}) {
-  const value = Number(config.actionDelayMs ?? 30);
-  return Number.isFinite(value) ? Math.max(0, value) : 30;
+  const value = Number(config.actionDelayMs ?? 0);
+  return Number.isFinite(value) ? Math.max(0, value) : 0;
 }
 
 function eventPayloadCount(event) {
@@ -226,9 +225,7 @@ export class AgentLoop {
     this.sameBlockedMoveCount = 0;
     this.lastReplanCause = "missing_plan";
     this.invalidNonIdleZeroActionCount = 0;
-    this.chatProcessor = options.enableChatProcessor === false
-      ? null
-      : createChatProcessor({ beliefs: this.beliefs, executor: this.executor, logger: this.logger });
+    this.chatProcessor = null;
     this.zoneMemory = new ZoneMemory(config.planner);
     this.teamMessageHandler = options.teamMessageHandler ?? null;
     this.coordinationController = options.coordinationController ?? null;
@@ -444,6 +441,30 @@ export class AgentLoop {
     this.consecutiveMoveFailures = 0;
     this.lastBlockedMoveKey = null;
     this.sameBlockedMoveCount = 0;
+  }
+
+  resetForNewMap(reason = "new_map") {
+    this.invalidatePlan(reason);
+    this.zoneMemory?.reset?.();
+    this.coordinationController?.resetForNewMap?.();
+    this.resetMoveFailures();
+    this.activeManualTask = null;
+    this.lastPlanTime = -Infinity;
+    this.lastReplanCause = reason;
+    this.invalidNonIdleZeroActionCount = 0;
+    this.beliefs.zoneMemorySummary = this.zoneMemory?.snapshot?.() ?? null;
+  }
+
+  handleMapResetEvents(events = []) {
+    const mapReady = events.find((event) =>
+      eventType(event) === "MAP_READY" && event?.payload?.newMap !== false
+    );
+    if (!mapReady) return false;
+    this.resetForNewMap("new_map");
+    this.telemetry.record("new_map_reset", {
+      mapSignature: mapReady.payload?.mapSignature ?? null
+    });
+    return true;
   }
 
   hasValidParcelInBelief() {
@@ -907,6 +928,7 @@ export class AgentLoop {
         this.beliefs.advanceTime();
       }
       const events = this.beliefs.consumeEvents();
+      this.handleMapResetEvents(events);
       for (const event of events) {
         const payload = forbiddenTileEventPayload(event);
         if (payload) {
@@ -933,8 +955,6 @@ export class AgentLoop {
       this.coordinationController?.update?.();
       // events is a list of all events that the agent has sensed since the last tick
       if (!this.beliefs.ready) return; // stop if connection, map or other crucial steps have not been resolved yet
-
-      this.chatProcessor?.kick?.();
 
       const reactive = tryImmediateAction({
         beliefs: this.beliefs,

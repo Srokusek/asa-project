@@ -32,7 +32,7 @@ export const CONFIG = {
   agentName: process.env.AGENT_NAME ?? "PlannerAgent",
   logLevel: process.env.LOG_LEVEL ?? "info",
   adminId: process.env.ADMIN_ID ?? null,
-  actionDelayMs: numberFromEnv("ACTION_DELAY_MS", 100),
+  actionDelayMs: numberFromEnv("ACTION_DELAY_MS", 0),
   telemetryEnabled: booleanFromEnv("TELEMETRY_ENABLED", false),
   telemetryFile: process.env.TELEMETRY_FILE ?? "telemetry.jsonl",
   telemetry: {
@@ -88,7 +88,7 @@ export const CONFIG = {
     unifiedScoutRepeatTargetPenalty: 50,
     unifiedScoutRepeatSectorPenalty: 10,
     trapPenalty: 10000,
-    planningBudgetMs: 200,
+    planningBudgetMs: 50,
     topKRedCandidates: 5,
     enableEdgeTemporaryBlocks: true,
     temporaryEdgeBlockTtlTicks: 2,
@@ -98,7 +98,7 @@ export const CONFIG = {
     deliveryDeferralNearbyRadius: 4,
     deliveryDeferralMinNearbyValue: 1,
     deliveryDeferralCloseRedDistance: 2,
-    shortHarvestBudgetMs: 20,
+    shortHarvestBudgetMs: 15,
     shortHarvestMaxCandidates: 8,
     shortHarvestMinCandidates: 2,
     shortHarvestDepth: 4,
@@ -109,8 +109,8 @@ export const CONFIG = {
     zoneMemoryScoutWeight: 0.25,
 
     // search parameters
-    beamWidth: 100,
-    topK: 16,
+    beamWidth: 48,
+    topK: 12,
   }
 };
 

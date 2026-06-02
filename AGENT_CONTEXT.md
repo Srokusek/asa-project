@@ -25,13 +25,14 @@ Runtime flow:
 
 1. `sdk-adapter` receives SDK events.
 2. `BeliefState` updates partial world memory.
-3. TeamProtocol messages are routed to `MessageRouter` and `CoordinationController`.
-4. The loop builds `PlannerState` from beliefs.
-5. The planner/search/pathfinding stack chooses a route-level plan.
-6. `executable-plan` turns the route into `move`, `pick_up`, and `put_down`.
-7. `ReactiveLayer` may take immediate guarded actions.
-8. `Executor` calls the SDK and reports success, busy, or failure.
-9. The loop replans when events, stale plans, traffic, failed actions, missions, or constraints require it.
+3. A new static map triggers reset of non-persistent state.
+4. TeamProtocol messages are routed to `MessageRouter` and `CoordinationController`.
+5. The loop builds `PlannerState` from beliefs.
+6. The planner/search/pathfinding stack chooses a route-level plan.
+7. `executable-plan` turns the route into `move`, `pick_up`, and `put_down`.
+8. `ReactiveLayer` may take immediate guarded actions.
+9. `Executor` calls the SDK and reports success, busy, or failure.
+10. The loop replans when events, stale plans, traffic, failed actions, missions, or constraints require it.
 
 Important rule: the loop stays BDI. Do not add an LLM branch that emits direct movement actions.
 
@@ -47,6 +48,8 @@ Use it for:
 - exposing active delivery rules through `activeDeliveryRules`.
 
 Do not duplicate active mission lists in agents, planner files, or the LLM sidecar. Agents may keep small sent-plan maps for bookkeeping, but mission semantics should live in the registry.
+
+On a new map, `BeliefState.resetForNewMap` clears `MissionRegistry`, manual tasks, mission/chat overlays, team state, temporary blocks, parcels, scout memory, and carried runtime state that cannot persist across games.
 
 ## MissionSpec
 
@@ -121,6 +124,7 @@ State machine:
 - `ABORTED`
 
 Plans must have a ttl. Expired plans and stale teammates fail explicitly.
+Rendezvous, both-near-position, and coordinated-wait complete only when local ready and teammate ready are both correlated to the same active plan. Wrong or expired READY messages are ignored.
 
 ## TeamProtocol And Router
 
@@ -148,7 +152,7 @@ LLM-related code belongs in:
 - `src/agents/llm-coordination-agent.js`: sidecar lifecycle and publication of validated structured output.
 - `src/llm/mission-prompt.js`: compact prompt/context construction.
 - `src/missions/mission-parser.js`: JSON parsing, validation, retry handling, alias normalization.
-- `src/llm/llm-client.js` / `src/chat/llm-client.js`: client wrapper.
+- `src/llm/llm-client.js`: client wrapper.
 
 Do not put LLM logic in:
 
@@ -188,10 +192,14 @@ Do not create a separate low-level LLM executor, custom WebSocket protocol, or p
 
 Kept for compatibility/debug:
 
-- `src/llm-chat-agent.js`: legacy `chat:llm` entrypoint, delegates to `CoordinationBDIAgent`.
-- `src/control/chat-processor.js`: optional natural-language/manual-tool processor, disabled in both normal two-agent runtimes.
-- `src/missions/mission-tools.js`: helper tools used by `chat-processor`.
 - Direct belief overlays for forbidden tiles and multipliers: retained for manual/debug compatibility, merged into planner-state.
+
+Removed legacy:
+
+- `src/control/chat-processor.js`
+- `src/missions/mission-tools.js`
+- `src/llm-chat-agent.js`
+- `src/chat/llm-client.js`
 
 Current mission-driven behavior should prefer `MissionRegistry`, `DeliveryRules`, and `RewardModel`.
 
