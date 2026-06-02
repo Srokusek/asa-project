@@ -195,8 +195,7 @@ function normalizeEnemies(input, meId) { // ensure beliefs about enemies are in 
     .map((enemy, index) => ({
       ...enemy,
       id: normalizeId("E", enemy.id ?? index, enemy.position ?? enemy),
-      position: copyPosition(enemy.position ?? enemy),
-      speed: Math.max(EPSILON, asNumber(enemy.speed, 1)) //ISSUE: we never calculate speed, remove
+      position: copyPosition(enemy.position ?? enemy)
     }));
 }
 

@@ -150,8 +150,7 @@ export function buildPlannerState(beliefs, config) {
         position,
         score: agent.score,
         penalty: agent.penalty,
-        confidence: agent.confidence,
-        speed: 1
+        confidence: agent.confidence
       };
     });
 

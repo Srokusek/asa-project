@@ -73,8 +73,7 @@ export function beatsEnemiesToGreen(state, green, etaMe, config) {
   if (!state.enemies || state.enemies.length === 0) return true;
   const margin = asNumber(config.enemySafetyMargin, 0);
   return state.enemies.every((enemy) => {
-    const speed = Math.max(EPSILON, asNumber(enemy.speed, 1));
-    const enemyEta = rankingDistance(state, enemy.position, green.position) / speed;
+    const enemyEta = rankingDistance(state, enemy.position, green.position);
     return etaMe + margin <= enemyEta + EPSILON;
   });
 }

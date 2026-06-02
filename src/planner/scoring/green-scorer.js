@@ -49,9 +49,8 @@ export function winProbability(state, green, etaMe, config) {
   if (!state.enemies || state.enemies.length === 0) return 1;
 
   let probability = 1;
-  for (const enemy of state.enemies) {
-    const speed = Math.max(EPSILON, asNumber(enemy.speed, 1));
-    const enemyEta = rankingDistance(state, enemy.position, green.position) / speed;
+  for (const enemy of state.enemies) {;
+    const enemyEta = rankingDistance(state, enemy.position, green.position);
     probability = config.ignore_enemyEta ? probability : Math.min(probability, sigmoid(config.kWin * (enemyEta - etaMe)));
   }
   return probability;
