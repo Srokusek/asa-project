@@ -43,9 +43,10 @@ What to avoid unless explicitly requested:
 The relevant repo structure is:
 
 - `src/index.js`: runtime entrypoint and lifecycle wiring,
-- `src/config.js`: environment configuration,
+- `src/config.js`: config factory and shared planner defaults,
 - `src/state/`: belief model, planner-state conversion, SDK event adapter,
-- `src/control/`: main loop and chat processor,
+- `src/control/`: main loop and control-layer helpers,
+- `src/llm/`: optional LLM chat subsystem,
 - `src/planner/`: planner, search, pathfinding, scoring, scout logic,
 - `src/executor/`: execution of movement, pickup, putdown, and chat send actions,
 - `src/telemetry/`: runtime metrics and action tracking,
@@ -73,8 +74,9 @@ The chat path and the planning path use the same beliefs, but they are intention
 
 The ordering is important:
 
-- incoming chat is queued in beliefs,
-- the loop consumes chat first,
+- in `llm` mode with chat enabled, admin chat is queued in beliefs,
+- in `llm` mode with chat enabled, the loop consumes chat first,
+- in `bdi` mode, chat is ignored entirely,
 - then the agent continues with planning/execution,
 - the executor is the only module that sends actions back to Deliveroo.
 
@@ -87,21 +89,30 @@ This is the startup file.
 Responsibilities:
 
 - load `.env` via `dotenv/config`,
+- create config once via `createConfig()`,
 - create the Deliveroo socket with `DjsConnect(...)`,
 - create `BeliefState` and `AgentLoop`,
 - register SDK listeners,
 - start the loop on connect,
 - stop the loop and disconnect on shutdown.
 
+Important runtime rule:
+
+- `AGENT_TYPE` is required and must be either `bdi` or `llm`,
+- if `AGENT_TYPE=llm` and `ADMIN_ID` is missing, the BDI loop still runs but chat handling is disabled.
+
 ### `src/config.js`
 
-This maps environment variables into a structured config object.
+This maps environment variables into a structured config object via `createConfig(env = process.env)`.
 
 Key fields:
 
+- `agentType` from required `AGENT_TYPE`,
 - `HOST`, `TOKEN`, `AGENT_NAME`, `LOG_LEVEL`, `ACTION_DELAY_MS`,
-- `ADMIN_ID` for chat filtering,
+- `llm.*` for admin filtering, model access, diagnostics, and tool-loop limits,
 - `planner.*` for tuning the search/planning/scout behavior.
+
+It also exports `DEFAULT_PLANNER_CONFIG` so planner code and tests can use planner defaults without depending on a process-global runtime config instance.
 
 ### `src/state/sdk-adapter.js`
 
@@ -111,8 +122,9 @@ Responsibilities:
 
 - normalize `you`, `tile`, and chat payload shapes,
 - update beliefs for map, parcels, agents, and sensing,
-- queue chat messages into beliefs,
-- optionally filter chat to only the configured admin id,
+- in `llm` mode with chat enabled, queue only chat from the configured admin id,
+- in `bdi` mode, ignore all incoming chat events,
+- in `llm` mode without `ADMIN_ID`, ignore all incoming chat events,
 - never plan or execute actions.
 
 ### `src/state/belief-state.js`
@@ -141,12 +153,18 @@ Responsibilities:
 
 - run the periodic tick,
 - advance belief time and process events,
-- process pending chat before planning continues,
+- when chat is enabled, process pending chat before planning continues,
 - decide when replanning is required,
 - build planner state,
 - create route plans and executable plans,
 - execute actions one by one,
 - track failures, blocked moves, and telemetry.
+
+The loop is mode-aware:
+
+- it only creates a chat processor when `config.llm.chatEnabled` is true,
+- `bdi` mode never instantiates any LLM-related object,
+- the BDI planning/execution path remains the primary architecture in both modes.
 
 ### `src/executor/executor.js`
 
@@ -160,11 +178,19 @@ Responsibilities:
 - record telemetry,
 - mark temporary blocks when movement fails.
 
-### `src/control/chat-processor.js`
+### `src/llm/`
 
-This is a small side module for the LLM-backed chat flow.
+This folder contains the optional LLM-backed chat flow.
 
-It is intentionally separate so the main loop stays readable.
+Main modules:
+
+- `src/llm/chat-processor.js`: turn orchestration and reply flow,
+- `src/llm/model-client.js`: OpenAI/LiteLLM client setup and model calls,
+- `src/llm/tool-definitions.js`: chat tool schemas,
+- `src/llm/tool-executor.js`: tool argument validation and belief/executor side effects,
+- `src/llm/diagnostics.js`: optional JSONL diagnostics logging.
+
+This subsystem is intentionally separate so the main loop stays readable.
 
 ## BDI Architecture
 
@@ -367,11 +393,11 @@ This module is deliberately narrow: it does not decide the route, only how to re
 
 ### `src/planner/default-params.js`
 
-This exposes the default planner tuning values by freezing the planner config from `CONFIG.planner`.
+This exposes the default planner tuning values by freezing `DEFAULT_PLANNER_CONFIG`.
 
 ### `src/config.js`
 
-This file is the single source for runtime/environment config, including planner tuning knobs. The exact values matter less than the fact that the planner is parameterized rather than hard-coded.
+This file is the single source for runtime/environment config, including planner tuning knobs and LLM mode settings. The exact values matter less than the fact that the planner is parameterized rather than hard-coded.
 
 ### Major Tuning Areas
 
@@ -421,12 +447,19 @@ The current codebase also contains a chat path.
 That path:
 
 - receives `msg` events from Deliveroo,
-- normalizes and stores them in beliefs,
-- optionally filters to the admin id,
-- lets the loop process pending chat before planning,
+- in `llm` mode with chat enabled, normalizes and stores admin messages in beliefs,
+- in `bdi` mode, ignores chat entirely,
+- lets the loop process pending chat before planning when chat is enabled,
 - sends replies through the executor.
 
 This exists for the LLM integration work, but it should remain a side concern in the documentation and code structure.
+
+### Agent Types
+
+The runtime supports two explicit agent types:
+
+- `bdi`: pure BDI agent, no chat queuing, no chat processing, no LLM calls,
+- `llm`: standard BDI loop plus admin-gated LLM chat handling.
 
 ### Current Chat Tooling Surface
 
@@ -439,7 +472,7 @@ Actionable chat instructions are expected to map to tools, not raw JSON replies.
 - sticky delivery-tile rules: `set_delivery_tile_multiplier`,
 - sticky delivery-count rules: `set_delivery_count_multiplier`,
 
-The chat processor executes tool calls in a bounded multi-step loop (`CHAT_MAX_LLM_ITERATIONS`, `CHAT_MAX_TOOL_CALLS`) and logs optional diagnostics (`CHAT_DIAGNOSTICS_*` env vars).
+The chat processor executes tool calls in a bounded multi-step loop (`CHAT_MAX_LLM_ITERATIONS`, `CHAT_MAX_TOOL_CALLS`) and logs optional diagnostics (`CHAT_DIAGNOSTICS_*` env vars). These settings now live under `config.llm.*`.
 
 These commands update belief overlays/events and trigger replanning through normal loop invalidation.
 

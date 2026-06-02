@@ -1,4 +1,3 @@
-import { CONFIG } from "../config.js";
 import { normalizeSensingRange } from "./belief-state.js";
 
 function asArray(value) {
@@ -63,7 +62,7 @@ function observedSensingRange(config) {
   return normalizeSensingRange(config?.GAME?.player?.observation_distance, null);
 }
 
-export function registerSdkListeners(socket, beliefs, _loop = null) {
+export function registerSdkListeners(socket, beliefs, config) {
   socket.on("connect", () => {
     beliefs.pushEvent("CONNECTED");
   });
@@ -72,13 +71,13 @@ export function registerSdkListeners(socket, beliefs, _loop = null) {
     beliefs.pushEvent("DISCONNECTED", { reason });
   });
 
-  socket.on("config", (config) => {
-    const rewardAvg = Number(config?.GAME?.parcels?.reward_avg);
+  socket.on("config", (runtimeConfig) => {
+    const rewardAvg = Number(runtimeConfig?.GAME?.parcels?.reward_avg);
     if (Number.isFinite(rewardAvg)) {
       beliefs.meanPackageValue = rewardAvg;
     }
 
-    const sensingRange = observedSensingRange(config);
+    const sensingRange = observedSensingRange(runtimeConfig);
     if (sensingRange !== null) {
       beliefs.updateSensingRange?.(sensingRange, "sdk_config");
     }
@@ -115,11 +114,10 @@ export function registerSdkListeners(socket, beliefs, _loop = null) {
   });
 
   socket.on("msg", (...args) => {
+    if (!config?.llm?.chatEnabled) return;
+
     const normalized = normalizeChatArgs(args);
-    // ignore non-admin messages
-    if (CONFIG.adminId) {
-      if (String(normalized.fromId ?? "") !== String(CONFIG.adminId)) return;
-    }
+    if (String(normalized.fromId ?? "") !== String(config.llm.adminId)) return;
     beliefs.pushChatMessage(normalized);
   });
 }

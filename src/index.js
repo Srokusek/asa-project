@@ -1,17 +1,23 @@
 import "dotenv/config";
 import { DjsConnect } from "@unitn-asa/deliveroo-js-sdk/client";
 import { AgentLoop } from "./control/agent-loop.js";
-import { CONFIG } from "./config.js";
+import { createConfig } from "./config.js";
 import { BeliefState } from "./state/belief-state.js";
 import { registerSdkListeners } from "./state/sdk-adapter.js";
 import { createLogger } from "./utils/logger.js";
 
-const logger = createLogger(CONFIG.logLevel);
-const socket = DjsConnect(CONFIG.host, CONFIG.token, CONFIG.agentName);
-const beliefs = new BeliefState(CONFIG);
-const loop = new AgentLoop(socket, beliefs, CONFIG);
+const config = createConfig();
+const logger = createLogger(config.logLevel);
 
-registerSdkListeners(socket, beliefs, loop);
+if (config.llm.enabled && !config.llm.chatEnabled) {
+  logger.warn("AGENT_TYPE=llm but ADMIN_ID is missing; chat is disabled and the BDI loop will continue without LLM");
+}
+
+const socket = DjsConnect(config.host, config.token, config.agentName);
+const beliefs = new BeliefState(config);
+const loop = new AgentLoop(socket, beliefs, config);
+
+registerSdkListeners(socket, beliefs, config);
 
 socket.on("connect", () => {
   logger.info("connected to Deliveroo.js cloud");

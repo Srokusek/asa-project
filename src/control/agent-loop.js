@@ -13,7 +13,7 @@ import { normalizeSensingRange } from "../state/belief-state.js";
 import { createTelemetry } from "../telemetry/telemetry.js";
 import { createLogger } from "../utils/logger.js";
 import { directionFromPositions, manhattan, positionKey, sameTile } from "../utils/geometry.js";
-import { createChatProcessor } from "./chat-processor.js";
+import { createChatProcessor } from "../llm/chat-processor.js";
 
 const HARD_REPLAN_EVENTS = new Set([
   "MOVE_FAILED",
@@ -217,7 +217,9 @@ export class AgentLoop {
     this.sameBlockedMoveCount = 0;
     this.lastReplanCause = "missing_plan";
     this.invalidNonIdleZeroActionCount = 0;
-    this.chatProcessor = createChatProcessor({ beliefs: this.beliefs, executor: this.executor, logger: this.logger });
+    this.chatProcessor = this.config.llm?.chatEnabled
+      ? createChatProcessor({ beliefs: this.beliefs, executor: this.executor, logger: this.logger, config: this.config })
+      : null;
     this.activeManualTask = null;
   }
 
@@ -822,7 +824,7 @@ export class AgentLoop {
       // events is a list of all events that the agent has sensed since the last tick
       if (!this.beliefs.ready) return; // stop if connection, map or other crucial steps have not been resolved yet
 
-      if (await this.chatProcessor.processPendingChatMessage()) {
+      if (this.chatProcessor && await this.chatProcessor.processPendingChatMessage()) {
         return;
       }
 
