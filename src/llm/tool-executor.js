@@ -93,6 +93,18 @@ function parsePositiveIntegerCount(args) {
   return count;
 }
 
+function parseThresholdComparison(args) {
+  const comparison = String(args?.comparison ?? "").trim().toLowerCase();
+  if (!["gt", "lt"].includes(comparison)) return null;
+  return comparison;
+}
+
+function parseFiniteThreshold(args) {
+  const threshold = Number(args?.threshold);
+  if (!Number.isFinite(threshold)) return null;
+  return threshold;
+}
+
 export function compactToolArgs(args) {
   if (!args || typeof args !== "object") return args ?? null;
   const json = JSON.stringify(args);
@@ -377,6 +389,24 @@ export function createToolExecutor({ beliefs, executor, logger, config }) {
     };
   }
 
+  function validateDeliveryValueThresholdMultiplierArgs(args) {
+    const comparison = parseThresholdComparison(args);
+    if (!comparison) return { ok: false, reason: "invalid_comparison" };
+    const threshold = parseFiniteThreshold(args);
+    if (threshold === null) return { ok: false, reason: "invalid_threshold" };
+    const multiplier = parseNonNegativeMultiplier(args);
+    if (multiplier === null) return { ok: false, reason: "invalid_multiplier" };
+    return {
+      ok: true,
+      value: {
+        comparison,
+        threshold,
+        multiplier,
+        reason: String(args.reason ?? "delivery_value_threshold_multiplier_instruction")
+      }
+    };
+  }
+
   function validateCalculatorArgs(args) {
     if (!args || typeof args !== "object" || Array.isArray(args)) {
       return { ok: false, reason: "invalid_payload" };
@@ -550,6 +580,44 @@ export function createToolExecutor({ beliefs, executor, logger, config }) {
     });
   }
 
+  async function executeDeliveryValueThresholdRuleTool(parsedValue, { senderId, sourceChatId }) {
+    const toolName = "set_delivery_value_threshold_multiplier";
+    const validation = validateDeliveryValueThresholdMultiplierArgs(parsedValue);
+    if (!validation.ok) {
+      return asToolError(toolName, `Delivery value threshold multiplier rejected: ${validation.reason}.`, {
+        toolArgs: parsedValue,
+        data: { reason: validation.reason, details: validation.details ?? null }
+      });
+    }
+
+    const entry = beliefs.setDeliveryValueThresholdMultiplier(
+      validation.value.comparison,
+      validation.value.threshold,
+      validation.value.multiplier,
+      {
+        reason: validation.value.reason,
+        sourceChatId: Number(sourceChatId ?? 0) || null,
+        senderId
+      }
+    );
+    if (!entry) {
+      return asToolError(toolName, "Delivery value threshold multiplier rejected: invalid_payload.", {
+        toolArgs: parsedValue,
+        data: { reason: "invalid_payload" }
+      });
+    }
+
+    return asToolSuccess(
+      toolName,
+      `Delivery value threshold multiplier set: ${entry.comparison} ${entry.threshold} -> ${entry.multiplier}x.`,
+      {
+        deliveryValueThresholdRule: entry,
+        toolArgs: parsedValue,
+        data: { deliveryValueThresholdRule: entry }
+      }
+    );
+  }
+
   async function executeToolCall(call, { senderId, sourceChatId }) {
     const toolName = String(call?.function?.name ?? "").trim();
     const rawArgs = call?.function?.arguments;
@@ -717,6 +785,15 @@ export function createToolExecutor({ beliefs, executor, logger, config }) {
       const parsed = parseJsonArguments(rawArgs, countRuleConfigs[toolName].validationMessage);
       if (!parsed.ok) return asToolError(toolName, parsed.error);
       return executeCountRuleTool(toolName, parsed.value, { senderId, sourceChatId });
+    }
+
+    if (toolName === "set_delivery_value_threshold_multiplier") {
+      const parsed = parseJsonArguments(
+        rawArgs,
+        "I could not parse delivery value threshold multiplier request. Please include comparison, threshold, and multiplier."
+      );
+      if (!parsed.ok) return asToolError(toolName, parsed.error);
+      return executeDeliveryValueThresholdRuleTool(parsed.value, { senderId, sourceChatId });
     }
 
     return asToolError(

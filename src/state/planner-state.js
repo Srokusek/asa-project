@@ -207,6 +207,7 @@ export function buildPlannerState(beliefs, config) {
     deliveryTileBonuses: Object.fromEntries(beliefs.deliveryTileBonuses ?? []),
     deliveryCountMultipliers: Object.fromEntries(beliefs.deliveryCountMultipliers ?? []),
     deliveryCountBonuses: Object.fromEntries(beliefs.deliveryCountBonuses ?? []),
+    deliveryValueThresholdRule: beliefs.deliveryValueThresholdRule ? { ...beliefs.deliveryValueThresholdRule } : null,
     lastObservedAtByTile: Object.fromEntries(beliefs.lastObservedAtByTile ?? []),
     lastObservedAtByGreen: Object.fromEntries(beliefs.lastObservedAtByGreen ?? []),
     sensingRange: beliefs.sensingRange,

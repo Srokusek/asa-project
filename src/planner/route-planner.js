@@ -38,6 +38,10 @@ import {
   computeGreenScore,
   computeGreenScores,
   currentGreenValue,
+  deliveryBonusAt,
+  deliveryCountBonusAt,
+  deliveryCountMultiplierAt,
+  deliveryMultiplierAt,
   nearestRedDistance,
   packageConfidence,
   packageDecayRate,
@@ -45,6 +49,7 @@ import {
   selectCandidateGreens,
   sigmoid
 } from "./scoring/green-scorer.js";
+import { estimateDeliveredValueForSinglePackage } from "./scoring/reward-overlays.js";
 import {
   bestCompletionValue,
   beatsEnemiesToGreen,
@@ -206,6 +211,31 @@ function candidateRejectionReason(diagnostic) {
   return "low_score";
 }
 
+function bestSinglePackageDeliveryOverrides(state) {
+  if (!Array.isArray(state.reds) || state.reds.length === 0) {
+    return {
+      deliveryMultiplier: 1,
+      deliveryBonus: 0,
+      countMultiplier: deliveryCountMultiplierAt(state, 1),
+      countBonus: deliveryCountBonusAt(state, 1)
+    };
+  }
+
+  let bestMultiplier = 1;
+  let bestBonus = Number.NEGATIVE_INFINITY;
+  for (const red of state.reds) {
+    bestMultiplier = Math.max(bestMultiplier, deliveryMultiplierAt(state, red.position));
+    bestBonus = Math.max(bestBonus, deliveryBonusAt(state, red.position));
+  }
+
+  return {
+    deliveryMultiplier: bestMultiplier,
+    deliveryBonus: Number.isFinite(bestBonus) ? bestBonus : 0,
+    countMultiplier: deliveryCountMultiplierAt(state, 1),
+    countBonus: deliveryCountBonusAt(state, 1)
+  };
+}
+
 function diagnoseCandidateGreens(state, candidateGreens, oracle, config) {
   return candidateGreens.map((green) => {
     const startEdge = getOracleEdge(oracle, "START", green.id);
@@ -214,18 +244,40 @@ function diagnoseCandidateGreens(state, candidateGreens, oracle, config) {
     const pickupTime = reachableFromMe ? asNumber(state.time, 0) + pickupDistance : Infinity;
     const valueAtPickup = reachableFromMe ? packageValueAtPickup(state, green, pickupTime, config) : 0;
     let bestGreenToRed = Infinity;
+    let bestEstimatedDeliveredValue = null;
+    const decayRate = packageDecayRate(green, config.decayRate);
 
     for (const red of oracle.points.filter((point) => point.type === "red")) {
       const edge = getOracleEdge(oracle, green.id, red.id);
-      if (edge && Number.isFinite(edge.cost)) bestGreenToRed = Math.min(bestGreenToRed, edge.cost);
+      if (!edge || !Number.isFinite(edge.cost)) continue;
+      bestGreenToRed = Math.min(bestGreenToRed, edge.cost);
+      const estimatedValueAtDelivery = Math.max(0, valueAtPickup - decayRate * edge.cost);
+      const estimatedDeliveredValue = estimateDeliveredValueForSinglePackage({
+        deliveredBaseValue: estimatedValueAtDelivery,
+        state,
+        deliveryPosition: red.position,
+        count: 1
+      });
+      bestEstimatedDeliveredValue = bestEstimatedDeliveredValue === null
+        ? estimatedDeliveredValue
+        : Math.max(bestEstimatedDeliveredValue, estimatedDeliveredValue);
     }
 
     if (!Number.isFinite(bestGreenToRed)) bestGreenToRed = nearestRedDistance(state, green.position);
     const deliveryDistance = bestGreenToRed;
     const reachableRedAfterPickup = Number.isFinite(deliveryDistance);
-    const decayRate = packageDecayRate(green, config.decayRate);
     const estimatedDeliveredValue = reachableFromMe && reachableRedAfterPickup
-      ? packageReward(green, config.meanPackageValue) - decayRate * (pickupDistance + deliveryDistance)
+      ? (
+        bestEstimatedDeliveredValue !== null
+          ? bestEstimatedDeliveredValue
+          : estimateDeliveredValueForSinglePackage({
+            deliveredBaseValue: Math.max(0, valueAtPickup - decayRate * deliveryDistance),
+            state,
+            deliveryPosition: green.position,
+            count: 1,
+            deliveryOverrides: bestSinglePackageDeliveryOverrides(state)
+          })
+      )
       : 0;
     const estimatedValueAtDelivery = reachableRedAfterPickup
       ? Math.max(0, valueAtPickup - decayRate * deliveryDistance)

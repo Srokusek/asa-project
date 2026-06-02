@@ -3,6 +3,12 @@ import { createModelClient } from "./model-client.js";
 import { chatTools } from "./tool-definitions.js";
 import { compactToolArgs, createToolExecutor } from "./tool-executor.js";
 
+const chatToolNameSet = new Set(
+  chatTools
+    .map((tool) => String(tool?.function?.name ?? "").trim())
+    .filter(Boolean)
+);
+
 function summarizeToolOutcomes(outcomes) {
   const successes = outcomes.filter((entry) => entry.ok);
   const failures = outcomes.filter((entry) => !entry.ok);
@@ -63,6 +69,7 @@ function buildPrompt(message) {
         "- set_delivery_tile_bonus: add sticky delivery reward bonuses. For relative delivery instructions like 'topmost delivery tile' or 'bottommost delivery tile', use selector with scope='delivery' instead of coordinates.",
         "- set_delivery_count_multiplier: add sticky delivery reward multipliers by exact delivered package count.",
         "- set_delivery_count_bonus: add sticky delivery reward bonuses by exact delivered package count.",
+        "- set_delivery_value_threshold_multiplier: add one global delivery reward multiplier rule by per-parcel delivered value threshold using comparison='gt' or comparison='lt'.",
         "Non-actionable chat, acknowledgements, and unrelated questions should be answered briefly in plain text.",
         "Never output a raw JSON object, fake function call, or pseudo-tool payload in assistant text when a tool should be used."
       ].join("\n")
@@ -149,6 +156,48 @@ function buildPrompt(message) {
     },
     {
       role: "user",
+      content: "If you deliver parcels with a value higher than 10 you get no reward."
+    },
+    {
+      role: "assistant",
+      content: "",
+      tool_calls: [
+        {
+          id: "example_delivery_value_threshold_multiplier",
+          type: "function",
+          function: {
+            name: "set_delivery_value_threshold_multiplier",
+            arguments: JSON.stringify({
+              comparison: "gt",
+              threshold: 10,
+              multiplier: 0,
+              reason: "admin request"
+            })
+          }
+        }
+      ]
+    },
+    {
+      role: "tool",
+      tool_call_id: "example_delivery_value_threshold_multiplier",
+      name: "set_delivery_value_threshold_multiplier",
+      content: JSON.stringify({
+        ok: true,
+        tool: "set_delivery_value_threshold_multiplier",
+        message: "Applied delivery value threshold multiplier.",
+        data: {
+          comparison: "gt",
+          threshold: 10,
+          multiplier: 0
+        }
+      })
+    },
+    {
+      role: "assistant",
+      content: "Applied delivery value threshold multiplier: values above 10 now get 0x reward."
+    },
+    {
+      role: "user",
       content: "what is the capital of france?"
     },
     {
@@ -163,6 +212,60 @@ function buildPrompt(message) {
       ].join("\n")
     }
   ];
+}
+
+function normalizeSerializedToolCall(rawCall, iteration) {
+  if (!rawCall || typeof rawCall !== "object" || Array.isArray(rawCall)) return null;
+
+  const directName = typeof rawCall.name === "string" ? rawCall.name.trim() : "";
+  const nestedName = typeof rawCall.function?.name === "string" ? rawCall.function.name.trim() : "";
+  const toolName = directName || nestedName;
+  if (!toolName || !chatToolNameSet.has(toolName)) return null;
+
+  const rawArguments =
+    rawCall.parameters ??
+    rawCall.arguments ??
+    rawCall.function?.arguments ??
+    rawCall.function?.parameters ??
+    {};
+
+  let serializedArguments = "{}";
+  if (typeof rawArguments === "string") {
+    const trimmed = rawArguments.trim();
+    if (!trimmed) return null;
+    try {
+      JSON.parse(trimmed);
+      serializedArguments = trimmed;
+    } catch (_error) {
+      return null;
+    }
+  } else if (rawArguments && typeof rawArguments === "object" && !Array.isArray(rawArguments)) {
+    serializedArguments = JSON.stringify(rawArguments);
+  } else {
+    return null;
+  }
+
+  return {
+    id: String(rawCall.id ?? rawCall.function?.id ?? `content_tool_call_${iteration}_0`),
+    type: "function",
+    function: {
+      name: toolName,
+      arguments: serializedArguments
+    }
+  };
+}
+
+function parseSerializedToolCallsFromContent(content, iteration) {
+  const rawContent = typeof content === "string" ? content.trim() : "";
+  if (!rawContent) return [];
+
+  try {
+    const parsed = JSON.parse(rawContent);
+    const normalized = normalizeSerializedToolCall(parsed, iteration);
+    return normalized ? [normalized] : [];
+  } catch (_error) {
+    return [];
+  }
 }
 
 export function createChatProcessor({ beliefs, executor, logger, config, llmCaller = null }) {
@@ -188,7 +291,10 @@ export function createChatProcessor({ beliefs, executor, logger, config, llmCall
       llmLatencies.push(Number(llmLatencyMs) || 0);
 
       const rawToolCalls = Array.isArray(message?.tool_calls) ? message.tool_calls : [];
-      const toolCalls = rawToolCalls.map((call, index) => ({
+      const recoveredToolCalls =
+        rawToolCalls.length === 0 ? parseSerializedToolCallsFromContent(message?.content, iteration) : [];
+      const selectedToolCalls = rawToolCalls.length > 0 ? rawToolCalls : recoveredToolCalls;
+      const toolCalls = selectedToolCalls.map((call, index) => ({
         ...call,
         id: String(call?.id ?? `tool_call_${iteration}_${index}`),
         function: {
@@ -198,7 +304,12 @@ export function createChatProcessor({ beliefs, executor, logger, config, llmCall
 
       turnMessages.push({
         role: "assistant",
-        content: typeof message?.content === "string" ? message.content : "",
+        content:
+          toolCalls.length > 0 && rawToolCalls.length === 0
+            ? ""
+            : typeof message?.content === "string"
+              ? message.content
+              : "",
         tool_calls: toolCalls.length > 0 ? toolCalls : undefined
       });
 

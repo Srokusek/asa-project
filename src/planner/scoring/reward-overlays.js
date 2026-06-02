@@ -24,6 +24,18 @@ function numericValue(entry, field, fallback) {
   return Number.isFinite(value) ? value : fallback;
 }
 
+function normalizedDeliveryValueThresholdRule(state) {
+  const rule = state?.deliveryValueThresholdRule;
+  if (!rule || typeof rule !== "object") return null;
+  const comparison = String(rule.comparison ?? "").trim().toLowerCase();
+  const threshold = asNumber(rule.threshold, NaN);
+  const multiplier = asNumber(rule.multiplier, NaN);
+  if (!["gt", "lt"].includes(comparison)) return null;
+  if (!Number.isFinite(threshold)) return null;
+  if (!Number.isFinite(multiplier) || multiplier < 0) return null;
+  return { comparison, threshold, multiplier };
+}
+
 export function pickupMultiplierAt(state, position) {
   return numericValue(tileRuleEntryAt(state?.pickupTileMultipliers, position), "multiplier", 1);
 }
@@ -50,6 +62,29 @@ export function deliveryCountBonusAt(state, count) {
   const normalizedCount = Math.round(Number(count));
   if (!Number.isFinite(normalizedCount) || normalizedCount < 1) return 0;
   return numericValue(countRuleEntryFor(state?.deliveryCountBonuses, normalizedCount), "bonus", 0);
+}
+
+export function adjustDeliveredParcelBaseValue(baseDeliveredValue, state, overrides = {}) {
+  const normalizedBase = Math.max(0, asNumber(baseDeliveredValue, 0));
+  const rule = overrides.rule ?? normalizedDeliveryValueThresholdRule(state);
+  if (!rule) return normalizedBase;
+
+  const matches = rule.comparison === "gt"
+    ? normalizedBase > rule.threshold
+    : normalizedBase < rule.threshold;
+  return matches ? normalizedBase * rule.multiplier : normalizedBase;
+}
+
+export function estimateDeliveredValueForSinglePackage({
+  deliveredBaseValue,
+  state,
+  deliveryPosition,
+  count = 1,
+  ruleOverrides = {},
+  deliveryOverrides = {}
+}) {
+  const adjustedParcelValue = adjustDeliveredParcelBaseValue(deliveredBaseValue, state, ruleOverrides);
+  return adjustDeliveredBaseValue(adjustedParcelValue, state, deliveryPosition, count, deliveryOverrides);
 }
 
 export function adjustPickupBaseValue(baseValue, state, position, overrides = {}) {

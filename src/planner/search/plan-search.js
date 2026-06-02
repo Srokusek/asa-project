@@ -13,6 +13,7 @@ import {
   winProbability
 } from "../scoring/green-scorer.js";
 import {
+  adjustDeliveredParcelBaseValue,
   adjustDeliveredBaseValue,
   adjustPickupBaseValue,
   deliveryBonusAt,
@@ -137,7 +138,8 @@ export function extendToGreen(plan, green, state, oracle, config) {
 export function computeDeliveredValue(pickedPackages, deliveryTime, deliveryPosition, state) {
   const baseDeliveredValue = pickedPackages.reduce((sum, pkg) => {
     const elapsed = Math.max(0, deliveryTime - pkg.pickupTime);
-    return sum + Math.max(0, pkg.valueAtPickup - pkg.decayRate * elapsed);
+    const deliveredBaseValue = Math.max(0, pkg.valueAtPickup - pkg.decayRate * elapsed);
+    return sum + adjustDeliveredParcelBaseValue(deliveredBaseValue, state);
   }, 0);
   return adjustDeliveredBaseValue(baseDeliveredValue, state, deliveryPosition, pickedPackages.length);
 }

@@ -217,6 +217,36 @@ export const setDeliveryCountBonusTool = {
   }
 };
 
+export const setDeliveryValueThresholdMultiplierTool = {
+  type: "function",
+  function: {
+    name: "set_delivery_value_threshold_multiplier",
+    description: "Set one global delivery reward multiplier rule based on each parcel's predicted delivered value before delivery tile/count overlays. Use comparison 'gt' for value higher than threshold, or 'lt' for value lower than threshold. Example: 'If you deliver parcels with a value higher than 10 you get no reward' -> { comparison: 'gt', threshold: 10, multiplier: 0 }.",
+    parameters: {
+      type: "object",
+      properties: {
+        comparison: {
+          type: "string",
+          enum: ["gt", "lt"],
+          description: "Use 'gt' for strictly greater than the threshold, or 'lt' for strictly less than the threshold."
+        },
+        threshold: {
+          type: "number",
+          description: "Numeric value threshold literal, for example 10 or 5.5."
+        },
+        multiplier: {
+          type: "number",
+          minimum: 0,
+          description: "Non-negative numeric multiplier literal. Use 0 for 'no reward'."
+        },
+        reason: { type: "string", description: "Short operational reason for the reward rule." }
+      },
+      required: ["comparison", "threshold", "multiplier"],
+      additionalProperties: false
+    }
+  }
+};
+
 export const chatTools = [
   calculateExpressionsTool,
   explicitPlanTool,
@@ -226,5 +256,6 @@ export const chatTools = [
   setDeliveryTileMultiplierTool,
   setDeliveryTileBonusTool,
   setDeliveryCountMultiplierTool,
-  setDeliveryCountBonusTool
+  setDeliveryCountBonusTool,
+  setDeliveryValueThresholdMultiplierTool
 ];

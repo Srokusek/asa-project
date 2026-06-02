@@ -9,16 +9,18 @@ import {
 } from "../path/pathfinder.js";
 import { buildMapProfile } from "../path/grid-utils.js";
 import {
-  adjustDeliveredBaseValue,
+  adjustDeliveredParcelBaseValue,
   adjustPickupBaseValue,
   deliveryBonusAt,
   deliveryCountBonusAt,
   deliveryCountMultiplierAt,
   deliveryMultiplierAt,
+  estimateDeliveredValueForSinglePackage,
   pickupMultiplierAt
 } from "./reward-overlays.js";
 
 export {
+  adjustDeliveredParcelBaseValue,
   deliveryBonusAt,
   deliveryCountBonusAt,
   deliveryCountMultiplierAt,
@@ -105,6 +107,15 @@ function bestDeliveryBonus(state) {
   return Number.isFinite(best) ? best : 0;
 }
 
+function bestSinglePackageDeliveryOverrides(state) {
+  return {
+    deliveryMultiplier: bestDeliveryMultiplier(state),
+    deliveryBonus: bestDeliveryBonus(state),
+    countMultiplier: deliveryCountMultiplierAt(state, 1),
+    countBonus: deliveryCountBonusAt(state, 1)
+  };
+}
+
 export function hasAvailablePackage(green, config) {
   if (!green.package || green.package.carriedBy) return false;
   if (packageConfidence(green) < config.minParcelConfidence) return false;
@@ -164,11 +175,12 @@ export function currentGreenValue(state, green, config) {
   const currentValue = packageReward(green, config.meanPackageValue);
   const deliveryAwareValue = Math.max(0, currentValue - decayRate * etaTotal);
   const pickupAdjustedValue = packageConfidence(green) * adjustPickupBaseValue(deliveryAwareValue, state, green.position);
-  const adjustedValue = adjustDeliveredBaseValue(pickupAdjustedValue, state, green.position, 1, {
-    deliveryMultiplier: bestDeliveryMultiplier(state),
-    deliveryBonus: bestDeliveryBonus(state),
-    countMultiplier: deliveryCountMultiplierAt(state, 1),
-    countBonus: deliveryCountBonusAt(state, 1)
+  const adjustedValue = estimateDeliveredValueForSinglePackage({
+    deliveredBaseValue: pickupAdjustedValue,
+    state,
+    deliveryPosition: green.position,
+    count: 1,
+    deliveryOverrides: bestSinglePackageDeliveryOverrides(state)
   });
   return winProbability(state, green, etaMe, config) * adjustedValue;
 }
@@ -228,9 +240,22 @@ export function selectCandidateGreens(state, greenScores, config) {
       const deliveryDistance = nearestRedDistance(state, green.position);
       const reachableFromMe = Number.isFinite(pickupDistance);
       const reachableRedAfterPickup = Number.isFinite(deliveryDistance);
-      const multiplier = pickupMultiplierAt(state, green.position) * bestDeliveryMultiplier(state);
+      const deliveryOverrides = bestSinglePackageDeliveryOverrides(state);
+      const deliveredBaseValue = reachableFromMe && reachableRedAfterPickup
+        ? packageConfidence(green) * adjustPickupBaseValue(
+          Math.max(0, reward - packageDecayRate(green, config.decayRate) * (pickupDistance + deliveryDistance)),
+          state,
+          green.position
+        )
+        : 0;
       const estimatedDeliveredValue = reachableFromMe && reachableRedAfterPickup
-        ? (reward - packageDecayRate(green, config.decayRate) * (pickupDistance + deliveryDistance)) * multiplier
+        ? estimateDeliveredValueForSinglePackage({
+          deliveredBaseValue,
+          state,
+          deliveryPosition: green.position,
+          count: 1,
+          deliveryOverrides
+        })
         : 0;
 
       if (!reachableFromMe || !reachableRedAfterPickup) {
@@ -275,7 +300,10 @@ export function selectCandidateGreens(state, greenScores, config) {
         distanceToRed: deliveryDistance,
         pickupDistance,
         deliveryDistance,
-        adjustedReward: reward * multiplier,
+        adjustedReward: adjustDeliveredParcelBaseValue(
+          packageConfidence(green) * adjustPickupBaseValue(reward, state, green.position),
+          state
+        ),
         estimatedDeliveredValue
       };
     })

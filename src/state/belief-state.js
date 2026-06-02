@@ -153,6 +153,7 @@ export class BeliefState {
     this.deliveryTileBonuses = new Map(); // sticky delivery-value additive bonus by tile
     this.deliveryCountMultipliers = new Map(); // sticky delivery-value multiplier by delivered package count
     this.deliveryCountBonuses = new Map(); // sticky delivery-value additive bonus by delivered package count
+    this.deliveryValueThresholdRule = null; // sticky delivery-value multiplier rule by per-parcel delivered value
     this.sensingRange = normalizeSensingRange(config?.planner?.sensingRange, 5);
     this.manualTasks = [];
     this.manualTaskSequence = 0;
@@ -307,6 +308,29 @@ export class BeliefState {
       reason: "delivery_count_bonus",
       eventType: "DELIVERY_COUNT_BONUS_SET"
     });
+  }
+
+  setDeliveryValueThresholdMultiplier(comparison, threshold, multiplier, meta = {}) {
+    const normalizedComparison = String(comparison ?? "").trim().toLowerCase();
+    const normalizedThreshold = Number(threshold);
+    const normalizedMultiplier = Number(multiplier);
+    if (!["gt", "lt"].includes(normalizedComparison)) return null;
+    if (!Number.isFinite(normalizedThreshold)) return null;
+    if (!Number.isFinite(normalizedMultiplier) || normalizedMultiplier < 0) return null;
+    const current = this.deliveryValueThresholdRule;
+    const entry = {
+      comparison: normalizedComparison,
+      threshold: normalizedThreshold,
+      multiplier: normalizedMultiplier,
+      reason: String(meta.reason ?? current?.reason ?? "delivery_value_threshold_multiplier"),
+      sourceChatId: Number(meta.sourceChatId ?? current?.sourceChatId ?? 0) || null,
+      senderId: meta.senderId ?? current?.senderId ?? null,
+      createdAtTick: Number(current?.createdAtTick ?? this.time)
+    };
+    this.deliveryValueThresholdRule = entry;
+    this.pushEvent("DELIVERY_VALUE_THRESHOLD_MULTIPLIER_SET", { ...entry });
+    this.markDirty();
+    return entry;
   }
 
   pickupMultiplierAt(position) {
@@ -578,6 +602,7 @@ export class BeliefState {
     this.deliveryTileBonuses.clear();
     this.deliveryCountMultipliers.clear();
     this.deliveryCountBonuses.clear();
+    this.deliveryValueThresholdRule = null;
 
     for (const tile of tiles) { // iteratively add tiles along with their type
       const position = roundTilePosition(tile);

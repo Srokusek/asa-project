@@ -342,6 +342,10 @@ export function parseMap(json) {
     deliveryTileBonuses: normalizeObservationMap(input.deliveryTileBonuses),
     deliveryCountMultipliers: normalizeObservationMap(input.deliveryCountMultipliers),
     deliveryCountBonuses: normalizeObservationMap(input.deliveryCountBonuses),
+    deliveryValueThresholdRule:
+      input.deliveryValueThresholdRule && typeof input.deliveryValueThresholdRule === "object"
+        ? { ...input.deliveryValueThresholdRule }
+        : null,
     visitedPositions: normalizeObservationMap(input.visitedPositions),
     visitedEdges: normalizeObservationMap(input.visitedEdges),
     scoutTargetAttempts: normalizeObservationMap(input.scoutTargetAttempts),
