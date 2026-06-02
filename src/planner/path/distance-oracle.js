@@ -280,7 +280,11 @@ export function buildDistanceOracle(state, points) {
     staticIndexReuseCount: staticIndexStatus.staticIndexReuseCount,
     startSingleSourceMs: asNumber(state.__startSingleSourceMs, 0),
     dynamicPathRepairs: 0,
-    dynamicRepairFailReplans: 0
+    dynamicRepairFailReplans: 0,
+    redDistanceCacheHit: 0,
+    redDistanceCacheMiss: 0,
+    redDistanceCacheBuildMs: 0,
+    redDistanceCacheTopologyHit: 0
   };
 
   return {

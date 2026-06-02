@@ -1,6 +1,7 @@
 import { DEFAULT_PARAMS } from "../default-params.js";
 import { asNumber, clamp, copyPosition, positionKey } from "../path/grid-utils.js";
 import { getOracleEdge } from "../path/distance-oracle.js";
+import { distanceFromAnyTileToRed } from "../path/red-distance-cache.js";
 import { shortestGridPath } from "../path/pathfinder.js";
 import {
   deliveryCountMultiplierAt,
@@ -270,6 +271,20 @@ function sourceForRedShortlist(plan, oracle) {
 }
 
 function distanceFromSourceToRed(sourceId, sourcePosition, red, state, oracle) {
+  const hasStaticTree = Boolean(sourceId && oracle.staticIndex?.treesBySourceId?.has(sourceId));
+
+  if (hasStaticTree) {
+    const edge = getOracleEdge(oracle, sourceId, red.id);
+    if (edge && Number.isFinite(edge.cost)) return edge.cost;
+  }
+
+  const cachedDistance = distanceFromAnyTileToRed(state.__redDistanceCache, sourcePosition, red.id);
+  if (Number.isFinite(cachedDistance)) {
+    if (state.__redDistanceCacheStats) state.__redDistanceCacheStats.hits += 1;
+    return cachedDistance;
+  }
+  if (state.__redDistanceCacheStats) state.__redDistanceCacheStats.misses += 1;
+
   if (sourceId) {
     const edge = getOracleEdge(oracle, sourceId, red.id);
     if (edge && Number.isFinite(edge.cost)) return edge.cost;

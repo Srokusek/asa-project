@@ -52,7 +52,7 @@ export function winProbability(state, green, etaMe, config) {
   for (const enemy of state.enemies) {
     const speed = Math.max(EPSILON, asNumber(enemy.speed, 1));
     const enemyEta = rankingDistance(state, enemy.position, green.position) / speed;
-    probability = Math.min(probability, sigmoid(config.kWin * (enemyEta - etaMe)));
+    probability = config.ignore_enemyEta ? probability : Math.min(probability, sigmoid(config.kWin * (enemyEta - etaMe)));
   }
   return probability;
 }

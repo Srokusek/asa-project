@@ -711,6 +711,10 @@ export class AgentLoop {
       startSingleSourceMs: routePlan.oracle?.stats?.startSingleSourceMs ?? 0,
       dynamicPathRepairs: routePlan.oracle?.stats?.dynamicPathRepairs ?? 0,
       dynamicRepairFailReplans: routePlan.oracle?.stats?.dynamicRepairFailReplans ?? 0,
+      redDistanceCacheHit: routePlan.oracle?.stats?.redDistanceCacheHit ?? 0,
+      redDistanceCacheMiss: routePlan.oracle?.stats?.redDistanceCacheMiss ?? 0,
+      redDistanceCacheBuildMs: routePlan.oracle?.stats?.redDistanceCacheBuildMs ?? 0,
+      redDistanceCacheTopologyHit: routePlan.oracle?.stats?.redDistanceCacheTopologyHit ?? 0,
       greenRecentlyVisited: routePlan.scoutTarget
         ? this.beliefs.greenRecentlyVisited?.(
             routePlan.scoutTarget.id,
@@ -759,6 +763,10 @@ export class AgentLoop {
       startSingleSourceMs: routePlan.oracle?.stats?.startSingleSourceMs ?? 0,
       dynamicPathRepairs: routePlan.oracle?.stats?.dynamicPathRepairs ?? 0,
       dynamicRepairFailReplans: routePlan.oracle?.stats?.dynamicRepairFailReplans ?? 0,
+      redDistanceCacheHit: routePlan.oracle?.stats?.redDistanceCacheHit ?? 0,
+      redDistanceCacheMiss: routePlan.oracle?.stats?.redDistanceCacheMiss ?? 0,
+      redDistanceCacheBuildMs: routePlan.oracle?.stats?.redDistanceCacheBuildMs ?? 0,
+      redDistanceCacheTopologyHit: routePlan.oracle?.stats?.redDistanceCacheTopologyHit ?? 0,
       actionCount: executablePlan.length,
       eventsSeen,
       replanCause,

@@ -38,6 +38,7 @@ export const CONFIG = {
     packageVariance: 0,
     decayRate: 0.05,
     kWin: 1,
+    ignore_enemyEta: true,
     moveWeight: 1,
     betaCarry: 0.5,
     periodicReplanTicks: 20000,

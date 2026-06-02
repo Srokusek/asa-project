@@ -32,6 +32,7 @@ import {
   shortestGridPath
 } from "./path/pathfinder.js";
 import { buildDistanceOracle, getOracleEdge, reconstructGridPath } from "./path/distance-oracle.js";
+import { getRedDistanceCacheForState } from "./path/red-distance-cache.js";
 import {
   buildNearestRedDistanceMap,
   computeGreenScore,
@@ -276,6 +277,13 @@ function buildUnifiedPickupDeliveryPlan(state, profile, config, greenScores, can
     fallbackStage: "unified_full_plan"
   });
 
+  if (routePlan?.oracle?.stats && state.__redDistanceCacheStats) {
+    routePlan.oracle.stats.redDistanceCacheHit = state.__redDistanceCacheStats.hits;
+    routePlan.oracle.stats.redDistanceCacheMiss = state.__redDistanceCacheStats.misses;
+    routePlan.oracle.stats.redDistanceCacheBuildMs = state.__redDistanceCacheStats.buildMs;
+    routePlan.oracle.stats.redDistanceCacheTopologyHit = Number(Boolean(state.__redDistanceCacheStats.cacheHit));
+  }
+
   return {
     ...routePlan,
     unifiedOutcome: result.outcome,
@@ -303,6 +311,21 @@ export function replan(state) {
   });
   Object.defineProperty(planningState, "__redDistanceMap", {
     value: buildNearestRedDistanceMap(planningState, profile),
+    enumerable: false
+  });
+  const redDistanceCacheStatus = getRedDistanceCacheForState(planningState);
+  Object.defineProperty(planningState, "__redDistanceCache", {
+    value: redDistanceCacheStatus.index,
+    enumerable: false
+  });
+  Object.defineProperty(planningState, "__redDistanceCacheStats", {
+    value: {
+      topologyKey: redDistanceCacheStatus.topologyKey,
+      cacheHit: redDistanceCacheStatus.cacheHit,
+      buildMs: redDistanceCacheStatus.buildMs,
+      hits: 0,
+      misses: 0
+    },
     enumerable: false
   });
   const config = choosePlannerConfig(profile);
