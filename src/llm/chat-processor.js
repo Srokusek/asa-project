@@ -57,10 +57,10 @@ function buildPrompt(message) {
         "- calculate_expressions: evaluate arithmetic expressions and return numeric results for later tool calls.",
         "- set_explicit_plan: create explicit goto_tile manual tasks, optionally as a sequence with targets=[{x,y},...] or with a selector for one relative tile.",
         "- set_forbidden_tile: add sticky forbidden tiles, optionally using a selector for one relative tile.",
-        "- set_pickup_tile_multiplier: add sticky pickup reward multipliers.",
-        "- set_pickup_tile_bonus: add sticky pickup reward bonuses.",
-        "- set_delivery_tile_multiplier: add sticky delivery reward multipliers.",
-        "- set_delivery_tile_bonus: add sticky delivery reward bonuses.",
+        "- set_pickup_tile_multiplier: add sticky pickup reward multipliers. For relative pickup instructions like 'rightmost pickup tile' or 'leftmost pickup tile', use selector with scope='pickup' instead of coordinates.",
+        "- set_pickup_tile_bonus: add sticky pickup reward bonuses. For relative pickup instructions like 'topmost pickup tile' or 'bottommost pickup tile', use selector with scope='pickup' instead of coordinates.",
+        "- set_delivery_tile_multiplier: add sticky delivery reward multipliers. For relative delivery instructions like 'leftmost delivery tile' or 'rightmost delivery tile', use selector with scope='delivery' instead of coordinates.",
+        "- set_delivery_tile_bonus: add sticky delivery reward bonuses. For relative delivery instructions like 'topmost delivery tile' or 'bottommost delivery tile', use selector with scope='delivery' instead of coordinates.",
         "- set_delivery_count_multiplier: add sticky delivery reward multipliers by exact delivered package count.",
         "- set_delivery_count_bonus: add sticky delivery reward bonuses by exact delivered package count.",
         "Non-actionable chat, acknowledgements, and unrelated questions should be answered briefly in plain text.",
@@ -106,6 +106,46 @@ function buildPrompt(message) {
     {
       role: "assistant",
       content: "Applied pickup multiplier 1000 to the resolved rightmost pickup tile."
+    },
+    {
+      role: "user",
+      content: "deliveries to the leftmost tile give 5 bonus points"
+    },
+    {
+      role: "assistant",
+      content: "",
+      tool_calls: [
+        {
+          id: "example_delivery_leftmost_bonus",
+          type: "function",
+          function: {
+            name: "set_delivery_tile_bonus",
+            arguments: JSON.stringify({
+              selector: { extreme: "leftmost", scope: "delivery" },
+              bonus: 5,
+              reason: "admin request"
+            })
+          }
+        }
+      ]
+    },
+    {
+      role: "tool",
+      tool_call_id: "example_delivery_leftmost_bonus",
+      name: "set_delivery_tile_bonus",
+      content: JSON.stringify({
+        ok: true,
+        tool: "set_delivery_tile_bonus",
+        message: "Applied delivery tile bonus 5 to the resolved tile.",
+        data: {
+          target: { x: 1, y: 6 },
+          selector: { extreme: "leftmost", scope: "delivery" }
+        }
+      })
+    },
+    {
+      role: "assistant",
+      content: "Applied delivery bonus 5 to the resolved leftmost delivery tile."
     },
     {
       role: "user",
