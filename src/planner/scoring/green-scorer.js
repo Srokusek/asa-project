@@ -49,9 +49,11 @@ export function winProbability(state, green, etaMe, config) {
   if (!state.enemies || state.enemies.length === 0) return 1;
 
   let probability = 1;
+  if (config.ignore_enemyEta) { // enable skipping this calculation
+    return probability }
   for (const enemy of state.enemies) {;
     const enemyEta = rankingDistance(state, enemy.position, green.position);
-    probability = config.ignore_enemyEta ? probability : Math.min(probability, sigmoid(config.kWin * (enemyEta - etaMe)));
+    probability = Math.min(probability, sigmoid(config.kWin * (enemyEta - etaMe)));
   }
   return probability;
 }
