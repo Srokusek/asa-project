@@ -177,6 +177,7 @@ export function buildPlannerState(beliefs, config) {
     height,
     grid,
     time: beliefs.time,
+    meanPackageValue: beliefs.meanPackageValue,
     me: {
       id: beliefs.me?.id ?? "",
       name: beliefs.me?.name ?? "",
@@ -205,7 +206,10 @@ export function buildPlannerState(beliefs, config) {
     deliveryCountMultipliers: Object.fromEntries(beliefs.deliveryCountMultipliers ?? []),
     lastObservedAtByTile: Object.fromEntries(beliefs.lastObservedAtByTile ?? []),
     lastObservedAtByGreen: Object.fromEntries(beliefs.lastObservedAtByGreen ?? []),
-    sensingRange: config.planner.sensingRange,
-    params: { ...config.planner }
+    sensingRange: beliefs.sensingRange,
+    params: {
+      ...config.planner,
+      sensingRange: beliefs.sensingRange
+    }
   });
 }

@@ -1,4 +1,5 @@
 import { CONFIG } from "../config.js";
+import { normalizeSensingRange } from "./belief-state.js";
 
 function asArray(value) {
   return Array.isArray(value) ? value : [];
@@ -58,6 +59,10 @@ function normalizeChatArgs(args) {
   return { text: String(args[0] ?? "") };
 }
 
+function observedSensingRange(config) {
+  return normalizeSensingRange(config?.GAME?.player?.observation_distance, null);
+}
+
 export function registerSdkListeners(socket, beliefs, _loop = null) {
   socket.on("connect", () => {
     beliefs.pushEvent("CONNECTED");
@@ -65,6 +70,18 @@ export function registerSdkListeners(socket, beliefs, _loop = null) {
 
   socket.on("disconnect", (reason) => {
     beliefs.pushEvent("DISCONNECTED", { reason });
+  });
+
+  socket.on("config", (config) => {
+    const rewardAvg = Number(config?.GAME?.parcels?.reward_avg);
+    if (Number.isFinite(rewardAvg)) {
+      beliefs.meanPackageValue = rewardAvg;
+    }
+
+    const sensingRange = observedSensingRange(config);
+    if (sensingRange !== null) {
+      beliefs.updateSensingRange?.(sensingRange, "sdk_config");
+    }
   });
 
   socket.on("you", (...args) => {

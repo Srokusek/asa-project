@@ -328,7 +328,10 @@ export function replan(state) {
     },
     enumerable: false
   });
-  const config = choosePlannerConfig(profile);
+  const config = choosePlannerConfig(profile, {
+    ...planningState.params,
+    sensingRange: planningState.sensingRange
+  });
   const greenScores = computeGreenScores(planningState, config);
   // candidate greens only include possible packages
   const candidateGreens = selectCandidateGreens(planningState, greenScores, config);

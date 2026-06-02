@@ -49,7 +49,7 @@ export const CONFIG = {
     sensingRange: 5,
     scoutCooldownTicks: 8,
     scoutCongestionPenalty: 10,
-    maxStalenessValue: 1000,
+    maxStalenessValue: 10000,
     greenInfoMultiplier: 4,
     redInfoMultiplier: 0.2,
     clusterPickupRadius: 3,
@@ -68,8 +68,8 @@ export const CONFIG = {
 
     // parameters used by unified scout
     unifiedScoutCheckpointCount: 24,
-    unifiedScoutStalenessWeight: 50.0,
-    unifiedScoutDistanceWeight: 0.2,
+    unifiedScoutStalenessWeight: 1.0,
+    unifiedScoutDistanceWeight: 1.0,
     unifiedScoutTopKForRedTieBreak: 5,
     unifiedScoutRepeatTargetPenalty: 50,
     unifiedScoutRepeatSectorPenalty: 10,

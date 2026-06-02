@@ -4,6 +4,19 @@ function nowTime(fallback) {
   return Number.isFinite(Number(fallback)) ? Number(fallback) : null;
 }
 
+export function normalizeSensingRange(value, fallback = null) {
+  if (value === undefined || value === null) return fallback;
+  if (value === Infinity) return Infinity;
+  const numeric = Number(value);
+  if (numeric === -1) return Infinity;
+  if (!Number.isFinite(numeric) || numeric < 0) return fallback;
+  return numeric;
+}
+
+export function sensingRangeSignature(range) {
+  return range === Infinity ? "inf" : String(range);
+}
+
 function normalizeTileType(type) {
   const candidate =
     type && typeof type === "object"
@@ -73,6 +86,7 @@ export class BeliefState {
     this.width = 0; // map width
     this.height = 0; // map height
     this.tiles = new Map(); // location and types of tiles
+    this.meanPackageValue = Number(config?.planner?.meanPackageValue ?? 30);
     this.parcels = new Map(); // any observed parcels
     this.carriedParcels = new Map(); // any carried parcels
     this.agents = new Map(); // information about other agents
@@ -96,6 +110,7 @@ export class BeliefState {
     this.pickupTileMultipliers = new Map(); // sticky pickup-value multiplier by tile
     this.deliveryTileMultipliers = new Map(); // sticky delivery-value multiplier by tile
     this.deliveryCountMultipliers = new Map(); // sticky delivery-value multiplier by delivered package count
+    this.sensingRange = normalizeSensingRange(config?.planner?.sensingRange, 5);
     this.manualTasks = [];
     this.manualTaskSequence = 0;
     this.events = [];
@@ -529,14 +544,23 @@ export class BeliefState {
     this.pushEvent("TILE_UPDATED", normalized); // push event payload
   }
 
+  updateSensingRange(range, source = "runtime_config") {
+    const nextRange = normalizeSensingRange(range, null);
+    if (nextRange === null || Object.is(this.sensingRange, nextRange)) return false;
+    this.sensingRange = nextRange;
+    this.pushEvent("SENSING_RANGE_UPDATED", { sensingRange: nextRange, source });
+    this.markDirty();
+    return true;
+  }
+
   visiblePositionSet(visiblePositions = []) {
     return new Set(visiblePositions.map((position) => positionKey(position)));
   }
 
   visiblePositionsFromSelf() { // get tiles which are visible from current position
-    const range = Number(this.config.planner.sensingRange ?? 5); // use the config sensingRange, given by environment
+    const range = normalizeSensingRange(this.sensingRange, null);
 
-    if (!this.me || !Number.isFinite(range)) return [];
+    if (!this.me || range === null) return [];
 
     const visible = [];
     for (let y = 0; y < this.height; y += 1) {

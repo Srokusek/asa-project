@@ -9,6 +9,7 @@ import {
   shortestGridPath
 } from "../planner/route-planner.js";
 import { buildPlannerState } from "../state/planner-state.js";
+import { normalizeSensingRange } from "../state/belief-state.js";
 import { createTelemetry } from "../telemetry/telemetry.js";
 import { createLogger } from "../utils/logger.js";
 import { directionFromPositions, manhattan, positionKey, sameTile } from "../utils/geometry.js";
@@ -20,6 +21,7 @@ const HARD_REPLAN_EVENTS = new Set([
   "PACKAGE_STOLEN",
   "TARGET_NOT_FOUND",
   "BELIEF_INVALIDATED",
+  "SENSING_RANGE_UPDATED",
   "PICKUP_FAILED",
   "PUTDOWN_FAILED",
   "TEMPORARY_BLOCKED_CELL",
@@ -308,7 +310,7 @@ export class AgentLoop {
     const target = scoutTarget?.position;
     if (!target || !this.beliefs.me) return;
 
-    const sensingRange = Number(this.config.planner.sensingRange ?? 0);
+    const sensingRange = normalizeSensingRange(this.beliefs.sensingRange, this.config.planner.sensingRange ?? 0);
     const currentPosition = copyPosition(this.beliefs.me);
     if (manhattan(currentPosition, target) > sensingRange) return;
     if (this.beliefs.greenRecentlyVisited?.(scoutTarget.id, this.config.planner.scoutCooldownTicks ?? 8)) return;

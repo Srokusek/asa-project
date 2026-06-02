@@ -1,4 +1,5 @@
 import { directionFromPositions } from "../../utils/geometry.js";
+import { normalizeSensingRange } from "../../state/belief-state.js";
 import { DEFAULT_PARAMS } from "../default-params.js";
 
 const EPSILON = 1e-9;
@@ -25,8 +26,12 @@ function normalizeId(prefix, id, position) {
   return `${prefix}_${position.x}_${position.y}`;
 }
 
-function normalizeParams() {
-  return { ...DEFAULT_PARAMS };
+function normalizeParams(input = {}) {
+  return {
+    ...DEFAULT_PARAMS,
+    ...input,
+    sensingRange: normalizeSensingRange(input?.sensingRange, DEFAULT_PARAMS.sensingRange)
+  };
 }
 
 function normalizeVisitedGreenAt(value) {
@@ -272,7 +277,7 @@ function applyExplicitPoisToGrid(state) { //  not sure why we would need these e
  */
 export function parseMap(json) {
   const input = typeof json === "string" ? JSON.parse(json) : json ?? {};
-  const params = normalizeParams();
+  const params = normalizeParams(input.params);
   const { grid, width, height } = normalizeGrid(input, input.width, input.height);
   const me = normalizeMe(input);
   const parcelByPosition = new Map();
@@ -320,6 +325,7 @@ export function parseMap(json) {
     height,
     grid,
     time: asNumber(input.time, 0),
+    meanPackageValue: asNumber(input.meanPackageValue, params.meanPackageValue),
     me,
     enemies: normalizeEnemies(input, me.id),
     carriedPackages: (input.carriedPackages ?? []).map((pkg) => ({ ...pkg })),
@@ -340,7 +346,7 @@ export function parseMap(json) {
     lastDeliveryPosition: input.lastDeliveryPosition ? copyPosition(input.lastDeliveryPosition) : null,
     lastObservedAtByTile: normalizeObservationMap(input.lastObservedAtByTile),
     lastObservedAtByGreen: normalizeObservationMap(input.lastObservedAtByGreen),
-    sensingRange: asNumber(input.sensingRange, params.sensingRange),
+    sensingRange: normalizeSensingRange(input.sensingRange, params.sensingRange),
     greens,
     reds,
     params

@@ -1,4 +1,5 @@
 import { manhattan } from "../../utils/geometry.js";
+import { normalizeSensingRange, sensingRangeSignature } from "../../state/belief-state.js";
 import { DEFAULT_PARAMS } from "../default-params.js";
 import { baseRoutePlan } from "../route-plan.js";
 import { initialPlan } from "../search/plan-search.js";
@@ -105,15 +106,8 @@ function checkpointId(position, config) {
   return `SCOUT_UNIFIED_${position.x}_${position.y}_S${sector}`;
 }
 
-function shuffleInPlace(items) {
-  for (let i = items.length - 1; i > 0; i -= 1) {
-    const j = Math.floor(Math.random() * (i + 1));
-    [items[i], items[j]] = [items[j], items[i]];
-  }
-}
-
 function checkpointCoverageSort(a, b) {
-  return b.coveredGreenIds.length - a.coveredGreenIds.length;
+  return b.coveredGreenIds.length - a.coveredGreenIds.length || a.id.localeCompare(b.id);
 }
 
 export function buildScoutCheckpointSignature(state, config, profile = null) {
@@ -128,11 +122,11 @@ export function buildScoutCheckpointSignature(state, config, profile = null) {
     .map((position) => `${position.x},${position.y}`)
     .sort()
     .join("|");
-  const sensingRange = Math.max(0, asNumber(config.sensingRange, DEFAULT_PARAMS.sensingRange));
+  const sensingRange = normalizeSensingRange(config.sensingRange, DEFAULT_PARAMS.sensingRange);
   return [
     state.width,
     state.height,
-    sensingRange,
+    sensingRangeSignature(sensingRange),
     Boolean(profile?.hasDirectionalTiles),
     Boolean(profile?.hasObstacles),
     greens,
@@ -142,17 +136,20 @@ export function buildScoutCheckpointSignature(state, config, profile = null) {
 
 export function buildScoutCheckpointIndex(state, config, profile = null, signature = null) {
   const maxCheckpoints = Math.max(1, Math.round(asNumber(config.unifiedScoutCheckpointCount, 24)));
-  const sensingRange = Math.max(0, asNumber(config.sensingRange, DEFAULT_PARAMS.sensingRange));
+  const sensingRange = normalizeSensingRange(config.sensingRange, DEFAULT_PARAMS.sensingRange);
   const greenById = new Map((state.greens ?? []).map((green) => [green.id, green]));
   const candidates = [];
+  const allGreenIds = (state.greens ?? []).map((green) => green.id).sort();
 
   for (const green of state.greens ?? []) {
     const position = copyPosition(green.position);
     if (!isWalkable(state, position)) continue;
-    const coveredGreenIds = [];
-    for (const target of state.greens ?? []) {
-      if (manhattan(position, target.position) <= sensingRange) coveredGreenIds.push(target.id);
-    }
+    const coveredGreenIds =
+      sensingRange === Infinity
+        ? [...allGreenIds]
+        : (state.greens ?? [])
+            .filter((target) => manhattan(position, target.position) <= sensingRange)
+            .map((target) => target.id);
     if (coveredGreenIds.length === 0) continue;
     const id = checkpointId(position, config);
     candidates.push({
@@ -163,7 +160,6 @@ export function buildScoutCheckpointIndex(state, config, profile = null, signatu
     });
   }
 
-  shuffleInPlace(candidates);
   candidates.sort(checkpointCoverageSort);
   const uncovered = new Set([...greenById.keys()]);
   const selected = [];
@@ -184,7 +180,7 @@ export function buildScoutCheckpointIndex(state, config, profile = null, signatu
         bestGain = uncoveredGain;
         continue;
       }
-      if (uncoveredGain === bestGain && best && Math.random() < 0.5) {
+      if (uncoveredGain === bestGain && best && candidate.id.localeCompare(best.id) < 0) {
         best = candidate;
       }
     }
@@ -255,7 +251,10 @@ export function buildUnifiedScoutPlan(state, profile, config, greenScores, check
 
     const checkpointStaleness = normalizedStalenessSum / coveredGreenCount; // average staleness green tiles around checkpoint
     const stalenessComponent = stalenessWeight * checkpointStaleness * coveredGreenCount;
-    const checkpointValue = multiplierComponent + stalenessComponent;
+    const normalizedMultiplierComponent = multiplierComponent / coveredGreenCount // take into account multipliers (average for simplicity)
+    // this should give the expected reward (scaled by staleness for potential respawns) and using the mean package value
+    const meanPackageValue = Number(state.meanPackageValue ?? config.meanPackageValue ?? DEFAULT_PARAMS.meanPackageValue);
+    const checkpointValue = multiplierComponent * stalenessComponent * meanPackageValue;
     const redInfo = returnToRedPenalty(state, position, config);
     if (redInfo.trapPenaltyApplied) continue;
     const sector = sectorIdFor(position, config);
