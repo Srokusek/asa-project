@@ -5,6 +5,7 @@ import { initialPlan } from "../search/plan-search.js";
 import { asNumber, copyPosition, getCell, isWalkable, positionKey } from "../path/grid-utils.js";
 import { bfsAllDistancesFrom, distanceToNearestReachableRed, pathFromBfsAll, shortestGridPath } from "../path/pathfinder.js";
 import { hasAvailablePackage, packageConfidence, pickupMultiplierAt } from "../scoring/green-scorer.js";
+import { ZoneMemory, zoneIdFor } from "../../strategy/zone-memory.js";
 
 function pairKey(fromId, toId) {
   return `${fromId}->${toId}`;
@@ -103,6 +104,18 @@ function routePlanForScoutPoint({ mode, state, profile, config, greenScores, poi
 function checkpointId(position, config) {
   const sector = sectorIdFor(position, config);
   return `SCOUT_UNIFIED_${position.x}_${position.y}_S${sector}`;
+}
+
+function zoneScoreMap(state, config) {
+  if (!state.zoneMemory?.zones || state.zoneMemory.zones.length === 0) return new Map();
+  const memory = ZoneMemory.fromSnapshot(state.zoneMemory, config);
+  return new Map(memory.scoreZones(state).map((zone) => [zone.zoneId, zone]));
+}
+
+function zoneScoreFor(position, zones, config) {
+  if (!zones || zones.size === 0) return 0;
+  const zoneId = zoneIdFor(position, Math.max(1, Number(config.zoneMemorySectorSize ?? config.coverageSectorSize ?? 5) || 5));
+  return Number(zones.get(zoneId)?.score ?? 0) * asNumber(config.zoneMemoryScoutWeight, 0.25);
 }
 
 function centerDistance(position, center) {
@@ -227,6 +240,7 @@ export function buildUnifiedScoutPlan(state, profile, config, greenScores, check
   const topK = Math.max(1, Math.round(asNumber(config.unifiedScoutTopKForRedTieBreak, 5)));
   const startSearch = profile.hasUniformCosts ? bfsAllDistancesFrom(state, state.me.position) : null;
   const greenById = new Map((state.greens ?? []).map((green) => [green.id, green]));
+  const zones = zoneScoreMap(state, config);
   const candidates = [];
 
   for (const checkpoint of checkpoints) {
@@ -257,7 +271,8 @@ export function buildUnifiedScoutPlan(state, profile, config, greenScores, check
     if (redInfo.trapPenaltyApplied) continue;
     const sector = sectorIdFor(position, config);
     const repeatPenalty = unifiedScoutRepeatPenalty(state, checkpoint.id, sector, config);
-    const primaryScore = checkpointValue - distanceWeight * edge.cost - repeatPenalty;
+    const zoneMemoryComponent = zoneScoreFor(position, zones, config);
+    const primaryScore = checkpointValue + zoneMemoryComponent - distanceWeight * edge.cost - repeatPenalty;
 
     candidates.push({
       checkpoint,
@@ -266,6 +281,7 @@ export function buildUnifiedScoutPlan(state, profile, config, greenScores, check
       checkpointValue,
       stalenessComponent,
       multiplierComponent,
+      zoneMemoryComponent,
       coveredGreenCount,
       repeatPenalty,
       distanceToNearestRed: redInfo.distanceToNearestRed,
@@ -302,6 +318,7 @@ export function buildUnifiedScoutPlan(state, profile, config, greenScores, check
       checkpointValue: best.checkpointValue,
       stalenessComponent: best.stalenessComponent,
       multiplierComponent: best.multiplierComponent,
+      zoneMemoryComponent: best.zoneMemoryComponent,
       repeatPenalty: best.repeatPenalty,
       coveredGreenCount: best.coveredGreenCount,
       sampleGreenIds: (best.checkpoint.coveredGreenIds ?? []).slice(0, 8),
@@ -359,6 +376,7 @@ export function buildLocalExplorePlan(state, profile, config) {
   const start = copyPosition(state.me.position);
   const previous = previousExplorePosition(state);
   const reverseKey = previous ? positionKey(previous) : null;
+  const zones = zoneScoreMap(state, config);
   const candidates = [];
 
   for (const position of [
@@ -373,14 +391,16 @@ export function buildLocalExplorePlan(state, profile, config) {
     const returnPenalty = returnToRedPenalty(state, position, config);
 
     const isReverse = reverseKey !== null && positionKey(position) === reverseKey;
+    const zoneMemoryComponent = zoneScoreFor(position, zones, config);
     const score =
       asNumber(config.localExploreInfoWeight, 1) * tileInformationValue(state, position, config) +
+      zoneMemoryComponent +
       localExploreTieBreaker(state, position) -
       returnPenalty.penalty -
       (isReverse ? asNumber(config.localExploreReversePenalty, 20) : 0) -
       temporaryBlockScorePenalty(state, position) -
       enemyProximityPenalty(state, position, config);
-    candidates.push({ position, edge, score, isReverse, returnPenalty });
+    candidates.push({ position, edge, score, isReverse, returnPenalty, zoneMemoryComponent });
   }
 
   candidates.sort((a, b) => b.score - a.score || Number(a.isReverse) - Number(b.isReverse));

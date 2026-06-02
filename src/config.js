@@ -80,6 +80,18 @@ export const CONFIG = {
     maxRepeatedBlockedMovesBeforeReplan: 2,
     targetCongestionPenalty: 0,
     immediatePickupMaxDistance: 4,
+    deliveryDeferralNearbyRadius: 4,
+    deliveryDeferralMinNearbyValue: 1,
+    deliveryDeferralCloseRedDistance: 2,
+    shortHarvestBudgetMs: 20,
+    shortHarvestMaxCandidates: 8,
+    shortHarvestMinCandidates: 2,
+    shortHarvestDepth: 4,
+    shortHarvestBeamWidth: 8,
+    shortHarvestMinValue: 0,
+    zoneMemorySectorSize: 5,
+    zoneMemoryReturnToRedWeight: 0.5,
+    zoneMemoryScoutWeight: 0.25,
 
     // search parameters
     beamWidth: 100,

@@ -8,8 +8,11 @@ import { stringifyTeamMessage, parseTeamMessage, TEAM_MESSAGE_TYPES } from "../s
 import { evaluateDelivery } from "../src/missions/reward-model.js";
 import { MissionRegistry } from "../src/missions/mission-registry.js";
 import { MISSION_TYPES } from "../src/missions/mission-spec.js";
+import { buildShortHarvestPlan } from "../src/planner/search/short-harvest-rollout.js";
 import { parseMap, replan, shortestGridPath, isMoveAllowed } from "../src/planner/route-planner.js";
+import { shouldDeliverNow } from "../src/strategy/delivery-policy.js";
 import { buildImmediatePickupPlan, tryImmediateAction } from "../src/strategy/reactive-layer.js";
+import { ZoneMemory } from "../src/strategy/zone-memory.js";
 import { BeliefState } from "../src/state/belief-state.js";
 import { positionKey } from "../src/utils/geometry.js";
 
@@ -174,6 +177,85 @@ test("immediate pickup chooses visible nearby parcel", () => {
   assert.ok(plan);
   assert.equal(plan.executablePlan.at(-1).type, "pick_up");
   assert.equal(plan.routePlan.candidateGreens[0].position.x, 1);
+});
+
+test("delivery policy defers when exact stack needs nearby packages", () => {
+  const plannerState = parseMap({
+    width: 5,
+    height: 1,
+    grid: [["3", "1", "1", "3", "2"]],
+    me: { id: "me", position: { x: 0, y: 0 } },
+    carriedPackages: [{ packageId: "c1", valueAtPickup: 10, pickupTime: 0, decayRate: 0, confidence: 1 }],
+    parcels: [
+      { id: "p1", x: 1, y: 0, reward: 10, confidence: 1, lastSeenTime: 0 },
+      { id: "p2", x: 2, y: 0, reward: 10, confidence: 1, lastSeenTime: 0 }
+    ],
+    stackRules: [{ kind: "STACK_EXACTLY_N", count: 3, hard: true }],
+    params: { ...CONFIG.planner, decayRate: 0 }
+  });
+  const decision = shouldDeliverNow(plannerState, null, plannerState.params);
+  assert.equal(decision.shouldDeliver, false);
+  assert.equal(decision.stackRuleStatus, "needs_more_packages");
+  assert.equal(decision.reason, "stack_rule_not_satisfied_and_nearby_pickups");
+});
+
+test("short harvest rollout builds pickup-pickup-deliver sequence for exact stack", () => {
+  const plannerState = parseMap({
+    width: 5,
+    height: 1,
+    grid: [["3", "1", "1", "3", "2"]],
+    me: { id: "me", position: { x: 0, y: 0 } },
+    carriedPackages: [{ packageId: "c1", valueAtPickup: 10, pickupTime: 0, decayRate: 0, confidence: 1 }],
+    parcels: [
+      { id: "p1", x: 1, y: 0, reward: 10, confidence: 1, lastSeenTime: 0 },
+      { id: "p2", x: 2, y: 0, reward: 10, confidence: 1, lastSeenTime: 0 }
+    ],
+    stackRules: [{ kind: "STACK_EXACTLY_N", count: 3, hard: true }],
+    params: {
+      ...CONFIG.planner,
+      decayRate: 0,
+      shortHarvestMinCandidates: 2,
+      shortHarvestDepth: 3,
+      shortHarvestBudgetMs: 20
+    }
+  });
+  const deliveryDecision = shouldDeliverNow(plannerState, null, plannerState.params);
+  plannerState.deliveryDecision = deliveryDecision;
+  const harvestPlan = buildShortHarvestPlan(plannerState, deliveryDecision, plannerState.params);
+
+  assert.ok(harvestPlan);
+  assert.equal(harvestPlan.type, "SHORT_HARVEST");
+  assert.equal(harvestPlan.mode, "PICKUP_DELIVERY_UNIFIED");
+  assert.equal(harvestPlan.sequence.at(-1), "R_4_0");
+  assert.equal(harvestPlan.sequence.filter((id) => id.startsWith("G_")).length, 2);
+});
+
+test("zone memory scores useful stale reward zones above current zone", () => {
+  const memory = new ZoneMemory({ zoneMemorySectorSize: 5, zoneMemoryReturnToRedWeight: 0.5 });
+  const beliefs = {
+    time: 20,
+    me: { x: 0, y: 0 },
+    tiles: new Map([
+      ["0,0", { x: 0, y: 0, type: "3" }],
+      ["10,0", { x: 10, y: 0, type: "1" }]
+    ]),
+    parcels: new Map([
+      ["p1", { id: "p1", x: 10, y: 0, reward: 100, rewardAtLastSeen: 100, confidence: 1, lastSeenTime: 20 }]
+    ]),
+    carriedParcels: new Map(),
+    agents: new Map()
+  };
+  memory.updateFromBeliefs(beliefs);
+  const plannerState = parseMap({
+    width: 15,
+    height: 1,
+    grid: [["3", "3", "3", "3", "3", "3", "3", "3", "3", "3", "1", "3", "3", "3", "2"]],
+    me: { id: "me", position: { x: 0, y: 0 } },
+    params: CONFIG.planner
+  });
+  const best = memory.bestZone(plannerState);
+  assert.equal(best.zoneId, "Z_2_0");
+  assert.ok(best.score > 0);
 });
 
 test("directed arrows still constrain movement", () => {

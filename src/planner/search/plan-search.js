@@ -138,6 +138,14 @@ export function computeDeliveredValue(pickedPackages, deliveryTime, deliveryPosi
 export function extendToRed(plan, red, _state, oracle, _config) {
   if (plan.pickedPackages.length === 0) return null;
 
+  const deliveryDecision = _state?.deliveryDecision;
+  const isImmediateDelivery =
+    deliveryDecision?.shouldDeliver === false &&
+    Array.isArray(plan.sequence) &&
+    plan.sequence.length === 1 &&
+    plan.pickedGreenIds?.size === 0;
+  if (isImmediateDelivery) return null;
+
   const edge = getOracleEdge(oracle, plan.currentId, red.id);
   if (!edge || !Number.isFinite(edge.cost)) return null;
 

@@ -1,5 +1,6 @@
 import { Executor } from "../executor/executor.js";
 import { buildExecutablePlan } from "../planner/executable-plan.js";
+import { buildShortHarvestPlan } from "../planner/search/short-harvest-rollout.js";
 import {
   buildMapProfile,
   getDirectedNeighbors,
@@ -9,8 +10,10 @@ import {
   shortestGridPath
 } from "../planner/route-planner.js";
 import { buildPlannerState } from "../state/planner-state.js";
+import { shouldDeliverNow } from "../strategy/delivery-policy.js";
 import { tryImmediateAction } from "../strategy/reactive-layer.js";
 import { trafficPolicyForBlockedMove } from "../strategy/traffic-policy.js";
+import { ZoneMemory } from "../strategy/zone-memory.js";
 import { createTelemetry } from "../telemetry/telemetry.js";
 import { createLogger } from "../utils/logger.js";
 import { directionFromPositions, manhattan, positionKey, sameTile } from "../utils/geometry.js";
@@ -224,6 +227,7 @@ export class AgentLoop {
     this.lastReplanCause = "missing_plan";
     this.invalidNonIdleZeroActionCount = 0;
     this.chatProcessor = createChatProcessor({ beliefs: this.beliefs, executor: this.executor, logger: this.logger });
+    this.zoneMemory = new ZoneMemory(config.planner);
     this.activeManualTask = null;
   }
 
@@ -642,7 +646,21 @@ export class AgentLoop {
       deliveryMultiplierRules: this.beliefs.deliveryTileMultipliers?.size ?? 0,
       me: this.beliefs.me
     };
-    const routePlan = replan(plannerState);
+    const deliveryDecision = shouldDeliverNow(plannerState, plannerState.deliveryRules, this.config.planner);
+    plannerState.deliveryDecision = deliveryDecision;
+    this.beliefs.deliveryDecision = deliveryDecision;
+
+    let routePlan = null;
+    if (!deliveryDecision.shouldDeliver) {
+      routePlan = buildShortHarvestPlan(plannerState, deliveryDecision, this.config.planner);
+      if (routePlan) this.lastReplanCause = "short_harvest_rollout";
+    }
+    if (!routePlan) {
+      routePlan = replan(plannerState, {
+        deliveryDecision,
+        zoneMemory: this.beliefs.zoneMemorySummary ?? null
+      });
+    }
     let executablePlan = routePathIsExecutable(routePlan) ? buildExecutablePlan(routePlan) : [];
     const elapsed = Date.now() - start;
     this.logger.debug("planner state summary", { ...plannerSummary, mode: routePlan.mode });
@@ -717,6 +735,7 @@ export class AgentLoop {
       value: routePlan.value,
       actions: executablePlan.length,
       candidates,
+      deliveryDecision,
       invalidPlanDetected: Boolean(routePlan.invalidPlanDetected),
       fallbackStage: routePlan.fallbackStage ?? "full_plan",
       hasDirectionalTiles: Boolean(routePlan.hasDirectionalTiles ?? routePlan.profile?.hasDirectionalTiles),
@@ -757,6 +776,7 @@ export class AgentLoop {
       sequenceLength: sequenceSummary.sequenceLength,
       sequenceTruncated: sequenceSummary.truncated,
       expectedValue: routePlan.value,
+      deliveryDecision,
       score: this.beliefs.me?.score,
       parcelsInBelief: this.beliefs.parcels.size,
       greensWithPackage: plannerSummary.greensWithPackage,
@@ -871,6 +891,8 @@ export class AgentLoop {
           }
         }
       }
+      this.beliefs.missionRegistry?.expireMissions?.(this.beliefs.time);
+      this.beliefs.zoneMemorySummary = this.zoneMemory.updateFromBeliefs(this.beliefs);
       // events is a list of all events that the agent has sensed since the last tick
       if (!this.beliefs.ready) return; // stop if connection, map or other crucial steps have not been resolved yet
 
