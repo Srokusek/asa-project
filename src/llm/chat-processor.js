@@ -32,29 +32,39 @@ function buildLimitFallback(outcomes, stopReason) {
 }
 
 function buildPrompt(message) {
+  const incomingText = String(message?.content ?? message?.text ?? "").trim();
   return [
     {
       role: "system",
       content: [
-        "You are a Deliveroo chat agent inside a BDI loop.",
-        "For actionable map/planner/task instructions, you MUST use matching tool calls and not plain JSON text.",
-        "If instruction arguments require arithmetic, call calculate_expressions first and then call actionable tools using computed numeric literals.",
-        "You may call multiple tools sequentially when needed to complete a single user instruction.",
-        "If a tool call fails, continue if additional tool calls can still make progress, then return a concise final status.",
+        "You are the Deliveroo admin chat agent for a BDI-controlled courier.",
+        "The BDI loop, planner, and executor are the real control system. You only interpret admin chat and apply manual overrides through tools.",
+        "Do not pretend you directly moved the agent, changed the map, or completed execution. Tools queue or apply planner-facing state; the main loop executes later.",
+        "Primary rule: if the admin message requests an actionable planner/task/map change, you MUST use the matching tool call(s), not plain text and not raw JSON in assistant text.",
+        "Use only the provided tools. Do not invent tool names, arguments, coordinates, constraints, map facts, or execution results.",
+        "If arithmetic is needed to produce tool arguments, call calculate_expressions first, then pass computed numeric literals into later tool calls.",
+        "You may call multiple tools sequentially when one instruction contains several requested changes.",
+        "If one tool call fails, continue with any remaining tool calls that can still make valid progress, then report a concise final status.",
+        "If the request is ambiguous, underspecified, contradictory, or asks for unsupported capabilities, do not guess. Ask a short clarification question or state the limitation plainly.",
+        "If the admin message is just a general question or conversation unrelated to the agent, the map, planning, tasks, rewards, or Deliveroo state, answer it directly in plain text without using any tool.",
+        "Keep final replies brief and operational. Prefer wording like 'queued', 'applied', 'rejected', or 'need clarification' over verbose explanations.",
         "Tool mapping:",
         "- calculate_expressions: evaluate arithmetic expressions and return numeric results for later tool calls.",
-        "- set_explicit_plan: explicit movement tasks like go to tile (x,y), optionally as a sequence with targets=[{x,y},...].",
+        "- set_explicit_plan: create explicit goto_tile manual tasks, optionally as a sequence with targets=[{x,y},...].",
         "- set_forbidden_tile: add sticky forbidden tiles.",
-        "- set_pickup_tile_multiplier: add pickup reward multipliers.",
-        "- set_delivery_tile_multiplier: add delivery reward multipliers.",
-        "- set_delivery_count_multiplier: add delivery reward multipliers by exact delivered package count.",
-        "If the message is not an actionable instruction, reply briefly in plain text.",
+        "- set_pickup_tile_multiplier: add sticky pickup reward multipliers.",
+        "- set_delivery_tile_multiplier: add sticky delivery reward multipliers.",
+        "- set_delivery_count_multiplier: add sticky delivery reward multipliers by exact delivered package count.",
+        "Non-actionable chat, acknowledgements, and unrelated questions should be answered briefly in plain text.",
         "Never output a raw JSON object in assistant text when a tool should be used."
       ].join("\n")
     },
     {
       role: "user",
-      content: `Incoming chat message: ${JSON.stringify(message)}`
+      content: [
+        `Incoming chat message text: ${JSON.stringify(incomingText)}`,
+        `Incoming chat envelope: ${JSON.stringify(message)}`
+      ].join("\n")
     }
   ];
 }

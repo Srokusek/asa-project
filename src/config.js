@@ -1,12 +1,18 @@
-function numberFromEnv(name, fallback) {
-  const value = Number(process.env[name]);
+function numberFromEnv(env, name, fallback) {
+  const value = Number(env[name]);
   return Number.isFinite(value) ? value : fallback;
 }
 
-function booleanFromEnv(name, fallback = false) {
-  const value = process.env[name];
+function booleanFromEnv(env, name, fallback = false) {
+  const value = env[name];
   if (value === undefined) return fallback;
   return ["1", "true", "yes", "on"].includes(String(value).toLowerCase());
+}
+
+function stringFromEnv(env, name, fallback = "") {
+  const value = env[name];
+  if (value === undefined || value === null) return fallback;
+  return String(value);
 }
 
 function normalizeHost(host) {
@@ -20,74 +26,107 @@ function asFinite(value, fallback = 0) {
   return Number.isFinite(n) ? n : fallback;
 }
 
-export const CONFIG = {
-  host: normalizeHost(process.env.HOST),
-  token: process.env.TOKEN ?? "",
-  agentName: process.env.AGENT_NAME ?? "PlannerAgent",
-  logLevel: process.env.LOG_LEVEL ?? "info",
-  adminId: process.env.ADMIN_ID ?? null,
-  actionDelayMs: numberFromEnv("ACTION_DELAY_MS", 100),
-  telemetryEnabled: booleanFromEnv("TELEMETRY_ENABLED", false),
-  telemetryFile: process.env.TELEMETRY_FILE ?? "telemetry.jsonl",
-  telemetry: {
-    enabled: booleanFromEnv("TELEMETRY_ENABLED", false),
-    file: process.env.TELEMETRY_FILE ?? "telemetry.jsonl"
-  },
-  planner: {
-    meanPackageValue: 10,
-    packageVariance: 0,
-    decayRate: 0.05,
-    kWin: 1,
-    ignoreEnemyEta: true,
-    moveWeight: 1,
-    betaCarry: 0.5,
-    periodicReplanTicks: 20000,
-    timeTickMs: 50,
-    minParcelConfidence: 0.3,
-    enemySafetyMargin: 0,
-    beliefDecayRate: 0.08,
-    sensingRange: 5,
-    scoutCooldownTicks: 8,
-    scoutCongestionPenalty: 10,
-    maxStalenessValue: 10000,
-    greenInfoMultiplier: 4,
-    redInfoMultiplier: 0.2,
-    clusterPickupRadius: 3,
-    clusterPickupBonusWeight: 0.6,
-    minClusterPackageValue: 3,
-    localCandidateRadius: 4,
-    localCandidateLimit: 4,
-    clusterExpansionRadius: 3,
-    clusterExpansionLimit: 6,
-    maxCandidateGreens: 16,
-    localExploreReversePenalty: 20,
-    localExploreInfoWeight: 1,
-    failedScoutTargetCooldownTicks: 40,
-    coverageSectorSize: 5,
-    returnToRedWeight: 0.5,
-
-    // parameters used by unified scout
-    unifiedScoutCheckpointCount: 24,
-    unifiedScoutStalenessWeight: 1.0,
-    unifiedScoutDistanceWeight: 1.0,
-    unifiedScoutTopKForRedTieBreak: 5,
-    unifiedScoutRepeatTargetPenalty: 50,
-    unifiedScoutRepeatSectorPenalty: 10,
-    trapPenalty: 10000,
-    planningBudgetMs: 200,
-    topKRedCandidates: 5,
-    enableEdgeTemporaryBlocks: true,
-    temporaryEdgeBlockTtlTicks: 2,
-    maxRepeatedBlockedMovesBeforeReplan: 2,
-    targetCongestionPenalty: 0,
-
-    // search parameters
-    beamWidth: 100,
-    topK: 16,
+function requiredAgentType(env) {
+  const value = String(env.AGENT_TYPE ?? "").trim().toLowerCase();
+  if (!value) {
+    throw new Error("missing required AGENT_TYPE env var (expected 'bdi' or 'llm')");
   }
-};
+  if (value !== "bdi" && value !== "llm") {
+    throw new Error(`invalid AGENT_TYPE '${value}' (expected 'bdi' or 'llm')`);
+  }
+  return value;
+}
 
-export function choosePlannerConfig(profile = {}, planner = CONFIG.planner) {
+export const DEFAULT_PLANNER_CONFIG = Object.freeze({
+  meanPackageValue: 10,
+  packageVariance: 0,
+  decayRate: 0.05,
+  kWin: 1,
+  ignoreEnemyEta: true,
+  moveWeight: 1,
+  betaCarry: 0.5,
+  periodicReplanTicks: 50,
+  timeTickMs: 50,
+  minParcelConfidence: 0.3,
+  enemySafetyMargin: 0,
+  beliefDecayRate: 0.08,
+  sensingRange: 5,
+  scoutCooldownTicks: 8,
+  scoutCongestionPenalty: 10,
+  maxStalenessValue: 10000,
+  greenInfoMultiplier: 4,
+  redInfoMultiplier: 0.2,
+  clusterPickupRadius: 3,
+  clusterPickupBonusWeight: 0.6,
+  minClusterPackageValue: 3,
+  localCandidateRadius: 4,
+  localCandidateLimit: 4,
+  clusterExpansionRadius: 3,
+  clusterExpansionLimit: 6,
+  maxCandidateGreens: 16,
+  localExploreReversePenalty: 20,
+  localExploreInfoWeight: 1,
+  failedScoutTargetCooldownTicks: 40,
+  coverageSectorSize: 5,
+  returnToRedWeight: 0.5,
+  unifiedScoutCheckpointCount: 24,
+  unifiedScoutStalenessWeight: 1.0,
+  unifiedScoutDistanceWeight: 1.0,
+  unifiedScoutTopKForRedTieBreak: 5,
+  unifiedScoutRepeatTargetPenalty: 50,
+  unifiedScoutRepeatSectorPenalty: 10,
+  trapPenalty: 10000,
+  planningBudgetMs: 200,
+  topKRedCandidates: 5,
+  enableEdgeTemporaryBlocks: true,
+  temporaryEdgeBlockTtlTicks: 10,
+  maxRepeatedBlockedMovesBeforeReplan: 2,
+  targetCongestionPenalty: 0,
+  beamWidth: 100,
+  topK: 16
+});
+
+export function createConfig(env = process.env) {
+  const agentType = requiredAgentType(env);
+  const adminId = env.ADMIN_ID ?? null;
+  const llmEnabled = agentType === "llm";
+  const chatEnabled = llmEnabled && Boolean(adminId);
+
+  return {
+    host: normalizeHost(env.HOST),
+    token: env.TOKEN ?? "",
+    agentName: env.AGENT_NAME ?? "PlannerAgent",
+    logLevel: env.LOG_LEVEL ?? "info",
+    agentType,
+    actionDelayMs: numberFromEnv(env, "ACTION_DELAY_MS", 100),
+    telemetryEnabled: booleanFromEnv(env, "TELEMETRY_ENABLED", false),
+    telemetryFile: env.TELEMETRY_FILE ?? "telemetry.jsonl",
+    telemetry: {
+      enabled: booleanFromEnv(env, "TELEMETRY_ENABLED", false),
+      file: env.TELEMETRY_FILE ?? "telemetry.jsonl"
+    },
+    planner: {
+      ...DEFAULT_PLANNER_CONFIG
+    },
+    llm: {
+      enabled: llmEnabled,
+      chatEnabled,
+      adminId,
+      baseUrl: stringFromEnv(env, "LITELLM_BASE_URL", "https://llm.bears.disi.unitn.it/v1"),
+      apiKey: env.LITELLM_API_KEY ?? "",
+      model: stringFromEnv(env, "LOCAL_MODEL", "llama-3.3-70b-lmstudio"),
+      diagnosticsEnabled: env.CHAT_DIAGNOSTICS_ENABLED !== "0",
+      diagnosticsFile: stringFromEnv(env, "CHAT_DIAGNOSTICS_FILE", "logs/chat-diagnostics.jsonl"),
+      maxToolIterations: Math.max(1, numberFromEnv(env, "CHAT_MAX_LLM_ITERATIONS", 8) || 8),
+      maxTotalToolCalls: Math.max(1, numberFromEnv(env, "CHAT_MAX_TOOL_CALLS", 16) || 16),
+      maxCalculatorExpressions: Math.max(1, numberFromEnv(env, "CHAT_CALCULATOR_MAX_EXPRESSIONS", 12) || 12),
+      maxCalculatorExpressionLength: Math.max(8, numberFromEnv(env, "CHAT_CALCULATOR_MAX_EXPR_LENGTH", 120) || 120),
+      disabledReason: llmEnabled && !adminId ? "missing_admin_id" : null
+    }
+  };
+}
+
+export function choosePlannerConfig(profile = {}, planner = DEFAULT_PLANNER_CONFIG) {
   const mode = "CONFIG_STATIC";
   const topK = Math.max(0, Math.min(asFinite(profile.greenCount, 0), asFinite(planner.topK, asFinite(profile.greenCount, 0))));
   const beamWidth = Math.max(1, Math.round(asFinite(planner.beamWidth, 1)));
