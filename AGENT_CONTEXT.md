@@ -1,547 +1,225 @@
-# LLM-Agent Context and Architecture
+# Agent Context
 
-This document is a repo-level orientation guide for coding agents working on `llm-agent`. The chat/LLM feature is only a small extension here. The main body of the project is the Deliveroo BDI agent: beliefs, planner state, search, scout planning, route planning, and execution.
+This document is for coding agents and maintainers. It describes where behavior belongs in the final architecture and where it should not be added.
 
-## What This Project Is
+## System Shape
 
-`llm-agent` is a Node.js Deliveroo.js agent built around a classical observe → believe → plan → execute loop.
+The repo has two runtime agents:
 
-At runtime it:
+- `StandardBDIAgent`: normal BDI player.
+- `CoordinationBDIAgent`: normal BDI player plus asynchronous LLM sidecar.
 
-1. connects to the Deliveroo.js server,
-2. listens to SDK events,
-3. updates a partial internal world model,
-4. builds planner input from beliefs,
-5. runs the route planner and search logic,
-6. translates the selected route into executable actions,
-7. executes actions through the SDK,
-8. replans when the world changes.
+Both agents use the same BDI gameplay stack. The LLM sidecar never controls low-level actions. It can propose only structured macro artifacts:
 
-The LLM chat processor exists, but it is not the core architecture. The core architecture is the BDI agent.
+- `MissionSpec`
+- `CoordinationPlan`
+- `TeamProtocol` messages
 
-## Task Setting
+Those artifacts are validated before they affect beliefs, missions, coordination state, or execution.
 
-Changes in this repo should usually be incremental and local. The goal is to preserve the existing control loop while improving the agent’s reasoning, planning, sensing, and execution.
+## BDI Loop
 
-What matters most:
+The operative loop is in `src/control/agent-loop.js`.
 
-- keep beliefs, planning, search, and execution separated,
-- preserve the closed-loop BDI structure,
-- make planner behavior explainable from the code,
-- keep Deliveroo event handling defensive and normalized,
-- keep the code modular enough for later agent-focused edits.
+Runtime flow:
 
-What to avoid unless explicitly requested:
+1. `sdk-adapter` receives SDK events.
+2. `BeliefState` updates partial world memory.
+3. TeamProtocol messages are routed to `MessageRouter` and `CoordinationController`.
+4. The loop builds `PlannerState` from beliefs.
+5. The planner/search/pathfinding stack chooses a route-level plan.
+6. `executable-plan` turns the route into `move`, `pick_up`, and `put_down`.
+7. `ReactiveLayer` may take immediate guarded actions.
+8. `Executor` calls the SDK and reports success, busy, or failure.
+9. The loop replans when events, stale plans, traffic, failed actions, missions, or constraints require it.
 
-- collapsing everything into one script,
-- mixing planner/search logic with transport and SDK glue,
-- treating the LLM flow as the main system,
-- adding debug-only metadata that does not help the actual agent.
+Important rule: the loop stays BDI. Do not add an LLM branch that emits direct movement actions.
 
-## Repository Shape
+## Mission Registry
 
-The relevant repo structure is:
+`src/missions/mission-registry.js` is the stateful owner of active missions.
 
-- `src/index.js`: runtime entrypoint and lifecycle wiring,
-- `src/config.js`: environment configuration,
-- `src/state/`: belief model, planner-state conversion, SDK event adapter,
-- `src/control/`: main loop and chat processor,
-- `src/planner/`: planner, search, pathfinding, scoring, scout logic,
-- `src/executor/`: execution of movement, pickup, putdown, and chat send actions,
-- `src/telemetry/`: runtime metrics and action tracking,
-- `src/utils/`: geometry and logging helpers,
-- `Deliveroo.js/`: environment, backend, frontend, SDK, and game docs.
+Use it for:
 
-## Runtime Flow
+- adding validated `MissionSpec` objects,
+- marking missions accepted, rejected, completed, failed, expired, or cancelled,
+- querying active level 1/2/3 missions,
+- exposing active delivery rules through `activeDeliveryRules`.
 
-```mermaid
-flowchart LR
-  A[Deliveroo.js SDK events] --> B[SDK adapter]
-  B --> C[BeliefState]
-  C --> D[AgentLoop tick]
-  D --> E[Chat processor]
-  E --> F[LLM reply path]
-  D --> G[PlannerState]
-  G --> H[Route planner]
-  H --> I[Search and scout logic]
-  I --> J[Executable plan]
-  J --> K[Executor]
-  K --> L[Deliveroo actions]
-```
+Do not duplicate active mission lists in agents, planner files, or the LLM sidecar. Agents may keep small sent-plan maps for bookkeeping, but mission semantics should live in the registry.
 
-The chat path and the planning path use the same beliefs, but they are intentionally decoupled.
+## MissionSpec
 
-The ordering is important:
+`src/missions/mission-spec.js` defines mission types, levels, normalization, and validation.
 
-- incoming chat is queued in beliefs,
-- the loop consumes chat first,
-- then the agent continues with planning/execution,
-- the executor is the only module that sends actions back to Deliveroo.
+Current level groups:
 
-## Main Runtime Entry Points
+- Level 1: direct/simple tasks such as `GOTO_TILE`, `PICKUP_AT_TILE`, `DELIVER_AT_TILE`.
+- Level 2: constraints and reward modifiers such as `FORBIDDEN_TILE`, `STACK_EXACTLY_N`, tile/count multipliers, parcel filters.
+- Level 3: coordination macro types such as `RENDEZVOUS`, `BOTH_NEAR_POSITION`, `COORDINATED_WAIT`, `RED_LIGHT_GREEN_LIGHT`, `HANDOFF`.
 
-### `src/index.js`
+Level 3 specs must set `requiresCoordination: true`.
 
-This is the startup file.
+## Delivery Rules And Reward Model
 
-Responsibilities:
+`src/missions/delivery-rules.js` converts active missions into planner-facing rules.
 
-- load `.env` via `dotenv/config`,
-- create the Deliveroo socket with `DjsConnect(...)`,
-- create `BeliefState` and `AgentLoop`,
-- register SDK listeners,
-- start the loop on connect,
-- stop the loop and disconnect on shutdown.
+`src/missions/reward-model.js` is the single source for delivery legality and value:
 
-### `src/config.js`
+- hard stack mismatch forbids delivery,
+- soft stack mismatch allows delivery without the exact-stack bonus,
+- satisfied stack count can apply a multiplier,
+- legacy delivery count multipliers still compose,
+- incompatible hard exact-stack rules resolve by highest priority, then latest rule.
 
-This maps environment variables into a structured config object.
+Do not reimplement delivery legality inside planner/search. Call `evaluateDelivery`.
 
-Key fields:
+## Delivery Policy
 
-- `HOST`, `TOKEN`, `AGENT_NAME`, `LOG_LEVEL`, `ACTION_DELAY_MS`,
-- `ADMIN_ID` for chat filtering,
-- `planner.*` for tuning the search/planning/scout behavior.
+`src/strategy/delivery-policy.js` separates:
 
-### `src/state/sdk-adapter.js`
+- `deliveryForbidden`: hard rule says delivery is not legal,
+- `deliveryDeferred`: delivery is legal but not preferred yet.
 
-This is the boundary between Deliveroo SDK events and internal beliefs.
+Planner/search must block only forbidden delivery. Deferred delivery can be penalized but must remain available as a fallback when no valid pickup/harvest path exists.
 
-Responsibilities:
+## Reactive Layer
 
-- normalize `you`, `tile`, and chat payload shapes,
-- update beliefs for map, parcels, agents, and sensing,
-- queue chat messages into beliefs,
-- optionally filter chat to only the configured admin id,
-- never plan or execute actions.
+`src/strategy/reactive-layer.js` is for guarded immediate actions only.
 
-### `src/state/belief-state.js`
+It validates before acting:
 
-This is the agent’s internal world model.
+- `pick_up`: parcel is still visible, on the same tile, not carried, and allowed by mission filters.
+- `put_down`: agent is on a red tile, carries parcels, and `evaluateDelivery` allows delivery.
+- `move`: path rules, forbidden tiles, temporary blocks, and occupied next cells.
 
-It stores:
+If the current plan action is stale or invalid, invalidate the plan and let normal planning/traffic policy decide. Do not add random fallback moves here.
 
-- self state,
-- map dimensions and tiles,
-- observed parcels and carried parcels,
-- nearby agents,
-- temporary blocked cells and edges,
-- visited positions and edges,
-- scout target history,
-- replanning events,
-- recent chat messages.
+## Coordination Controller
 
-This state is partial by design. It represents what the agent knows, not the full world.
+`src/coordination/coordination-controller.js` owns Level 3 execution state.
 
-### `src/control/agent-loop.js`
+It handles:
 
-This is the control layer.
+- `POSITION_HEARTBEAT`: updates lightweight TeamState.
+- `COORDINATION_PLAN`: accepts plans assigned to local aliases.
+- `SUBGOAL_ASSIGNMENT`: creates local subgoals or constraints.
+- `RENDEZVOUS` and `BOTH_NEAR_POSITION`: goto target plus ready/status messages.
+- `COORDINATED_WAIT`: wait state and ready/status after the configured tick.
+- `RED_LIGHT_GREEN_LIGHT`: movement blocking/resume constraint.
+- `HANDOFF`: explicit unsupported failure.
 
-Responsibilities:
+State machine:
 
-- run the periodic tick,
-- advance belief time and process events,
-- process pending chat before planning continues,
-- decide when replanning is required,
-- build planner state,
-- create route plans and executable plans,
-- execute actions one by one,
-- track failures, blocked moves, and telemetry.
+- `RECEIVED`
+- `ACCEPTED`
+- `EXECUTING`
+- `WAITING_TEAMMATE`
+- `READY`
+- `COMPLETED`
+- `FAILED`
+- `ABORTED`
 
-### `src/executor/executor.js`
+Plans must have a ttl. Expired plans and stale teammates fail explicitly.
 
-This turns abstract actions into SDK calls.
+## TeamProtocol And Router
 
-Responsibilities:
+`src/communication/team-protocol.js` validates structured messages.
 
-- `move(...)`, `pickUp(...)`, `putDown(...)`,
-- `writeMessage(...)` for chat replies,
-- push failure/success events back into beliefs,
-- record telemetry,
-- mark temporary blocks when movement fails.
+Critical validated types include:
 
-### `src/control/chat-processor.js`
+- `MISSION_SPEC`
+- `COORDINATION_PLAN`
+- `SUBGOAL_ASSIGNMENT`
+- `POSITION_HEARTBEAT`
+- `STATUS_UPDATE`
+- `RENDEZVOUS_READY`
+- `MISSION_COMPLETED`
+- `MISSION_FAILED`
 
-This is a small side module for the LLM-backed chat flow.
+`src/communication/message-router.js` owns alias matching, deduplication, expiry filtering, and team inboxes. Use `buildAgentAliases` and `consumeTeamMessagesForAliases`; do not add manual alias loops in agent classes.
 
-It is intentionally separate so the main loop stays readable.
+TeamProtocol messages must remain compact. Do not send full maps, full beliefs, or full history.
 
-## BDI Architecture
+## LLM Sidecar Boundaries
 
-The BDI side is a standard closed loop:
+LLM-related code belongs in:
 
-1. observe via SDK events,
-2. update beliefs,
-3. build planner input,
-4. replan if necessary,
-5. execute the next action,
-6. repeat.
+- `src/agents/llm-coordination-agent.js`: sidecar lifecycle and publication of validated structured output.
+- `src/llm/mission-prompt.js`: compact prompt/context construction.
+- `src/missions/mission-parser.js`: JSON parsing, validation, retry handling, alias normalization.
+- `src/llm/llm-client.js` / `src/chat/llm-client.js`: client wrapper.
 
-### Belief Model
+Do not put LLM logic in:
 
-The belief layer is the agent’s memory.
+- planner/pathfinding,
+- `AgentLoop` decision branches,
+- `Executor`,
+- `ReactiveLayer`,
+- `RewardModel`,
+- `sdk-adapter` beyond keeping protocol messages out of natural chat.
 
-Important concepts:
+The LLM context should stay compact:
 
-- `me`: current self state,
-- `tiles`, `width`, `height`: map geometry,
-- `parcels`: parcels currently believed to exist,
-- `carriedParcels`: parcels already picked up,
-- `agents`: observed other agents,
-- `temporaryBlockedCells` and `temporaryBlockedEdges`: recent failures and short-lived obstacles,
-- `visitedPositions`, `visitedEdges`: exploration history,
-- `events`: replanning triggers,
-- `chatInbox`: queued messages for the chat path.
+- own id/name/role,
+- teammate summary,
+- own and teammate positions,
+- carried counts,
+- active mission summary,
+- red/green summary,
+- active constraints,
+- supported mission/team message types.
 
-It also stores sticky manual overlays and tasks:
+## Where Not To Add New Modes
 
-- `manualTasks`: queued explicit goto tasks from chat tools,
-- `forbiddenTiles`: manually forbidden walkability overrides,
-- `pickupTileMultipliers`: pickup-value multipliers by tile,
-- `deliveryTileMultipliers`: delivery-value multipliers by tile,
-- `deliveryCountMultipliers`: delivery-value multipliers by delivered package count.
+Avoid adding new planner or loop modes for each mission phrase.
 
-These overlays are planner-facing constraints/preferences. They are intentionally separate from base map observation updates.
+Prefer these extension points:
 
-Beliefs are deliberately mutable and event-driven. The planner reads them, but does not own them.
+- New delivery constraint: `MissionSpec` -> `DeliveryRules` -> `RewardModel`.
+- New team macro: `MissionSpec`/`CoordinationPlan` -> `CoordinationController`.
+- New immediate safety check: `ReactiveLayer`.
+- New message type: `TeamProtocol` validation -> `MessageRouter`/agent handler.
+- New LLM output shape: `mission-prompt` and `mission-parser`, then existing BDI path.
 
-### Planner-State Conversion
+Do not create a separate low-level LLM executor, custom WebSocket protocol, or parallel planner.
 
-`src/state/planner-state.js` converts beliefs into a normalized planning view.
+## Compatibility Surfaces
 
-It prepares data for the planner such as:
+Kept for compatibility/debug:
 
-- current position,
-- visible parcels,
-- delivery tiles,
-- enemy agents,
-- carried packages,
-- visited/blocked information,
-- map profile and planner params.
+- `src/llm-chat-agent.js`: legacy `chat:llm` entrypoint, delegates to `CoordinationBDIAgent`.
+- `src/control/chat-processor.js`: optional natural-language/manual-tool processor, disabled in both normal two-agent runtimes.
+- `src/missions/mission-tools.js`: helper tools used by `chat-processor`.
+- Direct belief overlays for forbidden tiles and multipliers: retained for manual/debug compatibility, merged into planner-state.
 
-This module is the bridge between raw belief memory and search-ready planner input.
+Current mission-driven behavior should prefer `MissionRegistry`, `DeliveryRules`, and `RewardModel`.
 
-## Planning and Search
+## Real TODOs
 
-The planning stack is the heart of the repo.
+- Physical `HANDOFF` needs an environment-supported transfer primitive before it can become more than explicit unsupported/fallback.
+- PDDL is not wired. `requiresPddl` is metadata only unless a real adapter and tests are added.
+- `PICKUP_AT_TILE` and `DELIVER_AT_TILE` are representable MissionSpec types; direct bespoke handlers should be added only if normal planner/executor behavior is insufficient.
+- Runtime validation still needs live Deliveroo matches with two real tokens, not just unit tests.
 
-### `src/planner/route-planner.js`
+## Verification
 
-This module selects the next high-level route plan.
-
-Its job is not to emit actions directly. It chooses a route-level intention, then lets the executable-plan layer turn that into SDK actions.
-
-Main responsibilities:
-
-- parse and profile the map,
-- choose planner parameters from the map shape,
-- score green parcel candidates,
-- build candidate route plans,
-- choose between pickup, delivery, scout, local explore, and idle behavior,
-- fall back safely when a plan is invalid or empty.
-
-### Plan Families
-
-The agent can produce several route modes:
-
-- `PICKUP_DELIVERY_UNIFIED`: unified pickup+delivery search plan,
-- `SCOUT_UNIFIED`: information-gain scouting plan,
-- `LOCAL_EXPLORE`: simple local fallback movement,
-- `IDLE`: no useful action found.
-
-### Candidate Green Selection
-
-The planner uses `src/planner/scoring/green-scorer.js` to rank parcel opportunities.
-
-The scoring logic balances:
-
-- current parcel value,
-- future value after decay,
-- confidence,
-- distance from the agent,
-- distance to the nearest delivery tile,
-- whether enemies are likely to beat the agent to the parcel.
-
-Important functions include:
-
-- `currentGreenValue(...)`,
-- `packageValueAtPickup(...)`,
-- `computeGreenScore(...)`,
-- `computeGreenScores(...)`,
-- `selectCandidateGreens(...)`.
-
-Candidate selection is intentionally filtered. Low-confidence, unreachable, or unprofitable parcels are excluded.
-
-### Search Over Pickup/Delivery Sequences
-
-`src/planner/search/plan-search.js` performs the beam search over route-level sequences.
-
-It starts from `START` and extends partial plans with:
-
-- green parcel points,
-- red delivery points.
-
-Core search concepts:
-
-- `initialPlan(...)`: starting state,
-- `extendToGreen(...)`: append a pickup target,
-- `extendToRed(...)`: append a delivery target,
-- `planValue(...)`: objective for partial plans,
-- `finalObjective(...)`: objective for completed plans,
-- `findBestSequenceUnderBudget(...)`: beam search over sequence candidates with budget control.
-
-The search is not a full-state solver. It is a guided sequence search over a reduced set of points of interest.
-
-Delivery scoring (`computeDeliveredValue(...)`) applies:
-
-- delivery tile multipliers,
-- delivery count multipliers (exact count rules like `1 -> 0x`, `3 -> 3x`),
-- multiplicative composition between both.
-
-### Distance Oracle and Path Reconstruction
-
-`src/planner/path/distance-oracle.js` builds pairwise paths between important points.
-
-It caches the cost and path for every important pair such as:
-
-- `START -> selected green`,
-- `green -> red`,
-- `START -> red` when needed.
-
-This avoids repeating expensive path searches during the higher-level search.
-
-`reconstructGridPath(...)` then turns the selected point sequence back into a full grid path.
-
-### Pathfinding
-
-`src/planner/path/pathfinder.js` and `src/planner/path/grid-utils.js` provide the low-level grid logic.
-
-They handle:
-
-- tile normalization,
-- walkability and direction constraints,
-- grid bounds,
-- BFS/A* path search,
-- directed movement rules,
-- grid profile detection.
-
-The planner chooses the cheapest suitable path method based on map structure:
-
-- uniform-cost open maps can use BFS-style logic,
-- constrained maps use A* or directed shortest paths,
-- directed tiles and temporary blocks are respected.
-
-### Scout Planning
-
-`src/planner/scout/scout-planner.js` chooses exploration actions when parcel delivery is not the right move.
-
-Scout logic is based on information gain and map coverage rather than parcel reward.
-
-It can build different styles of scouting behavior:
-
-- cluster-based scouting,
-- dense-green scouting,
-- green-exposure scouting,
-- local exploration fallback.
-
-The scout planner evaluates things like:
-
-- how much new area becomes visible,
-- whether the target is near stale green information,
-- whether the waypoint is near delivery tiles,
-- whether the target is too risky or too recently visited.
-
-### Executable Plan Construction
-
-`src/planner/executable-plan.js` translates route plans into concrete step-by-step actions.
-
-The conversion usually produces:
-
-- `move` actions along a path,
-- `pick_up` when arriving at a parcel target,
-- `put_down` when arriving at a delivery tile.
-
-This module is deliberately narrow: it does not decide the route, only how to realize it as actions.
-
-## Planning Inputs and Parameters
-
-### `src/planner/default-params.js`
-
-This exposes the default planner tuning values by freezing the planner config from `CONFIG.planner`.
-
-### `src/config.js`
-
-This file is the single source for runtime/environment config, including planner tuning knobs. The exact values matter less than the fact that the planner is parameterized rather than hard-coded.
-
-### Major Tuning Areas
-
-The planner parameters cover:
-
-- parcel value and decay,
-- search beam width and max sequence depth,
-- scouting and exploration weights,
-- enemy safety margins,
-- blocked tile behavior,
-- map density thresholds,
-- replanning intervals and budgets.
-
-These parameters are important because most behavior changes should happen here before changing the planner structure.
-
-## Execution and Replanning
-
-### Execution Flow
-
-Once a route plan becomes executable:
-
-1. the executor runs the next action,
-2. success advances the action index,
-3. failure marks the plan invalid or temporarily blocked,
-4. the loop updates beliefs and telemetry,
-5. the next tick decides whether to continue or replan.
-
-### Replanning Triggers
-
-The loop replans when:
-
-- there is no current plan,
-- the current plan has finished,
-- a move fails,
-- pickup or putdown fails,
-- parcels appear or disappear,
-- the map changes enough to invalidate the current path,
-- enemies or temporary blocks matter to the current route,
-- periodic replanning thresholds are reached.
-
-The agent is therefore reactive, not static.
-
-## Chat as a Minor Extension
-
-The current codebase also contains a chat path.
-
-That path:
-
-- receives `msg` events from Deliveroo,
-- normalizes and stores them in beliefs,
-- optionally filters to the admin id,
-- lets the loop process pending chat before planning,
-- sends replies through the executor.
-
-This exists for the LLM integration work, but it should remain a side concern in the documentation and code structure.
-
-### Current Chat Tooling Surface
-
-Actionable chat instructions are expected to map to tools, not raw JSON replies. Current tool families include:
-
-- arithmetic helper: `calculate_expressions` (used before actionable calls when numeric args need computation),
-- explicit manual movement: `set_explicit_plan` (single target or sequence via `targets`),
-- sticky map constraints: `set_forbidden_tile`,
-- sticky pickup-value rules: `set_pickup_tile_multiplier`,
-- sticky delivery-tile rules: `set_delivery_tile_multiplier`,
-- sticky delivery-count rules: `set_delivery_count_multiplier`,
-
-The chat processor executes tool calls in a bounded multi-step loop (`CHAT_MAX_LLM_ITERATIONS`, `CHAT_MAX_TOOL_CALLS`) and logs optional diagnostics (`CHAT_DIAGNOSTICS_*` env vars).
-
-These commands update belief overlays/events and trigger replanning through normal loop invalidation.
-
-## Deliveroo.js Environment Context
-
-The agent runs inside Deliveroo.js, a grid-based educational parcel game.
-
-### Game Model
-
-Deliveroo.js is a multiplayer grid world where agents:
-
-- move on cells,
-- pick up parcels,
-- deliver parcels to red tiles,
-- receive partial observations,
-- can be blocked by walls, directional tiles, or other agents.
-
-### Tile Semantics
-
-The code uses the standard Deliveroo tile codes:
-
-- `0`: wall or blocked,
-- `1`: green parcel-spawning tile,
-- `2`: red delivery tile,
-- `3`: walkable tile.
-
-The planner also supports directional / constrained tiles that affect entry and exit movement.
-
-### SDK-Level Interaction
-
-The agent uses the Deliveroo.js SDK client.
-
-Key capabilities include:
-
-- connection and disconnect lifecycle,
-- `you` / self updates,
-- `map` and `tile` updates,
-- `agentsSensing` and `parcelsSensing`,
-- broader `sensing` updates,
-- movement actions,
-- pickup and putdown actions,
-- chat / message events.
-
-The source code indicates the environment supports message-style interaction and actions such as say, shout, and ask/emit-style messaging depending on the SDK/client layer.
-
-### Environment Docs in `Deliveroo.js/`
-
-The external environment folder contains useful documentation and configuration references:
-
-- `Deliveroo.js/README.md`: game overview, controls, and local run notes,
-- `Deliveroo.js/backend/API.md`: configuration API and socket events,
-- `Deliveroo.js/backend/CONFIGURATION.md`: game configuration and level loading,
-- `Deliveroo.js/backend/src/ioServer.js`: socket wiring, admin handling, and server-side event routing.
-
-This matters because many agent behaviors depend on what the backend emits and what the SDK accepts.
-
-## Important Files to Start From
-
-If you need to change behavior, start in this order:
-
-1. `src/index.js` for startup and lifecycle,
-2. `src/state/sdk-adapter.js` for incoming events,
-3. `src/state/belief-state.js` for memory and event bookkeeping,
-4. `src/state/planner-state.js` for planner input shape,
-5. `src/planner/route-planner.js` for route selection,
-6. `src/planner/search/plan-search.js` for pickup/delivery search,
-7. `src/planner/scout/scout-planner.js` for exploration decisions,
-8. `src/planner/path/` for path cost and reachability,
-9. `src/planner/executable-plan.js` for action conversion,
-10. `src/executor/executor.js` for environment actions.
-
-## Current Behavior Summary
-
-The current system is best understood as a BDI agent with a partial world model and a modular planning stack.
-
-The loop is:
-
-1. receive environment events,
-2. update beliefs,
-3. build planner state,
-4. score candidate parcels and scout opportunities,
-5. search over pickup/delivery sequences,
-6. reconstruct the grid path,
-7. convert the route into executable actions,
-8. execute them,
-9. replan when the world changes.
-
-That is the main architecture. The LLM chat layer is a small adjacent feature, not the center of the repo.
-
-Recent additions relevant to planner behavior:
-
-- sticky forbidden-tile overlay is enforced by planner/path walkability checks,
-- explicit goto tasks are queued and consumed through `manualTasks`,
-- reward shaping supports pickup tile, delivery tile, and delivery count multipliers.
-
-## Verification Notes
-
-Typical quick checks:
+Required local checks:
 
 ```bash
 npm test
-npm start
 ```
 
-`npm test` is mostly a smoke check here. Real validation still depends on a running Deliveroo environment and whatever runtime credentials are needed for the agent.
+```powershell
+$files = @(Get-ChildItem -Recurse -File src,test -Filter *.js | ForEach-Object { $_.FullName })
+foreach ($file in $files) { node --check $file; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE } }
+```
+
+Startup smoke:
+
+```bash
+npm run start:bdi
+npm run start:llm
+```
+
+The startup scripts connect to the configured Deliveroo host. Without a server/valid token, connection errors after import/startup are expected.

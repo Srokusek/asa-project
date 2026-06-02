@@ -1,6 +1,7 @@
 import { DjsConnect } from "@unitn-asa/deliveroo-js-sdk/client";
 import { TEAM_MESSAGE_TYPES, createTeamMessage, serializeTeamMessage } from "../communication/team-protocol.js";
-import { createMessageRouter } from "../communication/message-router.js";
+import { createPositionHeartbeatMessage, heartbeatDue } from "../communication/team-heartbeat.js";
+import { buildAgentAliases, createMessageRouter } from "../communication/message-router.js";
 import { CoordinationController } from "../coordination/coordination-controller.js";
 import { AgentLoop } from "../control/agent-loop.js";
 import { createMissionSpec, validateMissionSpec, MISSION_TYPES } from "../missions/mission-spec.js";
@@ -14,18 +15,21 @@ function targetFrom(spec) {
 
 export class StandardBDIAgent {
   constructor(config, { socket = null, connect = DjsConnect, logger = null } = {}) {
+    const { llm: _llm, ...runtimeConfig } = config;
     this.config = {
-      ...config,
+      ...runtimeConfig,
       agentRole: "bdi",
-      agentName: process.env.BDI_AGENT_NAME ?? config.agentName ?? "StandardBDIAgent"
+      agentName: runtimeConfig.agentName ?? "StandardBDIAgent"
     };
     this.logger = logger ?? createLogger(this.config.logLevel);
     this.socket = socket ?? connect(this.config.host, this.config.token, this.config.agentName);
     this.beliefs = new BeliefState(this.config);
     this.messageRouter = createMessageRouter({ role: "bdi" });
     this.teamMessageCursor = 0;
+    this.lastHeartbeatTick = -Infinity;
     this.coordinationController = new CoordinationController({
       agentId: this.config.agentName,
+      aliases: this.agentAliases(),
       beliefs: this.beliefs,
       missionRegistry: this.beliefs.missionRegistry,
       sendTeamMessage: (message) => {
@@ -104,7 +108,7 @@ export class StandardBDIAgent {
       this.rejectMission(spec, from, spec.validationError ?? validation.reason);
       return { accepted: false, reason: spec.validationError ?? validation.reason };
     }
-    if (spec.assignedTo && !this.agentAliases().includes(String(spec.assignedTo))) {
+    if (spec.assignedTo && !this.agentAliases().includes(String(spec.assignedTo).trim().toLowerCase())) {
       this.rejectMission(spec, from, "mission_assigned_to_other_agent");
       return { accepted: false, reason: "mission_assigned_to_other_agent" };
     }
@@ -118,8 +122,17 @@ export class StandardBDIAgent {
   }
 
   handleTeamMessage(message) {
-    if (this.agentAliases().includes(String(message.from ?? ""))) {
+    this.coordinationController.setAliases(this.agentAliases());
+    if (this.agentAliases().includes(String(message.from ?? "").trim().toLowerCase())) {
       return { accepted: false, reason: "self_message" };
+    }
+    if (message.type === TEAM_MESSAGE_TYPES.POSITION_HEARTBEAT) {
+      const teammate = this.beliefs.updateTeamHeartbeat(message.payload, {
+        receivedAtTick: this.beliefs.time,
+        ttl: message.ttl,
+        messageTick: message.tick
+      });
+      return { accepted: Boolean(teammate), type: message.type, teammate };
     }
     if (message.type === TEAM_MESSAGE_TYPES.MISSION_SPEC) {
       return this.handleMissionSpec(message.payload?.missionSpec ?? message.payload, message.from);
@@ -135,31 +148,34 @@ export class StandardBDIAgent {
   }
 
   agentAliases() {
-    return [...new Set([this.beliefs.me?.id, this.config.agentName].filter(Boolean).map(String))];
+    return buildAgentAliases({ me: this.beliefs.me, config: this.config, role: "bdi" });
+  }
+
+  sendHeartbeatIfDue() {
+    if (!this.beliefs.me || !heartbeatDue(this.lastHeartbeatTick, this.beliefs.time, this.config)) return false;
+    const message = createPositionHeartbeatMessage({ beliefs: this.beliefs, config: this.config });
+    if (!message) return false;
+    this.lastHeartbeatTick = this.beliefs.time;
+    void this.sendTeamMessage(message);
+    return true;
   }
 
   processTeamInbox() {
-    this.messageRouter.setSelfId(this.beliefs.me?.id ?? this.config.agentName);
+    const aliases = this.agentAliases();
+    this.coordinationController.setAliases(aliases);
+    this.messageRouter.setAliases(aliases);
     const teamMessages = this.beliefs.teamMessages ?? [];
     for (const message of teamMessages.slice(this.teamMessageCursor)) {
       this.messageRouter.routeTeamMessage(message, this.beliefs.time);
     }
     this.teamMessageCursor = teamMessages.length;
 
-    const messages = [];
-    const seen = new Set();
-    for (const alias of this.agentAliases()) {
-      for (const message of this.messageRouter.consumeTeamMessagesFor(alias, this.beliefs.time)) {
-        if (seen.has(message.id)) continue;
-        if (this.agentAliases().includes(String(message.from ?? ""))) continue;
-        seen.add(message.id);
-        messages.push(message);
-      }
-    }
+    const messages = this.messageRouter.consumeTeamMessagesForAliases(aliases, this.beliefs.time);
 
     for (const message of messages) {
       this.handleTeamMessage(message);
     }
+    this.sendHeartbeatIfDue();
   }
 
   start() {

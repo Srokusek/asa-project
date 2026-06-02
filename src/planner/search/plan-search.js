@@ -139,12 +139,11 @@ export function extendToRed(plan, red, _state, oracle, _config) {
   if (plan.pickedPackages.length === 0) return null;
 
   const deliveryDecision = _state?.deliveryDecision;
-  const isImmediateDelivery =
-    deliveryDecision?.shouldDeliver === false &&
+  const isInitialDirectDelivery =
     Array.isArray(plan.sequence) &&
     plan.sequence.length === 1 &&
     plan.pickedGreenIds?.size === 0;
-  if (isImmediateDelivery) return null;
+  if (isInitialDirectDelivery && deliveryDecision?.deliveryForbidden === true) return null;
 
   const edge = getOracleEdge(oracle, plan.currentId, red.id);
   if (!edge || !Number.isFinite(edge.cost)) return null;
@@ -164,6 +163,17 @@ export function extendToRed(plan, red, _state, oracle, _config) {
     pickedPackages: [],
     deliveredScore: plan.deliveredScore + delivered
   };
+}
+
+function isDeferredInitialDelivery(plan, state) {
+  return (
+    state?.deliveryDecision?.deliveryDeferred === true &&
+    state?.deliveryDecision?.deliveryForbidden !== true &&
+    Array.isArray(plan.sequence) &&
+    plan.sequence.length === 1 &&
+    plan.pickedGreenIds?.size === 0 &&
+    plan.pickedPackages.length > 0
+  );
 }
 
 export function carriedPotential(plan, _state, oracle, config = null) {
@@ -430,7 +440,9 @@ export function findBestSequenceUnderBudget(state, points, oracle, _greenScores,
     redMandatoryTotal: 0,
     redTopKTotal: 0,
     redShortlistTotal: 0,
-    maxRedShortlistSize: 0
+    maxRedShortlistSize: 0,
+    deferredDeliverySkips: 0,
+    deliveryFallbackAllowed: false
   };
 
   while (beam.length > 0) {
@@ -455,16 +467,29 @@ export function findBestSequenceUnderBudget(state, points, oracle, _greenScores,
       stats.maxRedShortlistSize = Math.max(stats.maxRedShortlistSize, redSelection.shortlistCount);
       stats.redExpansionCandidates += redSelection.reds.length;
 
-      for (const red of redSelection.reds) {
-        const deliveredPlan = extendToRed(plan, red, state, oracle, config);
-        if (deliveredPlan) {
-          bestComplete = betterPlan(bestComplete, deliveredPlan, state, oracle, config);
-        }
-      }
-
+      const greenExtensions = [];
       for (const green of greens) {
         const nextPlan = extendToGreen(plan, green, state, oracle, config);
         if (!nextPlan) continue;
+        greenExtensions.push(nextPlan);
+      }
+
+      const delayDeferredDelivery = isDeferredInitialDelivery(plan, state) && greenExtensions.length > 0;
+      if (delayDeferredDelivery) {
+        stats.deferredDeliverySkips += redSelection.reds.length;
+      } else {
+        if (isDeferredInitialDelivery(plan, state) && greenExtensions.length === 0) {
+          stats.deliveryFallbackAllowed = true;
+        }
+        for (const red of redSelection.reds) {
+          const deliveredPlan = extendToRed(plan, red, state, oracle, config);
+          if (deliveredPlan) {
+            bestComplete = betterPlan(bestComplete, deliveredPlan, state, oracle, config);
+          }
+        }
+      }
+
+      for (const nextPlan of greenExtensions) {
         nextBeam.push(nextPlan);
 
         const partialSelection = selectRedCandidatesForPlan(nextPlan, reds, oracle, state, config);

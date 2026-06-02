@@ -9,6 +9,12 @@ function booleanFromEnv(name, fallback = false) {
   return ["1", "true", "yes", "on"].includes(String(value).toLowerCase());
 }
 
+function stringFromEnv(name, fallback = null) {
+  const value = process.env[name];
+  if (value === undefined || String(value).trim() === "") return fallback;
+  return String(value);
+}
+
 function normalizeHost(host) {
   const raw = String(host || "deliveroojs.azurewebsites.net").trim();
   if (/^https?:\/\//i.test(raw)) return raw;
@@ -32,6 +38,15 @@ export const CONFIG = {
   telemetry: {
     enabled: booleanFromEnv("TELEMETRY_ENABLED", false),
     file: process.env.TELEMETRY_FILE ?? "telemetry.jsonl"
+  },
+  team: {
+    standardAgentName: stringFromEnv("BDI_AGENT_NAME", process.env.AGENT_NAME ?? "StandardBDIAgent"),
+    coordinationAgentName: stringFromEnv("LLM_AGENT_NAME", "CoordinationBDIAgent"),
+    heartbeatTicks: numberFromEnv("TEAM_HEARTBEAT_TICKS", 5),
+    heartbeatTtlTicks: numberFromEnv("TEAM_HEARTBEAT_TTL_TICKS", 15)
+  },
+  missions: {
+    enabled: true
   },
   planner: {
     meanPackageValue: 10,
@@ -98,6 +113,85 @@ export const CONFIG = {
     topK: 16,
   }
 };
+
+function normalizeRole(role) {
+  const normalized = String(role ?? "bdi").trim().toLowerCase();
+  if (["llm", "coordination", "coordinator"].includes(normalized)) return "llm";
+  return "bdi";
+}
+
+function effectiveRoleToken(baseConfig, role) {
+  const fallbackToken = stringFromEnv("TOKEN", baseConfig.token ?? "");
+  if (role === "llm") {
+    return stringFromEnv("LLM_TOKEN", baseConfig.llmAgentToken ?? fallbackToken);
+  }
+  return stringFromEnv("BDI_TOKEN", baseConfig.bdiToken ?? fallbackToken);
+}
+
+function effectiveRoleName(baseConfig, role) {
+  if (role === "llm") {
+    return stringFromEnv(
+      "LLM_AGENT_NAME",
+      baseConfig.team?.coordinationAgentName ?? `${baseConfig.agentName ?? "CoordinationBDIAgent"}-LLM`
+    );
+  }
+  return stringFromEnv(
+    "BDI_AGENT_NAME",
+    baseConfig.team?.standardAgentName ?? baseConfig.agentName ?? "StandardBDIAgent"
+  );
+}
+
+function llmConfigFromEnv(baseConfig) {
+  return {
+    ...(baseConfig.llm ?? {}),
+    baseURL: stringFromEnv("LITELLM_BASE_URL", baseConfig.llm?.baseURL ?? "https://llm.bears.disi.unitn.it/v1"),
+    apiKey: stringFromEnv("LITELLM_API_KEY", baseConfig.llm?.apiKey ?? ""),
+    model: stringFromEnv("LOCAL_MODEL", baseConfig.llm?.model ?? "llama-3.3-70b-lmstudio")
+  };
+}
+
+export function buildRoleConfig(baseConfig = CONFIG, role = process.env.AGENT_ROLE) {
+  const agentRole = normalizeRole(role);
+  const bdiToken = effectiveRoleToken(baseConfig, "bdi");
+  const llmToken = effectiveRoleToken(baseConfig, "llm");
+  const standardAgentName = effectiveRoleName(baseConfig, "bdi");
+  const coordinationAgentName = effectiveRoleName(baseConfig, "llm");
+  const token = agentRole === "llm" ? llmToken : bdiToken;
+  const agentName = agentRole === "llm" ? coordinationAgentName : standardAgentName;
+
+  if (bdiToken && llmToken && bdiToken === llmToken) {
+    console.warn(
+      "[config] StandardBDIAgent and CoordinationBDIAgent resolve to the same Deliveroo token. " +
+      "Set distinct BDI_TOKEN and LLM_TOKEN for two separate agents."
+    );
+  }
+
+  const { llm: _llm, ...configWithoutLlm } = baseConfig;
+  const roleConfig = {
+    ...configWithoutLlm,
+    token,
+    agentName,
+    agentRole,
+    team: {
+      ...(baseConfig.team ?? {}),
+      standardAgentName,
+      coordinationAgentName,
+      selfRole: agentRole,
+      selfName: agentName,
+      peerName: agentRole === "llm" ? standardAgentName : coordinationAgentName
+    },
+    missions: {
+      ...(baseConfig.missions ?? {}),
+      enabled: baseConfig.missions?.enabled ?? true
+    }
+  };
+
+  if (agentRole === "llm") {
+    roleConfig.llm = llmConfigFromEnv(baseConfig);
+  }
+
+  return roleConfig;
+}
 
 export function choosePlannerConfig(profile = {}, planner = CONFIG.planner) {
   const mode = "CONFIG_STATIC";

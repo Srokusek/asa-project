@@ -1,3 +1,7 @@
+export function isExecutorBusyResult(result) {
+  return Boolean(result && typeof result === "object" && result.executorBusy === true);
+}
+
 export class Executor {
   constructor(socket, beliefs, config, telemetry = null) {
     this.socket = socket;
@@ -8,7 +12,13 @@ export class Executor {
   }
 
   async execute(action) {
-    if (!action || this.busy) return false;
+    if (!action) return false;
+    if (this.busy) {
+      const result = { ok: false, executorBusy: true, reason: "executor_busy" };
+      this.beliefs.pushEvent("EXECUTOR_BUSY", { action });
+      this.telemetry?.record("executor_busy", { action, result: false, reason: "executor_busy" });
+      return result;
+    }
     this.busy = true;
     try {
       if (action.type === "move") return await this.move(action);

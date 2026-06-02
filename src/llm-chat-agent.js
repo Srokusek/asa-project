@@ -1,22 +1,23 @@
 import "dotenv/config";
-import { createLlmCoordinationAgent } from "./agents/llm-coordination-agent.js";
-import { CONFIG } from "./config.js";
+import { createCoordinationBDIAgent } from "./agents/llm-coordination-agent.js";
+import { buildRoleConfig, CONFIG } from "./config.js";
 import { createLogger } from "./utils/logger.js";
 
-const logger = createLogger(CONFIG.logLevel);
-const agent = createLlmCoordinationAgent(CONFIG);
+const config = buildRoleConfig(CONFIG, "llm");
+const logger = createLogger(config.logLevel);
+const agent = createCoordinationBDIAgent(config);
 
-logger.info("starting legacy chat:llm entry as LlmCoordinationAgent");
+logger.info("starting legacy chat:llm entry as CoordinationBDIAgent");
 agent.start();
 
 process.on("SIGINT", () => {
-  logger.warn("SIGINT received, stopping LlmCoordinationAgent");
+  logger.warn("SIGINT received, stopping CoordinationBDIAgent");
   agent.stop();
   process.exit(0);
 });
 
 process.on("SIGTERM", () => {
-  logger.warn("SIGTERM received, stopping LlmCoordinationAgent");
+  logger.warn("SIGTERM received, stopping CoordinationBDIAgent");
   agent.stop();
   process.exit(0);
 });

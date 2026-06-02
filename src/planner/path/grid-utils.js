@@ -8,7 +8,7 @@ export function asNumber(value, fallback = 0) {
   return Number.isFinite(n) ? n : fallback;
 }
 
-export function clamp(value, min, max) { //clamp value within a range
+export function clamp(value, min, max) {
   return Math.max(min, Math.min(max, value));
 }
 
@@ -82,7 +82,7 @@ function normalizeCell(raw) {
       raw.enterDirection ??
       normalized.entryConstraint ??
       null;
-    const directionConstraint = //what is the difference?? the direction constraint should work on both the entry and exit
+    const directionConstraint =
       directionConstraintFromValue(directionConstraintRaw) ??
       directionConstraintFromValue(`arrow_${directionConstraintRaw}`) ??
       directionConstraintRaw ??
@@ -196,11 +196,11 @@ function normalizeEnemies(input, meId) { // ensure beliefs about enemies are in 
       ...enemy,
       id: normalizeId("E", enemy.id ?? index, enemy.position ?? enemy),
       position: copyPosition(enemy.position ?? enemy),
-      speed: Math.max(EPSILON, asNumber(enemy.speed, 1)) //ISSUE: we never calculate speed, remove
+      speed: Math.max(EPSILON, asNumber(enemy.speed, 1))
     }));
 }
 
-function packageFromParcel(parcel, params) { // normalize package from map sensing? when does this happen??
+function packageFromParcel(parcel, params) {
   if (!parcel || parcel.carriedBy) return null;
   return {
     id: String(parcel.id ?? `package_${parcel.x}_${parcel.y}`),
@@ -226,11 +226,11 @@ function normalizePackage(pkg, params, fallbackId) { // normalize package from P
   };
 }
 
-function collectPoisFromGrid(grid, type, prefix) { // find coords of specific coords of POIs, is there not a faster way to do this on a fixed map?
+function collectPoisFromGrid(grid, type, prefix) {
   const pois = [];
   for (let y = 0; y < grid.length; y += 1) {
     for (let x = 0; x < grid[y].length; x += 1) {
-      if (grid[y][x].type === type) { // is a nested for loop really the best option?, maybe the impact is neglegible
+      if (grid[y][x].type === type) {
         const position = { x, y };
         pois.push({ id: normalizeId(prefix, null, position), position });
       }
@@ -252,7 +252,7 @@ function uniqueByPosition(items) { // filter out duplicates by position uniquene
   return result;
 }
 
-function applyExplicitPoisToGrid(state) { //  not sure why we would need these explicit POIs, they should be within the grid itself
+function applyExplicitPoisToGrid(state) {
   for (const green of state.greens) {
     // dynamic parcels on non-green tiles (P_*) must not mutate static map topology.
     if (String(green.id ?? "").startsWith("P_")) continue;

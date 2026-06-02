@@ -1,20 +1,21 @@
-export function createLlmClient({ tools = [], llmCaller = null } = {}) {
+export function createLlmClient({ tools = [], llmCaller = null, llm = null, baseURL = null, apiKey = null, model = null } = {}) {
   let chatClient = null;
   let chatModel = null;
 
   async function call(messages, options = {}) {
-    const baseURL = process.env.LITELLM_BASE_URL || "https://llm.bears.disi.unitn.it/v1";
-    const apiKey = process.env.LITELLM_API_KEY;
-    const model = process.env.LOCAL_MODEL || "llama-3.3-70b-lmstudio";
+    const llmConfig = llm ?? {};
+    const resolvedBaseURL = llmConfig.baseURL ?? baseURL ?? process.env.LITELLM_BASE_URL ?? "https://llm.bears.disi.unitn.it/v1";
+    const resolvedApiKey = llmConfig.apiKey ?? apiKey ?? process.env.LITELLM_API_KEY;
+    const resolvedModel = llmConfig.model ?? model ?? process.env.LOCAL_MODEL ?? "llama-3.3-70b-lmstudio";
     const startedAt = Date.now();
 
-    if (!apiKey && !llmCaller) {
+    if (!resolvedApiKey && !llmCaller) {
       throw new Error("missing LITELLM_API_KEY in .env file");
     }
 
     if (llmCaller) {
       const custom = await llmCaller({
-        model,
+        model: resolvedModel,
         messages,
         ...(tools.length > 0 ? { tools } : {}),
         toolChoice: options.toolChoice ?? "auto",
@@ -29,8 +30,8 @@ export function createLlmClient({ tools = [], llmCaller = null } = {}) {
 
     if (!chatClient) {
       const { default: OpenAI } = await import("openai");
-      chatClient = new OpenAI({ baseURL, apiKey });
-      chatModel = model;
+      chatClient = new OpenAI({ baseURL: resolvedBaseURL, apiKey: resolvedApiKey });
+      chatModel = resolvedModel;
     }
 
     const request = {

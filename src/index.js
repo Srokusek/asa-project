@@ -1,8 +1,8 @@
 import "dotenv/config";
 import { pathToFileURL } from "node:url";
-import { createLlmCoordinationAgent } from "./agents/llm-coordination-agent.js";
+import { createCoordinationBDIAgent } from "./agents/llm-coordination-agent.js";
 import { createStandardBDIAgent } from "./agents/standard-bdi-agent.js";
-import { CONFIG } from "./config.js";
+import { buildRoleConfig, CONFIG } from "./config.js";
 import { createLogger } from "./utils/logger.js";
 
 export function normalizeAgentRole(value = process.env.AGENT_ROLE) {
@@ -13,9 +13,10 @@ export function normalizeAgentRole(value = process.env.AGENT_ROLE) {
 
 export function createAgentForRole(role, config = CONFIG, options = {}) {
   const normalized = normalizeAgentRole(role);
+  const roleConfig = config.agentRole === normalized ? config : buildRoleConfig(config, normalized);
   return normalized === "llm"
-    ? createLlmCoordinationAgent(config, options)
-    : createStandardBDIAgent(config, options);
+    ? createCoordinationBDIAgent(roleConfig, options)
+    : createStandardBDIAgent(roleConfig, options);
 }
 
 export function startAgent({
@@ -25,10 +26,11 @@ export function startAgent({
   attachSignals = true
 } = {}) {
   const normalizedRole = normalizeAgentRole(role);
-  const logger = createLogger(config.logLevel);
-  const agent = createAgentForRole(normalizedRole, config, options);
+  const roleConfig = buildRoleConfig(config, normalizedRole);
+  const logger = createLogger(roleConfig.logLevel);
+  const agent = createAgentForRole(normalizedRole, roleConfig, options);
 
-  logger.info("starting agent", { role: normalizedRole, agentName: agent.config?.agentName ?? config.agentName });
+  logger.info("starting agent", { role: normalizedRole, agentName: agent.config?.agentName ?? roleConfig.agentName });
   agent.start();
 
   if (attachSignals) {

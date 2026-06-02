@@ -1,4 +1,23 @@
+import { normalizeAlias } from "../communication/message-router.js";
+import { TEAM_MESSAGE_TYPES } from "../communication/team-protocol.js";
 import { createMissionSpec } from "./mission-spec.js";
+
+const VALID_TEAM_MESSAGE_TYPES = new Set(Object.values(TEAM_MESSAGE_TYPES));
+
+function normalizeType(value) {
+  const candidate = String(value ?? "").trim().toUpperCase();
+  return TEAM_MESSAGE_TYPES[candidate] ?? candidate;
+}
+
+function canonicalAlias(value, roleAliases = {}) {
+  const normalized = normalizeAlias(value);
+  if (!normalized) return value ?? null;
+  for (const [canonical, aliases] of Object.entries(roleAliases ?? {})) {
+    const candidates = [canonical, ...(Array.isArray(aliases) ? aliases : [aliases])].map(normalizeAlias).filter(Boolean);
+    if (candidates.includes(normalized)) return canonical;
+  }
+  return normalized;
+}
 
 export function parseMissionSpecPayload(payload, meta = {}) {
   if (!payload) return null;
@@ -32,7 +51,7 @@ function parseJsonPayload(payload) {
   }
 }
 
-function normalizeMissionSpecs(value) {
+function normalizeMissionSpecs(value, meta = {}) {
   const rawSpecs = Array.isArray(value?.missionSpecs)
     ? value.missionSpecs
     : value?.missionSpec
@@ -40,10 +59,32 @@ function normalizeMissionSpecs(value) {
       : value?.type
         ? [value]
         : [];
-  return rawSpecs.map((spec) => parseMissionSpecPayload(spec)).filter(Boolean);
+  const missionSpecs = [];
+  const rejectedMissionSpecs = [];
+  for (const spec of rawSpecs) {
+    const parsed = parseMissionSpecPayload(spec, meta);
+    if (!parsed || parsed.validationError) {
+      rejectedMissionSpecs.push({
+        spec,
+        reason: parsed?.validationError ?? "invalid_mission_spec"
+      });
+      continue;
+    }
+    missionSpecs.push(parsed);
+  }
+  return { missionSpecs, rejectedMissionSpecs };
 }
 
-function normalizeCoordinationPlans(value) {
+function normalizeRoles(roles, roleAliases = {}) {
+  if (!roles || typeof roles !== "object" || Array.isArray(roles)) return null;
+  return Object.fromEntries(
+    Object.entries(roles)
+      .map(([key, role]) => [canonicalAlias(key, roleAliases), role])
+      .filter(([key, role]) => key && role && typeof role === "object" && !Array.isArray(role))
+  );
+}
+
+function normalizeCoordinationPlans(value, options = {}) {
   const plans = Array.isArray(value?.coordinationPlans)
     ? value.coordinationPlans
     : value?.coordinationPlan
@@ -51,10 +92,40 @@ function normalizeCoordinationPlans(value) {
       : value?.roles && value?.phases
         ? [value]
         : [];
-  return plans.filter((plan) => plan && typeof plan === "object" && plan.id && plan.roles && Array.isArray(plan.phases));
+  const normalized = [];
+  const rejected = [];
+  for (const plan of plans) {
+    if (!plan || typeof plan !== "object" || Array.isArray(plan)) {
+      rejected.push({ plan, reason: "invalid_coordination_plan" });
+      continue;
+    }
+    const roles = normalizeRoles(plan.roles, options.roleAliases);
+    if (!(plan.id || plan.missionId)) {
+      rejected.push({ plan, reason: "missing_coordination_plan_id" });
+      continue;
+    }
+    if (!roles || Object.keys(roles).length === 0) {
+      rejected.push({ plan, reason: "missing_coordination_plan_roles" });
+      continue;
+    }
+    if (!Array.isArray(plan.phases) || plan.phases.length === 0) {
+      rejected.push({ plan, reason: "missing_coordination_plan_phases" });
+      continue;
+    }
+    normalized.push({
+      ...plan,
+      roles,
+      messagesToSend: Array.isArray(plan.messagesToSend) ? plan.messagesToSend : [],
+      fallbackPolicy: plan.fallbackPolicy ?? "continue_bdi",
+      successConditions: Array.isArray(plan.successConditions) ? plan.successConditions : [],
+      failureConditions: Array.isArray(plan.failureConditions) ? plan.failureConditions : [],
+      ttl: Number.isFinite(Number(plan.ttl ?? plan.expiresTicks)) ? Number(plan.ttl ?? plan.expiresTicks) : 80
+    });
+  }
+  return { coordinationPlans: normalized, rejectedCoordinationPlans: rejected };
 }
 
-function normalizeSubgoalAssignments(value) {
+function normalizeSubgoalAssignments(value, options = {}) {
   const assignments = Array.isArray(value?.subgoalAssignments)
     ? value.subgoalAssignments
     : value?.subgoalAssignment
@@ -63,22 +134,40 @@ function normalizeSubgoalAssignments(value) {
   return assignments
     .filter((assignment) => assignment && typeof assignment === "object")
     .map((assignment) => ({
-      to: assignment.to ?? assignment.assignedTo ?? null,
+      to: canonicalAlias(assignment.to ?? assignment.assignedTo ?? null, options.roleAliases),
       subgoal: assignment.subgoal ?? assignment.goal ?? assignment
     }))
     .filter((assignment) => assignment.subgoal && typeof assignment.subgoal === "object");
 }
 
-function normalizeTeamMessages(value) {
+function normalizeTeamMessages(value, options = {}) {
   const messages = Array.isArray(value?.teamMessages)
     ? value.teamMessages
     : value?.teamMessage
       ? [value.teamMessage]
       : [];
-  return messages.filter((message) => message && typeof message === "object" && message.type);
+  const normalized = [];
+  const rejected = [];
+  for (const message of messages) {
+    if (!message || typeof message !== "object" || Array.isArray(message)) {
+      rejected.push({ message, reason: "invalid_team_message" });
+      continue;
+    }
+    const type = normalizeType(message.type);
+    if (!VALID_TEAM_MESSAGE_TYPES.has(type)) {
+      rejected.push({ message, reason: "invalid_team_message_type" });
+      continue;
+    }
+    normalized.push({
+      ...message,
+      type,
+      to: canonicalAlias(message.to ?? null, options.roleAliases)
+    });
+  }
+  return { teamMessages: normalized, rejectedTeamMessages: rejected };
 }
 
-export function parseLlmMissionOutput(payload) {
+export function parseLlmMissionOutput(payload, options = {}) {
   const parsed = parseJsonPayload(payload);
   if (!parsed.ok) return parsed;
   const value = parsed.value;
@@ -96,10 +185,10 @@ export function parseLlmMissionOutput(payload) {
     return { ok: true, value: { clarification: String(value.clarification) } };
   }
 
-  const missionSpecs = normalizeMissionSpecs(value);
-  const coordinationPlans = normalizeCoordinationPlans(value);
-  const subgoalAssignments = normalizeSubgoalAssignments(value);
-  const teamMessages = normalizeTeamMessages(value);
+  const { missionSpecs, rejectedMissionSpecs } = normalizeMissionSpecs(value, options.meta ?? {});
+  const { coordinationPlans, rejectedCoordinationPlans } = normalizeCoordinationPlans(value, options);
+  const subgoalAssignments = normalizeSubgoalAssignments(value, options);
+  const { teamMessages, rejectedTeamMessages } = normalizeTeamMessages(value, options);
   if (
     missionSpecs.length === 0 &&
     coordinationPlans.length === 0 &&
@@ -114,7 +203,15 @@ export function parseLlmMissionOutput(payload) {
       missionSpecs,
       coordinationPlans,
       subgoalAssignments,
-      teamMessages
+      teamMessages,
+      rejectedMissionSpecs,
+      rejectedCoordinationPlans,
+      rejectedTeamMessages,
+      warnings: [
+        ...rejectedMissionSpecs.map((entry) => ({ kind: "mission_spec", reason: entry.reason })),
+        ...rejectedCoordinationPlans.map((entry) => ({ kind: "coordination_plan", reason: entry.reason })),
+        ...rejectedTeamMessages.map((entry) => ({ kind: "team_message", reason: entry.reason }))
+      ]
     }
   };
 }

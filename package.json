@@ -4,14 +4,15 @@
   "type": "module",
   "scripts": {
     "start": "node src/index.js",
-    "start:bdi": "node -e \"process.env.AGENT_ROLE='bdi'; import('./src/index.js').then(m=>m.startAgent())\"",
-    "start:llm": "node -e \"process.env.AGENT_ROLE='llm'; import('./src/index.js').then(m=>m.startAgent())\"",
+    "start:bdi": "cross-env AGENT_ROLE=bdi node src/index.js",
+    "start:llm": "cross-env AGENT_ROLE=llm node src/index.js",
     "chat:llm": "node src/llm-chat-agent.js",
     "dev": "node src/index.js",
     "test": "node --test"
   },
   "dependencies": {
     "@unitn-asa/deliveroo-js-sdk": "latest",
+    "cross-env": "^10.1.0",
     "dotenv": "latest",
     "openai": "latest"
   }

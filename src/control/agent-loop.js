@@ -1,4 +1,4 @@
-import { Executor } from "../executor/executor.js";
+import { Executor, isExecutorBusyResult } from "../executor/executor.js";
 import { buildExecutablePlan } from "../planner/executable-plan.js";
 import { buildShortHarvestPlan } from "../planner/search/short-harvest-rollout.js";
 import {
@@ -653,11 +653,35 @@ export class AgentLoop {
     const deliveryDecision = shouldDeliverNow(plannerState, plannerState.deliveryRules, this.config.planner);
     plannerState.deliveryDecision = deliveryDecision;
     this.beliefs.deliveryDecision = deliveryDecision;
+    if (deliveryDecision.deliveryForbidden) {
+      this.logger.debug("delivery_forbidden", {
+        reason: deliveryDecision.reason,
+        carriedCount: deliveryDecision.carriedCount,
+        stackRuleStatus: deliveryDecision.stackRuleStatus,
+        violatedRules: deliveryDecision.deliveryEvaluation?.violatedRules ?? []
+      });
+    } else if (deliveryDecision.deliveryDeferred) {
+      this.logger.debug("delivery_deferred", {
+        reason: deliveryDecision.reason,
+        carriedCount: deliveryDecision.carriedCount,
+        nearestRedDistance: deliveryDecision.nearestRedDistance,
+        nearbyPickupValue: deliveryDecision.nearbyPickupValue,
+        stackRuleStatus: deliveryDecision.stackRuleStatus
+      });
+    }
 
     let routePlan = null;
     if (!deliveryDecision.shouldDeliver) {
       routePlan = buildShortHarvestPlan(plannerState, deliveryDecision, this.config.planner);
       if (routePlan) this.lastReplanCause = "short_harvest_rollout";
+      if (!routePlan && deliveryDecision.deliveryDeferred) {
+        this.logger.debug("delivery_fallback_allowed", {
+          reason: deliveryDecision.reason,
+          carriedCount: deliveryDecision.carriedCount,
+          nearestRedDistance: deliveryDecision.nearestRedDistance,
+          nearbyPickupValue: deliveryDecision.nearbyPickupValue
+        });
+      }
     }
     if (!routePlan) {
       routePlan = replan(plannerState, {
@@ -843,6 +867,14 @@ export class AgentLoop {
       temporaryBlockedCells: this.beliefs.temporaryBlockedCells?.size ?? 0
     });
     const ok = await this.executor.execute(action);
+    if (isExecutorBusyResult(ok)) {
+      this.telemetry.record("executor_busy", {
+        mode: this.currentRoutePlan?.mode ?? "PICKUP_DELIVERY_UNIFIED",
+        action,
+        reason
+      });
+      return false;
+    }
     if (ok === false) {
       this.telemetry.record("action_failed", {
         mode: this.currentRoutePlan?.mode ?? "PICKUP_DELIVERY_UNIFIED",
@@ -921,6 +953,14 @@ export class AgentLoop {
         this.lastReplanCause = "reactive_immediate_pickup";
       } else if (reactive?.action && reactive.immediate) {
         await this.executeImmediateAction(reactive.action, reactive.action.reason ?? "reactive_immediate_action");
+        return;
+      } else if (reactive?.invalidCurrentPlan) {
+        this.telemetry.record("current_plan_action_invalid", {
+          mode: this.currentRoutePlan?.mode,
+          action: reactive.action,
+          reason: reactive.reason
+        });
+        this.invalidatePlan(reactive.reason ?? "current_plan_action_invalid");
         return;
       } else if (reactive?.fromCurrentPlan) {
         keepCurrentPlanForReactiveAction = true;
@@ -1042,6 +1082,14 @@ export class AgentLoop {
 
       // await response from deliveroo
       const ok = await this.executor.execute(action);
+      if (isExecutorBusyResult(ok)) {
+        this.telemetry.record("executor_busy", {
+          mode: this.currentRoutePlan?.mode,
+          action,
+          reason: "executor_busy"
+        });
+        return;
+      }
 
       // if action failed:
       if (ok === false) {

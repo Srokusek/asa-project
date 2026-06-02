@@ -24,23 +24,101 @@ function enemyOccupies(beliefs, position) {
   return false;
 }
 
-function visibleParcelAt(beliefs, position) {
+function parcelIsCurrentlyAvailable(beliefs, parcel, position = null) {
+  if (!parcel) return false;
+  if (parcel.carriedBy) return false;
+  if (position && positionKey(parcel) !== positionKey(position)) return false;
+  const visible = Number(parcel.confidence ?? 0) >= 1 || Number(parcel.lastSeenTime ?? -Infinity) >= Number(beliefs?.time ?? 0);
+  if (!visible) return false;
+  return Number(beliefs?.estimateParcelReward?.(parcel) ?? parcel.reward ?? 0) > 0;
+}
+
+function parcelAllowedByMissionFilters(plannerState, parcel, beliefs) {
+  const filters = plannerState?.deliveryRules?.parcelValueFilters ?? plannerState?.parcelValueFilters ?? [];
+  if (!Array.isArray(filters) || filters.length === 0) return true;
+
+  const value = Number(beliefs?.estimateParcelReward?.(parcel) ?? parcel?.reward ?? 0);
+  for (const filter of filters) {
+    const minValue = Number.isFinite(Number(filter.minValue)) ? Number(filter.minValue) : null;
+    const maxValue = Number.isFinite(Number(filter.maxValue)) ? Number(filter.maxValue) : null;
+    const violates = (minValue !== null && value < minValue) || (maxValue !== null && value > maxValue);
+    if (violates && filter.hard !== false) return false;
+  }
+  return true;
+}
+
+function visibleParcelAt(beliefs, position, plannerState = null) {
   const key = positionKey(position);
   for (const parcel of beliefs?.parcels?.values?.() ?? []) {
-    if (parcel.carriedBy) continue;
     if (positionKey(parcel) !== key) continue;
-    const visible = Number(parcel.confidence ?? 0) >= 1 || Number(parcel.lastSeenTime ?? -Infinity) >= Number(beliefs.time ?? 0);
-    if (visible) return parcel;
+    if (!parcelIsCurrentlyAvailable(beliefs, parcel, position)) continue;
+    if (!parcelAllowedByMissionFilters(plannerState, parcel, beliefs)) continue;
+    return parcel;
   }
   return null;
 }
 
-function currentActionIsValid(plannerState, beliefs, action) {
-  if (!action) return false;
-  if (action.type !== "move") return true;
-  if (!action.from || !action.to) return false;
-  if (enemyOccupies(beliefs, action.to)) return false;
-  return isMoveAllowed(plannerState, action.from, action.to);
+function validateMoveAction(plannerState, beliefs, action) {
+  if (!action.from || !action.to) return { ok: false, reason: "move_missing_endpoint" };
+  const actualPosition = roundTilePosition(beliefs.me);
+  if (positionKey(actualPosition) !== positionKey(action.from)) return { ok: false, reason: "move_from_stale" };
+  if (!isMoveAllowed(plannerState, action.from, action.to)) return { ok: false, reason: "move_not_allowed" };
+  if (enemyOccupies(beliefs, action.to)) return { ok: false, reason: "enemy_in_next_cell" };
+  return { ok: true, reason: "move_allowed" };
+}
+
+function validatePickupAction(plannerState, beliefs, action, config) {
+  const currentPosition = roundTilePosition(beliefs.me);
+  const actionPosition = action.at ? roundTilePosition(action.at) : currentPosition;
+  if (positionKey(currentPosition) !== positionKey(actionPosition)) {
+    return { ok: false, reason: "pickup_not_on_target_tile" };
+  }
+
+  const parcel = visibleParcelAt(beliefs, currentPosition, plannerState);
+  if (!parcel) return { ok: false, reason: "pickup_parcel_unavailable" };
+  if (String(action.targetId ?? "").startsWith("P_")) {
+    const expectedId = String(action.targetId).slice(2);
+    if (String(parcel.id) !== expectedId) return { ok: false, reason: "pickup_target_mismatch" };
+  }
+  if (!parcelAllowedByMissionFilters(plannerState, parcel, beliefs)) {
+    return { ok: false, reason: "pickup_forbidden_by_mission_filter" };
+  }
+  if (Number(parcel.confidence ?? 0) < Number(config?.planner?.minParcelConfidence ?? config?.minParcelConfidence ?? 0.3)) {
+    return { ok: false, reason: "pickup_low_confidence" };
+  }
+  return { ok: true, reason: "pickup_allowed", parcel };
+}
+
+function validatePutDownAction(plannerState, beliefs, action, config) {
+  const currentPosition = roundTilePosition(beliefs.me);
+  const actionPosition = action.at ? roundTilePosition(action.at) : currentPosition;
+  if (positionKey(currentPosition) !== positionKey(actionPosition)) {
+    return { ok: false, reason: "put_down_not_on_target_tile" };
+  }
+  const cell = getCell(plannerState, currentPosition);
+  if (cell?.type !== "red") return { ok: false, reason: "put_down_not_on_red" };
+  if ((plannerState.carriedPackages ?? []).length === 0) return { ok: false, reason: "put_down_empty_carried" };
+
+  const evaluation = evaluateDelivery({
+    state: plannerState,
+    packages: plannerState.carriedPackages ?? [],
+    deliveryTime: plannerState.time,
+    deliveryPosition: currentPosition,
+    config: config?.planner ?? config ?? {}
+  });
+  if (!evaluation.allowed) return { ok: false, reason: "put_down_delivery_forbidden", evaluation };
+  return { ok: true, reason: "put_down_allowed", evaluation };
+}
+
+function currentActionIsValid(plannerState, beliefs, action, config = {}) {
+  if (!action) return { ok: false, reason: "missing_action" };
+  if (action.type === "move") return validateMoveAction(plannerState, beliefs, action);
+  if (action.type === "pick_up") return validatePickupAction(plannerState, beliefs, action, config);
+  if (action.type === "put_down") return validatePutDownAction(plannerState, beliefs, action, config);
+  if (action.type === "write_message" || action.type === "say" || action.type === "shout") {
+    return { ok: true, reason: "message_action_allowed" };
+  }
+  return { ok: false, reason: "unknown_action_type" };
 }
 
 function nearestDeliveryEvaluation(plannerState, green, pickupTime, config) {
@@ -134,14 +212,8 @@ export function tryImmediateAction({
   const carried = [...(beliefs.carriedParcels?.values?.() ?? [])];
 
   if (cell?.type === "red" && carried.length > 0) {
-    const evaluation = evaluateDelivery({
-      state: plannerState,
-      packages: plannerState.carriedPackages ?? [],
-      deliveryTime: plannerState.time,
-      deliveryPosition: position,
-      config: config?.planner ?? config ?? {}
-    });
-    if (evaluation.allowed) {
+    const putDown = validatePutDownAction(plannerState, beliefs, { type: "put_down", at: position }, config);
+    if (putDown.ok) {
       return {
         action: {
           type: "put_down",
@@ -150,21 +222,31 @@ export function tryImmediateAction({
           reason: "reactive_red_put_down"
         },
         immediate: true,
-        evaluation
+        evaluation: putDown.evaluation
       };
     }
   }
 
   const nextAction = currentExecutablePlan?.[actionIndex] ?? null;
   if (coordinationController?.movementBlocked?.(nextAction)) return null;
+  if (currentRoutePlan && nextAction) {
+    const validation = currentActionIsValid(plannerState, beliefs, nextAction, config);
+    if (!validation.ok) {
+      return {
+        invalidCurrentPlan: true,
+        reason: validation.reason,
+        action: nextAction
+      };
+    }
+  }
   if (currentRoutePlan?.mode === "MANUAL_GOTO") {
-    if (currentActionIsValid(plannerState, beliefs, nextAction)) {
+    if (nextAction) {
       return { action: nextAction, fromCurrentPlan: true };
     }
     return null;
   }
 
-  const localParcel = visibleParcelAt(beliefs, position);
+  const localParcel = visibleParcelAt(beliefs, position, plannerState);
   if (localParcel && !coordinationController?.movementBlocked?.({ type: "pick_up" })) {
     return {
       action: {
@@ -177,7 +259,7 @@ export function tryImmediateAction({
     };
   }
 
-  if (currentActionIsValid(plannerState, beliefs, nextAction)) {
+  if (currentRoutePlan && nextAction) {
     return { action: nextAction, fromCurrentPlan: true };
   }
 

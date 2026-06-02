@@ -89,6 +89,8 @@ export function shouldDeliverNow(plannerState, _missionRules = null, config = {}
 
   const base = {
     shouldDeliver: false,
+    deliveryForbidden: false,
+    deliveryDeferred: false,
     reason: "no_carried_packages",
     carriedCount,
     carriedValue,
@@ -99,7 +101,8 @@ export function shouldDeliverNow(plannerState, _missionRules = null, config = {}
     stackRuleStatus: stack.status,
     stackTargetCount: stack.targetCount,
     deliveryValue: 0,
-    deliveryAllowed: false
+    deliveryAllowed: false,
+    deliveryEvaluation: null
   };
 
   if (carriedCount === 0) return base;
@@ -118,12 +121,14 @@ export function shouldDeliverNow(plannerState, _missionRules = null, config = {}
   const withDelivery = {
     ...base,
     deliveryValue: deliveryEval.value,
-    deliveryAllowed: deliveryEval.allowed
+    deliveryAllowed: deliveryEval.allowed,
+    deliveryEvaluation: deliveryEval
   };
 
   if (!deliveryEval.allowed) {
     return {
       ...withDelivery,
+      deliveryForbidden: true,
       reason:
         stack.status === "needs_more_packages" && nearby.nearbyPickupCount > 0
           ? "stack_rule_not_satisfied_and_nearby_pickups"
@@ -153,6 +158,7 @@ export function shouldDeliverNow(plannerState, _missionRules = null, config = {}
   if (stack.status === "needs_more_packages" && pickupLooksWorthIt) {
     return {
       ...withDelivery,
+      deliveryDeferred: true,
       reason: "stack_rule_not_satisfied_and_nearby_pickups"
     };
   }
@@ -160,6 +166,7 @@ export function shouldDeliverNow(plannerState, _missionRules = null, config = {}
   if (!redIsClose && pickupLooksWorthIt && nearby.nearbyPickupValue > carriedValue * 0.25) {
     return {
       ...withDelivery,
+      deliveryDeferred: true,
       reason: "nearby_pickups_outweigh_delivery"
     };
   }

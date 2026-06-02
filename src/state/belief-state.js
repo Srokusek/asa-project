@@ -1,5 +1,6 @@
 import { directionFromPositions, positionKey, roundTilePosition } from "../utils/geometry.js";
 import { createMissionRegistry } from "../missions/mission-registry.js";
+import { TEAM_MESSAGE_TYPES } from "../communication/team-protocol.js";
 
 function nowTime(fallback) {
   return Number.isFinite(Number(fallback)) ? Number(fallback) : null;
@@ -65,6 +66,23 @@ function chatPayload(message) {
   return { text: String(message ?? "") };
 }
 
+function teamAlias(value) {
+  const alias = String(value ?? "").trim().toLowerCase();
+  return alias || null;
+}
+
+function heartbeatKey(payload = {}) {
+  return teamAlias(payload.agentId) ?? teamAlias(payload.agentName) ?? teamAlias(payload.role);
+}
+
+function heartbeatAliases(payload = {}) {
+  return [...new Set([
+    teamAlias(payload.agentId),
+    teamAlias(payload.agentName),
+    teamAlias(payload.role)
+  ].filter(Boolean))];
+}
+
 export class BeliefState {
   constructor(config) {
     this.config = config; // config with parameters for scoring etc.
@@ -99,7 +117,7 @@ export class BeliefState {
     this.deliveryCountMultipliers = new Map(); // sticky delivery-value multiplier by delivered package count
     this.missionRegistry = createMissionRegistry({ beliefs: this });
     this.teamMessages = [];
-    this.teamState = {};
+    this.teamState = { teammates: {} };
     this.manualTasks = [];
     this.manualTaskSequence = 0;
     this.events = [];
@@ -137,12 +155,93 @@ export class BeliefState {
     this.teamMessages = this.teamMessages.slice(-50);
     this.teamState = {
       ...this.teamState,
+      teammates: this.teamState.teammates ?? {},
       lastMessage: entry,
       lastMessageTick: this.time
     };
+    if (entry.type === TEAM_MESSAGE_TYPES.POSITION_HEARTBEAT) {
+      this.updateTeamHeartbeat(entry.payload, {
+        receivedAtTick: this.time,
+        ttl: entry.ttl,
+        messageTick: entry.tick
+      });
+    }
     this.pushEvent("TEAM_MESSAGE", entry);
     this.markDirty();
     return entry;
+  }
+
+  updateTeamHeartbeat(payload = {}, meta = {}) {
+    const key = heartbeatKey(payload);
+    if (!key) return null;
+    const receivedAtTick = Number(meta.receivedAtTick ?? this.time);
+    const ttl = Math.max(0, Number(meta.ttl ?? 0) || 0);
+    const heartbeatTick = Number(payload.tick ?? meta.messageTick ?? receivedAtTick);
+    const entry = {
+      agentId: payload.agentId ?? null,
+      agentName: payload.agentName ?? null,
+      role: payload.role ?? null,
+      aliases: heartbeatAliases(payload),
+      position: payload.position
+        ? { x: Math.round(Number(payload.position.x)), y: Math.round(Number(payload.position.y)) }
+        : null,
+      score: Number(payload.score ?? 0),
+      carriedCount: Number(payload.carriedCount ?? 0),
+      currentTask: payload.currentTask ?? null,
+      ready: Boolean(payload.ready),
+      tick: Number.isFinite(heartbeatTick) ? heartbeatTick : receivedAtTick,
+      lastSeenTick: Number.isFinite(receivedAtTick) ? receivedAtTick : this.time,
+      ttl,
+      expiresAtTick: ttl > 0 ? (Number.isFinite(receivedAtTick) ? receivedAtTick : this.time) + ttl : Infinity
+    };
+    this.teamState = {
+      ...this.teamState,
+      teammates: {
+        ...(this.teamState.teammates ?? {}),
+        [key]: entry
+      }
+    };
+    this.pushEvent("TEAM_HEARTBEAT", { agentId: entry.agentId, agentName: entry.agentName, role: entry.role });
+    this.markDirty();
+    return entry;
+  }
+
+  getTeammate(alias) {
+    const key = teamAlias(alias);
+    if (!key) return null;
+    const teammates = Object.values(this.teamState.teammates ?? {});
+    return teammates.find((entry) => entry.aliases?.includes(key)) ?? null;
+  }
+
+  isTeammateStale(aliasOrEntry, currentTick = this.time) {
+    const entry = typeof aliasOrEntry === "object" ? aliasOrEntry : this.getTeammate(aliasOrEntry);
+    if (!entry) return true;
+    return Number(currentTick) > Number(entry.expiresAtTick);
+  }
+
+  teammatePosition(alias, currentTick = this.time) {
+    const entry = this.getTeammate(alias);
+    if (!entry || this.isTeammateStale(entry, currentTick)) return null;
+    return entry.position ? { ...entry.position } : null;
+  }
+
+  teammateSummary(currentTick = this.time) {
+    const teammates = Object.values(this.teamState.teammates ?? {}).map((entry) => ({
+      agentId: entry.agentId,
+      agentName: entry.agentName,
+      role: entry.role,
+      position: entry.position,
+      lastSeenTick: entry.lastSeenTick,
+      carriedCount: entry.carriedCount,
+      currentTask: entry.currentTask,
+      ready: entry.ready,
+      stale: this.isTeammateStale(entry, currentTick)
+    }));
+    return {
+      teammates,
+      freshCount: teammates.filter((entry) => !entry.stale).length,
+      staleCount: teammates.filter((entry) => entry.stale).length
+    };
   }
 
   pendingChatMessages(sinceChatId = 0, limit = 1) {

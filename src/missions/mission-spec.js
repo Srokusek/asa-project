@@ -111,6 +111,24 @@ function copyObject(value, fallback = {}) {
   return { ...value };
 }
 
+function asFiniteNumber(value, fallback = null) {
+  const number = Number(value);
+  return Number.isFinite(number) ? number : fallback;
+}
+
+function priorityFor(input) {
+  return asFiniteNumber(input.priority ?? input.objective?.priority, 0);
+}
+
+function stackCountFor(input) {
+  const count = Math.round(Number(input.count ?? input.objective?.count));
+  return Number.isFinite(count) && count > 0 ? count : null;
+}
+
+function stackMultiplierFor(input) {
+  return asFiniteNumber(input.multiplier ?? input.objective?.multiplier, null);
+}
+
 function tileObjective(input) {
   const target = input?.target ?? input?.objective?.target ?? input?.objective?.position;
   if (!target) return null;
@@ -126,9 +144,16 @@ function defaultConstraintsFor(input, type) {
     return [{ kind: "FORBIDDEN_TILE", target, hard: true }];
   }
   if (type === MISSION_TYPES.STACK_EXACTLY_N) {
-    const count = Math.round(Number(input.count ?? input.objective?.count));
-    if (Number.isFinite(count) && count > 0) {
-      return [{ kind: "STACK_EXACTLY_N", count, hard: input.hard !== false }];
+    const count = stackCountFor(input);
+    if (count !== null) {
+      const multiplier = stackMultiplierFor(input);
+      return [{
+        kind: "STACK_EXACTLY_N",
+        count,
+        hard: input.hard !== false,
+        priority: priorityFor(input),
+        ...(multiplier !== null ? { multiplier } : {})
+      }];
     }
   }
   if (type === MISSION_TYPES.PARCEL_VALUE_FILTER) {
@@ -161,10 +186,53 @@ function defaultRewardModifiersFor(input, type) {
       return [{ kind: "STACK_COUNT_MULTIPLIER", count, multiplier }];
     }
   }
+  if (type === MISSION_TYPES.STACK_EXACTLY_N) {
+    const count = stackCountFor(input);
+    if (count !== null && Number.isFinite(multiplier)) {
+      return [{ kind: "STACK_COUNT_MULTIPLIER", count, multiplier, priority: priorityFor(input) }];
+    }
+  }
   if (type === MISSION_TYPES.PREFER_RED && target) {
     return [{ kind: "PREFER_RED", target, multiplier: Number.isFinite(multiplier) ? multiplier : 1.5 }];
   }
   return [];
+}
+
+function normalizeConstraintsFor(input, type) {
+  const constraints = asArray(input.constraints).map(copyObject);
+  const defaults = constraints.length > 0 ? constraints : defaultConstraintsFor(input, type);
+  if (type !== MISSION_TYPES.STACK_EXACTLY_N) return defaults;
+
+  const count = stackCountFor(input);
+  const multiplier = stackMultiplierFor(input);
+  const priority = priorityFor(input);
+  return defaults.map((constraint) => {
+    const kind = String(constraint.kind ?? constraint.type ?? "").toUpperCase();
+    if (kind !== "STACK_EXACTLY_N") return constraint;
+    return {
+      ...constraint,
+      ...(constraint.count === undefined && count !== null ? { count } : {}),
+      ...(constraint.multiplier === undefined && multiplier !== null ? { multiplier } : {}),
+      ...(constraint.priority === undefined ? { priority } : {})
+    };
+  });
+}
+
+function normalizeRewardModifiersFor(input, type) {
+  const modifiers = asArray(input.rewardModifiers).map(copyObject);
+  const defaults = modifiers.length > 0 ? modifiers : defaultRewardModifiersFor(input, type);
+  if (type !== MISSION_TYPES.STACK_EXACTLY_N) return defaults;
+
+  const count = stackCountFor(input);
+  const multiplier = stackMultiplierFor(input);
+  if (count === null || multiplier === null) return defaults;
+  const hasStackMultiplier = defaults.some((modifier) => {
+    const kind = String(modifier.kind ?? modifier.type ?? "").toUpperCase();
+    return ["STACK_COUNT_MULTIPLIER", "DELIVERY_COUNT_MULTIPLIER"].includes(kind) &&
+      Math.round(Number(modifier.count)) === count;
+  });
+  if (hasStackMultiplier) return defaults;
+  return [...defaults, { kind: "STACK_COUNT_MULTIPLIER", count, multiplier, priority: priorityFor(input) }];
 }
 
 export function validateMissionSpec(spec) {
@@ -208,8 +276,14 @@ export function createMissionSpec(input = {}) {
   const createdAtTick = Number.isFinite(Number(input.createdAtTick)) ? Number(input.createdAtTick) : 0;
   const target = tileObjective(input);
   const objective = copyObject(input.objective, target ? { target } : {});
-  const constraints = asArray(input.constraints);
-  const rewardModifiers = asArray(input.rewardModifiers);
+  const stackCount = stackCountFor(input);
+  const stackMultiplier = stackMultiplierFor(input);
+  if (type === MISSION_TYPES.STACK_EXACTLY_N && stackCount !== null && objective.count === undefined) {
+    objective.count = stackCount;
+  }
+  if (type === MISSION_TYPES.STACK_EXACTLY_N && stackMultiplier !== null && objective.multiplier === undefined) {
+    objective.multiplier = stackMultiplier;
+  }
   const level = inferLevel(type, input.level);
 
   const spec = {
@@ -222,9 +296,8 @@ export function createMissionSpec(input = {}) {
     level,
     status: normalizeStatus(input.status),
     objective,
-    constraints: constraints.length > 0 ? constraints.map(copyObject) : defaultConstraintsFor(input, type),
-    rewardModifiers:
-      rewardModifiers.length > 0 ? rewardModifiers.map(copyObject) : defaultRewardModifiersFor(input, type),
+    constraints: normalizeConstraintsFor(input, type),
+    rewardModifiers: normalizeRewardModifiersFor(input, type),
     expiresAtTick:
       input.expiresAtTick === null || input.expiresAtTick === undefined
         ? null
@@ -235,6 +308,7 @@ export function createMissionSpec(input = {}) {
     macroPlan: input.macroPlan ?? null,
     assignedTo: input.assignedTo ?? null,
     createdAtTick,
+    priority: priorityFor(input),
     reason: String(input.reason ?? objective.reason ?? "mission_spec")
   };
 

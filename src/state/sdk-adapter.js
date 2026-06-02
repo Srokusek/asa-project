@@ -1,5 +1,5 @@
 import { CONFIG } from "../config.js";
-import { parseTeamMessage } from "../communication/team-protocol.js";
+import { hasTeamProtocolEnvelope, parseTeamMessage } from "../communication/team-protocol.js";
 
 function asArray(value) {
   return Array.isArray(value) ? value : [];
@@ -103,13 +103,16 @@ export function registerSdkListeners(socket, beliefs, _loop = null, options = {}
   socket.on("msg", (...args) => {
     const normalized = normalizeChatArgs(args);
     const teamMessage = parseTeamMessage(normalized.text);
-    if (teamMessage) {
-      messageRouter?.routeTeamMessage?.(teamMessage, beliefs.time);
-      beliefs.pushTeamMessage({
-        ...teamMessage,
-        from: teamMessage.from ?? normalized.fromId ?? null,
-        rawFromId: normalized.fromId ?? null
-      });
+    if (teamMessage || hasTeamProtocolEnvelope(normalized.text)) {
+      const routed = messageRouter?.routeTeamMessage?.(teamMessage ?? normalized.text, beliefs.time);
+      if ((!messageRouter && teamMessage) || routed?.kind === "team") {
+        const message = routed?.message ?? teamMessage;
+        beliefs.pushTeamMessage({
+          ...message,
+          from: message.from ?? normalized.fromId ?? null,
+          rawFromId: normalized.fromId ?? null
+        });
+      }
       return;
     }
     if (routeNaturalChat) messageRouter?.routeIncomingChat?.(normalized, beliefs.time);

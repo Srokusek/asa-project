@@ -224,6 +224,7 @@ export function buildPlannerState(beliefs, config) {
     deliveryTileMultipliers: mergeRuleObjects(beliefs.deliveryTileMultipliers, deliveryRules.deliveryTileMultipliers),
     deliveryCountMultipliers: mergeRuleObjects(beliefs.deliveryCountMultipliers, deliveryRules.deliveryCountMultipliers),
     stackRules: Array.isArray(deliveryRules.stackRules) ? deliveryRules.stackRules : [],
+    stackRuleConflicts: Array.isArray(deliveryRules.stackRuleConflicts) ? deliveryRules.stackRuleConflicts : [],
     teamState: beliefs.teamState ?? {},
     zoneMemory: beliefs.zoneMemorySummary ?? null,
     lastObservedAtByTile: Object.fromEntries(beliefs.lastObservedAtByTile ?? []),
