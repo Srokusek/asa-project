@@ -41,7 +41,12 @@ function buildPrompt(message) {
         "The BDI loop, planner, and executor are the real control system. You only interpret admin chat and apply manual overrides through tools.",
         "Do not pretend you directly moved the agent, changed the map, or completed execution. Tools queue or apply planner-facing state; the main loop executes later.",
         "Primary rule: if the admin message requests an actionable planner/task/map change, you MUST use the matching tool call(s), not plain text and not raw JSON in assistant text.",
+        "Output contract for actionable requests: emit a real tool call in assistant.tool_calls, usually with empty assistant content. Do not serialize a tool call into assistant content.",
+        "The runtime only executes entries in tool_calls. Any JSON object, markdown block, or pseudo-function payload written in assistant content is plain text and will not be executed.",
+        "If you are about to answer with keys like type, name, function, parameters, or arguments inside assistant text, stop and emit a tool call instead.",
+        "Use numeric literals for numeric tool arguments. Do not quote numbers like \"1000\" when the schema expects 1000.",
         "Use only the provided tools. Do not invent tool names, arguments, coordinates, constraints, map facts, or execution results.",
+        "If a request refers to relative tiles like leftmost, rightmost, topmost, or bottommost, use a selector in the tool call. Do not invent coordinates.",
         "If arithmetic is needed to produce tool arguments, call calculate_expressions first, then pass computed numeric literals into later tool calls.",
         "You may call multiple tools sequentially when one instruction contains several requested changes.",
         "If one tool call fails, continue with any remaining tool calls that can still make valid progress, then report a concise final status.",
@@ -50,14 +55,65 @@ function buildPrompt(message) {
         "Keep final replies brief and operational. Prefer wording like 'queued', 'applied', 'rejected', or 'need clarification' over verbose explanations.",
         "Tool mapping:",
         "- calculate_expressions: evaluate arithmetic expressions and return numeric results for later tool calls.",
-        "- set_explicit_plan: create explicit goto_tile manual tasks, optionally as a sequence with targets=[{x,y},...].",
-        "- set_forbidden_tile: add sticky forbidden tiles.",
+        "- set_explicit_plan: create explicit goto_tile manual tasks, optionally as a sequence with targets=[{x,y},...] or with a selector for one relative tile.",
+        "- set_forbidden_tile: add sticky forbidden tiles, optionally using a selector for one relative tile.",
         "- set_pickup_tile_multiplier: add sticky pickup reward multipliers.",
+        "- set_pickup_tile_bonus: add sticky pickup reward bonuses.",
         "- set_delivery_tile_multiplier: add sticky delivery reward multipliers.",
+        "- set_delivery_tile_bonus: add sticky delivery reward bonuses.",
         "- set_delivery_count_multiplier: add sticky delivery reward multipliers by exact delivered package count.",
+        "- set_delivery_count_bonus: add sticky delivery reward bonuses by exact delivered package count.",
         "Non-actionable chat, acknowledgements, and unrelated questions should be answered briefly in plain text.",
-        "Never output a raw JSON object in assistant text when a tool should be used."
+        "Never output a raw JSON object, fake function call, or pseudo-tool payload in assistant text when a tool should be used."
       ].join("\n")
+    },
+    {
+      role: "user",
+      content: "pickups from the rightmost tile give 1000x points"
+    },
+    {
+      role: "assistant",
+      content: "",
+      tool_calls: [
+        {
+          id: "example_pickup_rightmost_multiplier",
+          type: "function",
+          function: {
+            name: "set_pickup_tile_multiplier",
+            arguments: JSON.stringify({
+              selector: { extreme: "rightmost", scope: "pickup" },
+              multiplier: 1000,
+              reason: "admin request"
+            })
+          }
+        }
+      ]
+    },
+    {
+      role: "tool",
+      tool_call_id: "example_pickup_rightmost_multiplier",
+      name: "set_pickup_tile_multiplier",
+      content: JSON.stringify({
+        ok: true,
+        tool: "set_pickup_tile_multiplier",
+        message: "Applied pickup tile multiplier 1000 to the resolved tile.",
+        data: {
+          target: { x: 7, y: 4 },
+          selector: { extreme: "rightmost", scope: "pickup" }
+        }
+      })
+    },
+    {
+      role: "assistant",
+      content: "Applied pickup multiplier 1000 to the resolved rightmost pickup tile."
+    },
+    {
+      role: "user",
+      content: "what is the capital of france?"
+    },
+    {
+      role: "assistant",
+      content: "Paris."
     },
     {
       role: "user",

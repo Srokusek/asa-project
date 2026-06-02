@@ -1,4 +1,5 @@
 import { chatTools } from "./tool-definitions.js";
+import { resolveTileSelector } from "./tile-selector.js";
 import { buildTeammateSyncMessage } from "../utils/teammate-sync.js";
 
 function asToolError(toolName, message, extra = {}) {
@@ -45,14 +46,30 @@ function evaluateArithmeticExpression(rawExpression) {
   }
 }
 
-function parseTarget(args) {
-  const x = Math.round(Number(args?.target?.x));
-  const y = Math.round(Number(args?.target?.y));
+function parseTargetValue(target) {
+  const x = Math.round(Number(target?.x));
+  const y = Math.round(Number(target?.y));
   if (!Number.isFinite(x) || !Number.isFinite(y)) return null;
   return { x, y };
 }
 
-function parseMultiplier(args) {
+function parseSelectorValue(selector) {
+  if (!selector || typeof selector !== "object" || Array.isArray(selector)) {
+    return { ok: false, reason: "invalid_selector" };
+  }
+  const extreme = String(selector.extreme ?? "").trim().toLowerCase();
+  const scope = selector.scope === undefined ? null : String(selector.scope).trim().toLowerCase();
+  if (!extreme) return { ok: false, reason: "missing_selector_extreme" };
+  return {
+    ok: true,
+    value: {
+      extreme,
+      ...(scope ? { scope } : {})
+    }
+  };
+}
+
+function parsePositiveMultiplier(args) {
   const factor = Number(args?.multiplier ?? args?.factor ?? args?.value);
   if (!Number.isFinite(factor) || factor <= 0) return null;
   return factor;
@@ -62,6 +79,12 @@ function parseNonNegativeMultiplier(args) {
   const factor = Number(args?.multiplier ?? args?.factor ?? args?.value);
   if (!Number.isFinite(factor) || factor < 0) return null;
   return factor;
+}
+
+function parseSignedBonus(args) {
+  const bonus = Number(args?.bonus ?? args?.value);
+  if (!Number.isFinite(bonus)) return null;
+  return bonus;
 }
 
 function parsePositiveIntegerCount(args) {
@@ -83,8 +106,16 @@ export function createToolExecutor({ beliefs, executor, logger, config }) {
   const maxCalculatorExpressions = Math.max(1, Number(llmConfig.maxCalculatorExpressions ?? 12) || 12);
   const maxCalculatorExpressionLength = Math.max(8, Number(llmConfig.maxCalculatorExpressionLength ?? 120) || 120);
 
+  function tileAt(position) {
+    return beliefs.tiles.get(`${position.x},${position.y}`) ?? null;
+  }
+
+  function tileTypeAt(position) {
+    return String(tileAt(position)?.type ?? "0");
+  }
+
   function isKnownWall(position) {
-    const tile = beliefs.tiles.get(`${position.x},${position.y}`);
+    const tile = tileAt(position);
     return tile?.type === "0" || tile?.blocked === true || tile?.walkable === false;
   }
 
@@ -132,7 +163,6 @@ export function createToolExecutor({ beliefs, executor, logger, config }) {
     if (!teammateId || !entry) return;
 
     const message = buildTeammateSyncMessage({ type, entry });
-
     if (!message) return;
 
     try {
@@ -157,32 +187,102 @@ export function createToolExecutor({ beliefs, executor, logger, config }) {
     }
   }
 
+  function validateWalkableTarget(target, { rejectForbidden = true } = {}) {
+    if (!inBounds(target)) return { ok: false, reason: "out_of_bounds", details: target };
+    if (isKnownWall(target)) return { ok: false, reason: "blocked_target", details: target };
+    if (rejectForbidden && beliefs.isForbiddenTile?.(target)) {
+      return { ok: false, reason: "forbidden_target", details: target };
+    }
+    return { ok: true };
+  }
+
+  function validateTargetForScope(target, scope, options = {}) {
+    const walkable = validateWalkableTarget(target, options);
+    if (!walkable.ok) return walkable;
+    if (scope === "pickup" && tileTypeAt(target) !== "1") {
+      return { ok: false, reason: "invalid_target_scope", details: { target, scope } };
+    }
+    if (scope === "delivery" && tileTypeAt(target) !== "2") {
+      return { ok: false, reason: "invalid_target_scope", details: { target, scope } };
+    }
+    return { ok: true };
+  }
+
+  function resolveToolTarget(args, { defaultScope, allowedScopes, rejectForbidden = true } = {}) {
+    const hasTarget = args?.target !== undefined;
+    const hasSelector = args?.selector !== undefined;
+    if (hasTarget && hasSelector) return { ok: false, reason: "target_selector_conflict" };
+    if (!hasTarget && !hasSelector) return { ok: false, reason: "missing_target" };
+
+    if (hasTarget) {
+      const target = parseTargetValue(args.target);
+      if (!target) return { ok: false, reason: "invalid_coordinates" };
+      const validation = validateWalkableTarget(target, { rejectForbidden });
+      if (!validation.ok) return validation;
+      return {
+        ok: true,
+        value: {
+          target,
+          selector: null,
+          resolvedFromSelector: false
+        }
+      };
+    }
+
+    const selector = parseSelectorValue(args.selector);
+    if (!selector.ok) return selector;
+    const scope = selector.value.scope ?? defaultScope;
+    if (!allowedScopes.includes(scope)) {
+      return { ok: false, reason: "invalid_selector_scope", details: { selector: selector.value, allowedScopes } };
+    }
+    const resolved = resolveTileSelector({
+      beliefs,
+      config,
+      selector: {
+        ...selector.value,
+        scope
+      }
+    });
+    if (!resolved.ok) return resolved;
+    const validation = validateTargetForScope(resolved.target, scope, { rejectForbidden });
+    if (!validation.ok) return validation;
+    return {
+      ok: true,
+      value: {
+        target: resolved.target,
+        selector: resolved.selector,
+        resolvedFromSelector: true
+      }
+    };
+  }
+
   function validateExplicitPlanArgs(args) {
     if (!args || args.goalType !== "goto_tile") return { ok: false, reason: "unsupported_goal_type" };
-    const targetInputs =
-      Array.isArray(args.targets) && args.targets.length > 0
-        ? args.targets.map((target) => ({ target }))
-        : args.target
-          ? [{ target: args.target }]
-          : [];
-    if (targetInputs.length === 0) return { ok: false, reason: "missing_target" };
+
+    const hasTargets = Array.isArray(args.targets) && args.targets.length > 0;
+    if (hasTargets && (args.target !== undefined || args.selector !== undefined)) {
+      return { ok: false, reason: "target_selector_conflict" };
+    }
 
     const targets = [];
-    for (const item of targetInputs) {
-      const parsed = parseTarget(item);
-      if (!parsed) return { ok: false, reason: "invalid_coordinates" };
-      const { x, y } = parsed;
-      if (beliefs.width > 0 && beliefs.height > 0) {
-        if (x < 0 || y < 0 || x >= beliefs.width || y >= beliefs.height) {
-          return { ok: false, reason: "out_of_bounds", details: { x, y } };
-        }
+    let resolvedSelector = null;
+
+    if (hasTargets) {
+      for (const targetValue of args.targets) {
+        const target = parseTargetValue(targetValue);
+        if (!target) return { ok: false, reason: "invalid_coordinates" };
+        const validation = validateTargetForScope(target, "walkable");
+        if (!validation.ok) return validation;
+        targets.push(target);
       }
-      const tile = beliefs.tiles.get(`${x},${y}`);
-      if (tile?.type === "0") return { ok: false, reason: "blocked_target", details: { x, y } };
-      if (beliefs.isForbiddenTile?.({ x, y })) {
-        return { ok: false, reason: "forbidden_target", details: { x, y } };
-      }
-      targets.push({ x, y });
+    } else {
+      const resolvedTarget = resolveToolTarget(args, {
+        defaultScope: "walkable",
+        allowedScopes: ["walkable"]
+      });
+      if (!resolvedTarget.ok) return resolvedTarget;
+      targets.push(resolvedTarget.value.target);
+      resolvedSelector = resolvedTarget.value.selector;
     }
 
     return {
@@ -190,6 +290,7 @@ export function createToolExecutor({ beliefs, executor, logger, config }) {
       value: {
         goalType: "goto_tile",
         targets,
+        selector: resolvedSelector,
         reason: String(args.reason ?? "manual_explicit_plan"),
         priority: args.priority === "sticky_until_done" ? "sticky_until_done" : "override_once",
         expiresTicks: Math.max(1, Math.min(300, Number(args.expiresTicks ?? 120) || 120))
@@ -199,47 +300,49 @@ export function createToolExecutor({ beliefs, executor, logger, config }) {
 
   function validateForbiddenTileArgs(args, { allowCurrentTile = false } = {}) {
     if (!args || (args.goalType && args.goalType !== "forbid_tile")) return { ok: false, reason: "unsupported_goal_type" };
-    const target = parseTarget(args);
-    if (!target) return { ok: false, reason: "invalid_coordinates" };
-    const { x, y } = target;
-    if (beliefs.width > 0 && beliefs.height > 0) {
-      if (x < 0 || y < 0 || x >= beliefs.width || y >= beliefs.height) {
-        return { ok: false, reason: "out_of_bounds", details: { x, y } };
-      }
-    }
+    const resolvedTarget = resolveToolTarget(args, {
+      defaultScope: "walkable",
+      allowedScopes: ["walkable"],
+      rejectForbidden: false
+    });
+    if (!resolvedTarget.ok) return resolvedTarget;
+    const { target, selector } = resolvedTarget.value;
     if (
       !allowCurrentTile &&
       beliefs.me &&
-      Math.round(Number(beliefs.me.x)) === x &&
-      Math.round(Number(beliefs.me.y)) === y
+      Math.round(Number(beliefs.me.x)) === target.x &&
+      Math.round(Number(beliefs.me.y)) === target.y
     ) {
-      return { ok: false, reason: "cannot_forbid_current_tile", details: { x, y } };
-    }
-    return {
-      ok: true,
-      value: {
-        target: { x, y },
-        reason: String(args.reason ?? "negative_reward_instruction")
-      }
-    };
-  }
-
-  function validateMultiplierArgs(args) {
-    const target = parseTarget(args);
-    if (!target) return { ok: false, reason: "invalid_coordinates" };
-    const factor = parseMultiplier(args);
-    if (factor === null) return { ok: false, reason: "invalid_multiplier" };
-    if (beliefs.width > 0 && beliefs.height > 0) {
-      if (target.x < 0 || target.y < 0 || target.x >= beliefs.width || target.y >= beliefs.height) {
-        return { ok: false, reason: "out_of_bounds", details: target };
-      }
+      return { ok: false, reason: "cannot_forbid_current_tile", details: target };
     }
     return {
       ok: true,
       value: {
         target,
-        multiplier: factor,
-        reason: String(args.reason ?? "planner_reward_multiplier_instruction")
+        selector,
+        reason: String(args.reason ?? "negative_reward_instruction")
+      }
+    };
+  }
+
+  function validateTileNumericRuleArgs(args, { valueParser, defaultReason, scope }) {
+    const targetValidation = resolveToolTarget(args, {
+      defaultScope: scope,
+      allowedScopes: [scope]
+    });
+    if (!targetValidation.ok) return targetValidation;
+    const numericValue = valueParser(args);
+    if (numericValue === null) {
+      return { ok: false, reason: defaultReason.includes("multiplier") ? "invalid_multiplier" : "invalid_bonus" };
+    }
+    return {
+      ok: true,
+      value: {
+        target: targetValidation.value.target,
+        selector: targetValidation.value.selector,
+        resolvedFromSelector: targetValidation.value.resolvedFromSelector,
+        numericValue,
+        reason: String(args.reason ?? defaultReason)
       }
     };
   }
@@ -255,6 +358,21 @@ export function createToolExecutor({ beliefs, executor, logger, config }) {
         count,
         multiplier: factor,
         reason: String(args.reason ?? "delivery_count_reward_multiplier_instruction")
+      }
+    };
+  }
+
+  function validateDeliveryCountBonusArgs(args) {
+    const count = parsePositiveIntegerCount(args);
+    if (count === null) return { ok: false, reason: "invalid_count" };
+    const bonus = parseSignedBonus(args);
+    if (bonus === null) return { ok: false, reason: "invalid_bonus" };
+    return {
+      ok: true,
+      value: {
+        count,
+        bonus,
+        reason: String(args.reason ?? "delivery_count_reward_bonus_instruction")
       }
     };
   }
@@ -287,6 +405,149 @@ export function createToolExecutor({ beliefs, executor, logger, config }) {
       }
     }
     return { ok: true, value: { expressions } };
+  }
+
+  const tileRuleConfigs = {
+    set_pickup_tile_multiplier: {
+      validationMessage: "I could not parse pickup multiplier request. Please include tile and multiplier.",
+      rejectLabel: "Pickup multiplier",
+      successMessage: (entry) => `Pickup multiplier set at (${entry.x},${entry.y}) to ${entry.multiplier}x.`,
+      defaultReason: "planner_reward_multiplier_instruction",
+      scope: "pickup",
+      valueParser: parsePositiveMultiplier,
+      apply(target, value, meta) {
+        return beliefs.setPickupTileMultiplier(target, value, meta);
+      },
+      syncType: "pickup_tile_multiplier_set",
+      resultKey: "pickupMultiplierRule"
+    },
+    set_pickup_tile_bonus: {
+      validationMessage: "I could not parse pickup bonus request. Please include tile and bonus.",
+      rejectLabel: "Pickup bonus",
+      successMessage: (entry) => `Pickup bonus set at (${entry.x},${entry.y}) to ${entry.bonus}.`,
+      defaultReason: "planner_reward_bonus_instruction",
+      scope: "pickup",
+      valueParser: parseSignedBonus,
+      apply(target, value, meta) {
+        return beliefs.setPickupTileBonus(target, value, meta);
+      },
+      syncType: "pickup_tile_bonus_set",
+      resultKey: "pickupBonusRule"
+    },
+    set_delivery_tile_multiplier: {
+      validationMessage: "I could not parse delivery multiplier request. Please include tile and multiplier.",
+      rejectLabel: "Delivery multiplier",
+      successMessage: (entry) => `Delivery multiplier set at (${entry.x},${entry.y}) to ${entry.multiplier}x.`,
+      defaultReason: "delivery_tile_reward_multiplier_instruction",
+      scope: "delivery",
+      valueParser: parsePositiveMultiplier,
+      apply(target, value, meta) {
+        return beliefs.setDeliveryTileMultiplier(target, value, meta);
+      },
+      syncType: "delivery_tile_multiplier_set",
+      resultKey: "deliveryMultiplierRule"
+    },
+    set_delivery_tile_bonus: {
+      validationMessage: "I could not parse delivery bonus request. Please include tile and bonus.",
+      rejectLabel: "Delivery bonus",
+      successMessage: (entry) => `Delivery bonus set at (${entry.x},${entry.y}) to ${entry.bonus}.`,
+      defaultReason: "delivery_tile_reward_bonus_instruction",
+      scope: "delivery",
+      valueParser: parseSignedBonus,
+      apply(target, value, meta) {
+        return beliefs.setDeliveryTileBonus(target, value, meta);
+      },
+      syncType: "delivery_tile_bonus_set",
+      resultKey: "deliveryBonusRule"
+    }
+  };
+
+  const countRuleConfigs = {
+    set_delivery_count_multiplier: {
+      validationMessage: "I could not parse delivery count multiplier request. Please include count and multiplier.",
+      rejectLabel: "Delivery count multiplier",
+      validate: validateDeliveryCountMultiplierArgs,
+      successMessage: (entry) => `Delivery count multiplier set for ${entry.count} package(s) to ${entry.multiplier}x.`,
+      apply(count, value, meta) {
+        return beliefs.setDeliveryCountMultiplier(count, value, meta);
+      },
+      syncType: "delivery_count_multiplier_set",
+      resultKey: "deliveryCountMultiplierRule",
+      valueKey: "multiplier"
+    },
+    set_delivery_count_bonus: {
+      validationMessage: "I could not parse delivery count bonus request. Please include count and bonus.",
+      rejectLabel: "Delivery count bonus",
+      validate: validateDeliveryCountBonusArgs,
+      successMessage: (entry) => `Delivery count bonus set for ${entry.count} package(s) to ${entry.bonus}.`,
+      apply(count, value, meta) {
+        return beliefs.setDeliveryCountBonus(count, value, meta);
+      },
+      syncType: "delivery_count_bonus_set",
+      resultKey: "deliveryCountBonusRule",
+      valueKey: "bonus"
+    }
+  };
+
+  async function executeTileRuleTool(toolName, parsedValue, { senderId, sourceChatId }) {
+    const configEntry = tileRuleConfigs[toolName];
+    const validation = validateTileNumericRuleArgs(parsedValue, configEntry);
+    if (!validation.ok) {
+      return asToolError(toolName, `${configEntry.rejectLabel} rejected: ${validation.reason}.`, {
+        toolArgs: parsedValue,
+        data: { reason: validation.reason, details: validation.details ?? null }
+      });
+    }
+
+    const entry = configEntry.apply(validation.value.target, validation.value.numericValue, {
+      reason: validation.value.reason,
+      sourceChatId: Number(sourceChatId ?? 0) || null,
+      senderId
+    });
+    if (!entry) {
+      return asToolError(toolName, `${configEntry.rejectLabel} rejected: invalid_payload.`, {
+        toolArgs: parsedValue,
+        data: { reason: "invalid_payload" }
+      });
+    }
+    await syncToolResultWithTeammate({ type: configEntry.syncType, entry });
+    return asToolSuccess(toolName, configEntry.successMessage(entry), {
+      [configEntry.resultKey]: entry,
+      toolArgs: parsedValue,
+      data: {
+        [configEntry.resultKey]: entry,
+        resolvedTarget: validation.value.target,
+        selector: validation.value.selector
+      }
+    });
+  }
+
+  async function executeCountRuleTool(toolName, parsedValue, { senderId, sourceChatId }) {
+    const configEntry = countRuleConfigs[toolName];
+    const validation = configEntry.validate(parsedValue);
+    if (!validation.ok) {
+      return asToolError(toolName, `${configEntry.rejectLabel} rejected: ${validation.reason}.`, {
+        toolArgs: parsedValue,
+        data: { reason: validation.reason, details: validation.details ?? null }
+      });
+    }
+    const entry = configEntry.apply(validation.value.count, validation.value[configEntry.valueKey], {
+      reason: validation.value.reason,
+      sourceChatId: Number(sourceChatId ?? 0) || null,
+      senderId
+    });
+    if (!entry) {
+      return asToolError(toolName, `${configEntry.rejectLabel} rejected: invalid_payload.`, {
+        toolArgs: parsedValue,
+        data: { reason: "invalid_payload" }
+      });
+    }
+    await syncToolResultWithTeammate({ type: configEntry.syncType, entry });
+    return asToolSuccess(toolName, configEntry.successMessage(entry), {
+      [configEntry.resultKey]: entry,
+      toolArgs: parsedValue,
+      data: { [configEntry.resultKey]: entry }
+    });
   }
 
   async function executeToolCall(call, { senderId, sourceChatId }) {
@@ -332,7 +593,8 @@ export function createToolExecutor({ beliefs, executor, logger, config }) {
       if (!validation.ok) {
         return asToolError(toolName, `Plan rejected: ${validation.reason}.`, {
           planError: validation.reason,
-          toolArgs: parsed.value
+          toolArgs: parsed.value,
+          data: { reason: validation.reason, details: validation.details ?? null }
         });
       }
 
@@ -367,6 +629,7 @@ export function createToolExecutor({ beliefs, executor, logger, config }) {
           data: {
             goalType: validation.value.goalType,
             targets: validation.value.targets,
+            selector: validation.value.selector,
             planIds: plans.map((plan) => plan.id)
           }
         }
@@ -396,7 +659,7 @@ export function createToolExecutor({ beliefs, executor, logger, config }) {
         });
         return asToolError(toolName, `Forbidden-tile instruction rejected: ${validation.reason}.`, {
           toolArgs: parsed.value,
-          data: { reason: validation.reason }
+          data: { reason: validation.reason, details: validation.details ?? null }
         });
       }
 
@@ -440,101 +703,20 @@ export function createToolExecutor({ beliefs, executor, logger, config }) {
       return asToolSuccess(toolName, `Forbidden tile set at (${created.x},${created.y}). I will avoid it.`, {
         forbiddenTile: created,
         toolArgs: parsed.value,
-        data: { forbiddenTile: created }
+        data: { forbiddenTile: created, selector: validation.value.selector }
       });
     }
 
-    if (toolName === "set_pickup_tile_multiplier") {
-      const parsed = parseJsonArguments(rawArgs, "I could not parse pickup multiplier request. Please include tile and multiplier.");
+    if (tileRuleConfigs[toolName]) {
+      const parsed = parseJsonArguments(rawArgs, tileRuleConfigs[toolName].validationMessage);
       if (!parsed.ok) return asToolError(toolName, parsed.error);
-      const validation = validateMultiplierArgs(parsed.value);
-      if (!validation.ok) {
-        return asToolError(toolName, `Pickup multiplier rejected: ${validation.reason}.`, {
-          toolArgs: parsed.value,
-          data: { reason: validation.reason }
-        });
-      }
-      const entry = beliefs.setPickupTileMultiplier(validation.value.target, validation.value.multiplier, {
-        reason: validation.value.reason,
-        sourceChatId: Number(sourceChatId ?? 0) || null,
-        senderId
-      });
-      if (!entry) {
-        return asToolError(toolName, "Pickup multiplier rejected: invalid_multiplier.", {
-          toolArgs: parsed.value,
-          data: { reason: "invalid_multiplier" }
-        });
-      }
-      await syncToolResultWithTeammate({ type: "pickup_tile_multiplier_set", entry });
-      return asToolSuccess(toolName, `Pickup multiplier set at (${entry.x},${entry.y}) to ${entry.multiplier}x.`, {
-        pickupMultiplierRule: entry,
-        toolArgs: parsed.value,
-        data: { pickupMultiplierRule: entry }
-      });
+      return executeTileRuleTool(toolName, parsed.value, { senderId, sourceChatId });
     }
 
-    if (toolName === "set_delivery_tile_multiplier") {
-      const parsed = parseJsonArguments(rawArgs, "I could not parse delivery multiplier request. Please include tile and multiplier.");
+    if (countRuleConfigs[toolName]) {
+      const parsed = parseJsonArguments(rawArgs, countRuleConfigs[toolName].validationMessage);
       if (!parsed.ok) return asToolError(toolName, parsed.error);
-      const validation = validateMultiplierArgs(parsed.value);
-      if (!validation.ok) {
-        return asToolError(toolName, `Delivery multiplier rejected: ${validation.reason}.`, {
-          toolArgs: parsed.value,
-          data: { reason: validation.reason }
-        });
-      }
-      const entry = beliefs.setDeliveryTileMultiplier(validation.value.target, validation.value.multiplier, {
-        reason: validation.value.reason,
-        sourceChatId: Number(sourceChatId ?? 0) || null,
-        senderId
-      });
-      if (!entry) {
-        return asToolError(toolName, "Delivery multiplier rejected: invalid_multiplier.", {
-          toolArgs: parsed.value,
-          data: { reason: "invalid_multiplier" }
-        });
-      }
-      await syncToolResultWithTeammate({ type: "delivery_tile_multiplier_set", entry });
-      return asToolSuccess(toolName, `Delivery multiplier set at (${entry.x},${entry.y}) to ${entry.multiplier}x.`, {
-        deliveryMultiplierRule: entry,
-        toolArgs: parsed.value,
-        data: { deliveryMultiplierRule: entry }
-      });
-    }
-
-    if (toolName === "set_delivery_count_multiplier") {
-      const parsed = parseJsonArguments(
-        rawArgs,
-        "I could not parse delivery count multiplier request. Please include count and multiplier."
-      );
-      if (!parsed.ok) return asToolError(toolName, parsed.error);
-      const validation = validateDeliveryCountMultiplierArgs(parsed.value);
-      if (!validation.ok) {
-        return asToolError(toolName, `Delivery count multiplier rejected: ${validation.reason}.`, {
-          toolArgs: parsed.value,
-          data: { reason: validation.reason }
-        });
-      }
-      const entry = beliefs.setDeliveryCountMultiplier(validation.value.count, validation.value.multiplier, {
-        reason: validation.value.reason,
-        sourceChatId: Number(sourceChatId ?? 0) || null,
-        senderId
-      });
-      if (!entry) {
-        return asToolError(toolName, "Delivery count multiplier rejected: invalid_payload.", {
-          toolArgs: parsed.value,
-          data: { reason: "invalid_payload" }
-        });
-      }
-      return asToolSuccess(
-        toolName,
-        `Delivery count multiplier set for ${entry.count} package(s) to ${entry.multiplier}x.`,
-        {
-          deliveryCountMultiplierRule: entry,
-          toolArgs: parsed.value,
-          data: { deliveryCountMultiplierRule: entry }
-        }
-      );
+      return executeCountRuleTool(toolName, parsed.value, { senderId, sourceChatId });
     }
 
     return asToolError(

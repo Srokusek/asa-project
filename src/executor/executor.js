@@ -134,6 +134,12 @@ export class Executor {
           const fallbackValue = Number(this.config.planner.meanPackageValue ?? 0);
           const serverReward = Number(picked.reward ?? picked.value ?? fallbackValue);
           const pickedReward = Number.isFinite(serverReward) ? serverReward : fallbackValue;
+          const pickupPosition = {
+            x: parcel?.x ?? action?.at?.x ?? this.beliefs.me?.x,
+            y: parcel?.y ?? action?.at?.y ?? this.beliefs.me?.y
+          };
+          const pickupMultiplierAtPickup = this.beliefs.pickupMultiplierAt?.(pickupPosition) ?? 1;
+          const pickupBonusAtPickup = this.beliefs.pickupBonusAt?.(pickupPosition) ?? 0;
           if (parcel) {
             const rewardNow = Number.isFinite(Number(picked.reward ?? picked.value))
               ? pickedReward
@@ -141,11 +147,13 @@ export class Executor {
             this.beliefs.carriedParcels.set(picked.id, {
               id: picked.id,
               greenId: action?.targetId,
-              pickupSourceId: `L_${Number(parcel.x ?? action?.at?.x ?? this.beliefs.me?.x ?? 0)}_${Number(parcel.y ?? action?.at?.y ?? this.beliefs.me?.y ?? 0)}`,
+              pickupSourceId: `L_${Number(pickupPosition.x ?? 0)}_${Number(pickupPosition.y ?? 0)}`,
               valueAtPickup: rewardNow,
               pickupTime: this.beliefs.time,
               decayRate: this.config.planner.decayRate,
               confidence: parcel.confidence,
+              pickupMultiplierAtPickup,
+              pickupBonusAtPickup,
               x: parcel.x,
               y: parcel.y
             });
@@ -155,13 +163,15 @@ export class Executor {
             this.beliefs.carriedParcels.set(picked.id, {
               id: picked.id,
               greenId: action?.targetId,
-              pickupSourceId: `L_${Number(action?.at?.x ?? this.beliefs.me?.x ?? 0)}_${Number(action?.at?.y ?? this.beliefs.me?.y ?? 0)}`,
+              pickupSourceId: `L_${Number(pickupPosition.x ?? 0)}_${Number(pickupPosition.y ?? 0)}`,
               valueAtPickup: pickedReward,
               pickupTime: this.beliefs.time,
               decayRate: this.config.planner.decayRate,
               confidence: this.config.planner.minParcelConfidence,
-              x: action?.at?.x ?? this.beliefs.me?.x,
-              y: action?.at?.y ?? this.beliefs.me?.y
+              pickupMultiplierAtPickup,
+              pickupBonusAtPickup,
+              x: pickupPosition.x,
+              y: pickupPosition.y
             });
           }
         }

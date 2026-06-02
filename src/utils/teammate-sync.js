@@ -17,6 +17,24 @@ function parsePositiveMultiplier(multiplier) {
   return value;
 }
 
+function parseNonNegativeMultiplier(multiplier) {
+  const value = Number(multiplier);
+  if (!Number.isFinite(value) || value < 0) return null;
+  return value;
+}
+
+function parseSignedBonus(bonus) {
+  const value = Number(bonus);
+  if (!Number.isFinite(value)) return null;
+  return value;
+}
+
+function parsePositiveCount(count) {
+  const value = Math.round(Number(count));
+  if (!Number.isFinite(value) || value < 1) return null;
+  return value;
+}
+
 function normalizeMeta(meta, fallbackReason) {
   const input = isPlainObject(meta) ? meta : {};
   return {
@@ -25,29 +43,30 @@ function normalizeMeta(meta, fallbackReason) {
   };
 }
 
-function createTileMultiplierSyncConfig({ defaultReason, apply }) {
+function createTileNumericSyncConfig({ type, field, defaultReason, parser, apply }) {
   return {
+    type,
     build(entry) {
       const target = parseTarget(entry);
-      const multiplier = parsePositiveMultiplier(entry?.multiplier);
-      if (!target || multiplier === null) return null;
+      const value = parser(entry?.[field]);
+      if (!target || value === null) return null;
       return {
-        payload: { target, multiplier },
+        payload: { target, [field]: value },
         meta: normalizeMeta(entry, defaultReason)
       };
     },
     parse(message) {
       const target = parseTarget(message?.payload?.target);
-      const multiplier = parsePositiveMultiplier(message?.payload?.multiplier);
-      if (!target || multiplier === null) return null;
+      const value = parser(message?.payload?.[field]);
+      if (!target || value === null) return null;
       return {
-        type: String(message.type),
-        payload: { target, multiplier },
+        type,
+        payload: { target, [field]: value },
         meta: normalizeMeta(message.meta, defaultReason)
       };
     },
     apply(parsed, context) {
-      apply(parsed.payload.target, parsed.payload.multiplier, {
+      apply(parsed.payload.target, parsed.payload[field], {
         reason: parsed.meta.reason,
         sourceChatId: parsed.meta.sourceChatId,
         senderId: context.fromId ?? null
@@ -57,20 +76,97 @@ function createTileMultiplierSyncConfig({ defaultReason, apply }) {
   };
 }
 
-const teammateSyncRegistry = {
-  pickup_tile_multiplier_set: createTileMultiplierSyncConfig({
+function createCountNumericSyncConfig({ type, field, defaultReason, parser, apply }) {
+  return {
+    type,
+    build(entry) {
+      const count = parsePositiveCount(entry?.count);
+      const value = parser(entry?.[field]);
+      if (count === null || value === null) return null;
+      return {
+        payload: { count, [field]: value },
+        meta: normalizeMeta(entry, defaultReason)
+      };
+    },
+    parse(message) {
+      const count = parsePositiveCount(message?.payload?.count);
+      const value = parser(message?.payload?.[field]);
+      if (count === null || value === null) return null;
+      return {
+        type,
+        payload: { count, [field]: value },
+        meta: normalizeMeta(message.meta, defaultReason)
+      };
+    },
+    apply(parsed, context) {
+      apply(parsed.payload.count, parsed.payload[field], {
+        reason: parsed.meta.reason,
+        sourceChatId: parsed.meta.sourceChatId,
+        senderId: context.fromId ?? null
+      }, context.beliefs);
+      return true;
+    }
+  };
+}
+
+const teammateSyncHandlers = [
+  createTileNumericSyncConfig({
+    type: "pickup_tile_multiplier_set",
+    field: "multiplier",
     defaultReason: "pickup_tile_multiplier_teammate_sync",
-    apply(target, multiplier, meta, beliefs) {
-      beliefs.setPickupTileMultiplier(target, multiplier, meta);
+    parser: parsePositiveMultiplier,
+    apply(target, value, meta, beliefs) {
+      beliefs.setPickupTileMultiplier(target, value, meta);
     }
   }),
-  delivery_tile_multiplier_set: createTileMultiplierSyncConfig({
+  createTileNumericSyncConfig({
+    type: "pickup_tile_bonus_set",
+    field: "bonus",
+    defaultReason: "pickup_tile_bonus_teammate_sync",
+    parser: parseSignedBonus,
+    apply(target, value, meta, beliefs) {
+      beliefs.setPickupTileBonus(target, value, meta);
+    }
+  }),
+  createTileNumericSyncConfig({
+    type: "delivery_tile_multiplier_set",
+    field: "multiplier",
     defaultReason: "delivery_tile_multiplier_teammate_sync",
-    apply(target, multiplier, meta, beliefs) {
-      beliefs.setDeliveryTileMultiplier(target, multiplier, meta);
+    parser: parsePositiveMultiplier,
+    apply(target, value, meta, beliefs) {
+      beliefs.setDeliveryTileMultiplier(target, value, meta);
+    }
+  }),
+  createTileNumericSyncConfig({
+    type: "delivery_tile_bonus_set",
+    field: "bonus",
+    defaultReason: "delivery_tile_bonus_teammate_sync",
+    parser: parseSignedBonus,
+    apply(target, value, meta, beliefs) {
+      beliefs.setDeliveryTileBonus(target, value, meta);
+    }
+  }),
+  createCountNumericSyncConfig({
+    type: "delivery_count_multiplier_set",
+    field: "multiplier",
+    defaultReason: "delivery_count_multiplier_teammate_sync",
+    parser: parseNonNegativeMultiplier,
+    apply(count, value, meta, beliefs) {
+      beliefs.setDeliveryCountMultiplier(count, value, meta);
+    }
+  }),
+  createCountNumericSyncConfig({
+    type: "delivery_count_bonus_set",
+    field: "bonus",
+    defaultReason: "delivery_count_bonus_teammate_sync",
+    parser: parseSignedBonus,
+    apply(count, value, meta, beliefs) {
+      beliefs.setDeliveryCountBonus(count, value, meta);
     }
   })
-};
+];
+
+const teammateSyncRegistry = Object.fromEntries(teammateSyncHandlers.map((handler) => [handler.type, handler]));
 
 function normalizeEnvelope(message) {
   if (!isPlainObject(message)) return null;

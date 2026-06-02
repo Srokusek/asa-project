@@ -77,6 +77,46 @@ function chatPayload(message) {
   return { text: String(message ?? "") };
 }
 
+function buildTileNumericRuleEntry(store, position, field, value, meta, defaults, time) {
+  const cell = roundTilePosition(position);
+  const key = positionKey(cell);
+  const current = store.get(key);
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric)) return null;
+  return {
+    key,
+    entry: {
+      x: cell.x,
+      y: cell.y,
+      [field]: numeric,
+      reason: String(meta.reason ?? current?.reason ?? defaults.reason),
+      sourceChatId: Number(meta.sourceChatId ?? current?.sourceChatId ?? 0) || null,
+      senderId: meta.senderId ?? current?.senderId ?? null,
+      createdAtTick: Number(current?.createdAtTick ?? time)
+    }
+  };
+}
+
+function buildCountNumericRuleEntry(store, count, field, value, meta, defaults, time) {
+  const normalizedCount = Math.round(Number(count));
+  const numeric = Number(value);
+  if (!Number.isFinite(normalizedCount) || normalizedCount < 1) return null;
+  if (!Number.isFinite(numeric)) return null;
+  const key = String(normalizedCount);
+  const current = store.get(key);
+  return {
+    key,
+    entry: {
+      count: normalizedCount,
+      [field]: numeric,
+      reason: String(meta.reason ?? current?.reason ?? defaults.reason),
+      sourceChatId: Number(meta.sourceChatId ?? current?.sourceChatId ?? 0) || null,
+      senderId: meta.senderId ?? current?.senderId ?? null,
+      createdAtTick: Number(current?.createdAtTick ?? time)
+    }
+  };
+}
+
 export class BeliefState {
   constructor(config) {
     this.config = config; // config with parameters for scoring etc.
@@ -108,8 +148,11 @@ export class BeliefState {
     this.chatSequence = 0;
     this.forbiddenTiles = new Map(); // sticky manually forbidden tiles overlay
     this.pickupTileMultipliers = new Map(); // sticky pickup-value multiplier by tile
+    this.pickupTileBonuses = new Map(); // sticky pickup-value additive bonus by tile
     this.deliveryTileMultipliers = new Map(); // sticky delivery-value multiplier by tile
+    this.deliveryTileBonuses = new Map(); // sticky delivery-value additive bonus by tile
     this.deliveryCountMultipliers = new Map(); // sticky delivery-value multiplier by delivered package count
+    this.deliveryCountBonuses = new Map(); // sticky delivery-value additive bonus by delivered package count
     this.sensingRange = normalizeSensingRange(config?.planner?.sensingRange, 5);
     this.manualTasks = [];
     this.manualTaskSequence = 0;
@@ -200,67 +243,70 @@ export class BeliefState {
     return [...this.forbiddenTiles.values()].map((tile) => ({ ...tile }));
   }
 
+  setTileNumericRule(store, position, field, value, meta = {}, defaults = {}) {
+    const built = buildTileNumericRuleEntry(store, position, field, value, meta, defaults, this.time);
+    if (!built) return null;
+    store.set(built.key, built.entry);
+    this.pushEvent(defaults.eventType ?? "TILE_NUMERIC_RULE_SET", { ...built.entry });
+    this.markDirty();
+    return built.entry;
+  }
+
+  setCountNumericRule(store, count, field, value, meta = {}, defaults = {}) {
+    const built = buildCountNumericRuleEntry(store, count, field, value, meta, defaults, this.time);
+    if (!built) return null;
+    store.set(built.key, built.entry);
+    this.pushEvent(defaults.eventType ?? "COUNT_NUMERIC_RULE_SET", { ...built.entry });
+    this.markDirty();
+    return built.entry;
+  }
+
   setPickupTileMultiplier(position, multiplier, meta = {}) {
-    const cell = roundTilePosition(position);
-    const key = positionKey(cell);
     const factor = Number(multiplier);
     if (!Number.isFinite(factor) || factor <= 0) return null;
-    const current = this.pickupTileMultipliers.get(key);
-    const entry = {
-      x: cell.x,
-      y: cell.y,
-      multiplier: factor,
-      reason: String(meta.reason ?? current?.reason ?? "pickup_tile_multiplier"),
-      sourceChatId: Number(meta.sourceChatId ?? current?.sourceChatId ?? 0) || null,
-      senderId: meta.senderId ?? current?.senderId ?? null,
-      createdAtTick: Number(current?.createdAtTick ?? this.time)
-    };
-    this.pickupTileMultipliers.set(key, entry);
-    this.pushEvent("PICKUP_MULTIPLIER_SET", { ...entry });
-    this.markDirty();
-    return entry;
+    return this.setTileNumericRule(this.pickupTileMultipliers, position, "multiplier", factor, meta, {
+      reason: "pickup_tile_multiplier",
+      eventType: "PICKUP_MULTIPLIER_SET"
+    });
+  }
+
+  setPickupTileBonus(position, bonus, meta = {}) {
+    return this.setTileNumericRule(this.pickupTileBonuses, position, "bonus", bonus, meta, {
+      reason: "pickup_tile_bonus",
+      eventType: "PICKUP_BONUS_SET"
+    });
   }
 
   setDeliveryTileMultiplier(position, multiplier, meta = {}) {
-    const cell = roundTilePosition(position);
-    const key = positionKey(cell);
     const factor = Number(multiplier);
     if (!Number.isFinite(factor) || factor <= 0) return null;
-    const current = this.deliveryTileMultipliers.get(key);
-    const entry = {
-      x: cell.x,
-      y: cell.y,
-      multiplier: factor,
-      reason: String(meta.reason ?? current?.reason ?? "delivery_tile_multiplier"),
-      sourceChatId: Number(meta.sourceChatId ?? current?.sourceChatId ?? 0) || null,
-      senderId: meta.senderId ?? current?.senderId ?? null,
-      createdAtTick: Number(current?.createdAtTick ?? this.time)
-    };
-    this.deliveryTileMultipliers.set(key, entry);
-    this.pushEvent("DELIVERY_MULTIPLIER_SET", { ...entry });
-    this.markDirty();
-    return entry;
+    return this.setTileNumericRule(this.deliveryTileMultipliers, position, "multiplier", factor, meta, {
+      reason: "delivery_tile_multiplier",
+      eventType: "DELIVERY_MULTIPLIER_SET"
+    });
+  }
+
+  setDeliveryTileBonus(position, bonus, meta = {}) {
+    return this.setTileNumericRule(this.deliveryTileBonuses, position, "bonus", bonus, meta, {
+      reason: "delivery_tile_bonus",
+      eventType: "DELIVERY_BONUS_SET"
+    });
   }
 
   setDeliveryCountMultiplier(count, multiplier, meta = {}) {
-    const normalizedCount = Math.round(Number(count));
     const factor = Number(multiplier);
-    if (!Number.isFinite(normalizedCount) || normalizedCount < 1) return null;
     if (!Number.isFinite(factor) || factor < 0) return null;
-    const key = String(normalizedCount);
-    const current = this.deliveryCountMultipliers.get(key);
-    const entry = {
-      count: normalizedCount,
-      multiplier: factor,
-      reason: String(meta.reason ?? current?.reason ?? "delivery_count_multiplier"),
-      sourceChatId: Number(meta.sourceChatId ?? current?.sourceChatId ?? 0) || null,
-      senderId: meta.senderId ?? current?.senderId ?? null,
-      createdAtTick: Number(current?.createdAtTick ?? this.time)
-    };
-    this.deliveryCountMultipliers.set(key, entry);
-    this.pushEvent("DELIVERY_COUNT_MULTIPLIER_SET", { ...entry });
-    this.markDirty();
-    return entry;
+    return this.setCountNumericRule(this.deliveryCountMultipliers, count, "multiplier", factor, meta, {
+      reason: "delivery_count_multiplier",
+      eventType: "DELIVERY_COUNT_MULTIPLIER_SET"
+    });
+  }
+
+  setDeliveryCountBonus(count, bonus, meta = {}) {
+    return this.setCountNumericRule(this.deliveryCountBonuses, count, "bonus", bonus, meta, {
+      reason: "delivery_count_bonus",
+      eventType: "DELIVERY_COUNT_BONUS_SET"
+    });
   }
 
   pickupMultiplierAt(position) {
@@ -268,9 +314,19 @@ export class BeliefState {
     return Number(this.pickupTileMultipliers.get(key)?.multiplier ?? 1);
   }
 
+  pickupBonusAt(position) {
+    const key = positionKey(roundTilePosition(position));
+    return Number(this.pickupTileBonuses.get(key)?.bonus ?? 0);
+  }
+
   deliveryMultiplierAt(position) {
     const key = positionKey(roundTilePosition(position));
     return Number(this.deliveryTileMultipliers.get(key)?.multiplier ?? 1);
+  }
+
+  deliveryBonusAt(position) {
+    const key = positionKey(roundTilePosition(position));
+    return Number(this.deliveryTileBonuses.get(key)?.bonus ?? 0);
   }
 
   deliveryCountMultiplierFor(count) {
@@ -278,6 +334,13 @@ export class BeliefState {
     if (!Number.isFinite(normalizedCount) || normalizedCount < 1) return 1;
     const key = String(normalizedCount);
     return Number(this.deliveryCountMultipliers.get(key)?.multiplier ?? 1);
+  }
+
+  deliveryCountBonusFor(count) {
+    const normalizedCount = Math.round(Number(count));
+    if (!Number.isFinite(normalizedCount) || normalizedCount < 1) return 0;
+    const key = String(normalizedCount);
+    return Number(this.deliveryCountBonuses.get(key)?.bonus ?? 0);
   }
 
   clearExpiredManualTasks() {
@@ -510,8 +573,11 @@ export class BeliefState {
     this.tiles.clear();
     this.forbiddenTiles.clear();
     this.pickupTileMultipliers.clear();
+    this.pickupTileBonuses.clear();
     this.deliveryTileMultipliers.clear();
+    this.deliveryTileBonuses.clear();
     this.deliveryCountMultipliers.clear();
+    this.deliveryCountBonuses.clear();
 
     for (const tile of tiles) { // iteratively add tiles along with their type
       const position = roundTilePosition(tile);

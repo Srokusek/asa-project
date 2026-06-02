@@ -8,6 +8,23 @@ import {
   shortestGridPath
 } from "../path/pathfinder.js";
 import { buildMapProfile } from "../path/grid-utils.js";
+import {
+  adjustDeliveredBaseValue,
+  adjustPickupBaseValue,
+  deliveryBonusAt,
+  deliveryCountBonusAt,
+  deliveryCountMultiplierAt,
+  deliveryMultiplierAt,
+  pickupMultiplierAt
+} from "./reward-overlays.js";
+
+export {
+  deliveryBonusAt,
+  deliveryCountBonusAt,
+  deliveryCountMultiplierAt,
+  deliveryMultiplierAt,
+  pickupMultiplierAt
+} from "./reward-overlays.js";
 
 const EPSILON = 1e-9;
 
@@ -70,28 +87,6 @@ export function packageDecayRate(green, fallbackRate) {
   return asNumber(green.package?.decayRate, fallbackRate);
 }
 
-export function pickupMultiplierAt(state, position) {
-  const key = positionKey(copyPosition(position));
-  const raw = state.pickupTileMultipliers?.[key];
-  const value = asNumber(raw?.multiplier ?? raw, 1);
-  return Number.isFinite(value) && value > 0 ? value : 1;
-}
-
-export function deliveryMultiplierAt(state, position) {
-  const key = positionKey(copyPosition(position));
-  const raw = state.deliveryTileMultipliers?.[key];
-  const value = asNumber(raw?.multiplier ?? raw, 1);
-  return Number.isFinite(value) && value > 0 ? value : 1;
-}
-
-export function deliveryCountMultiplierAt(state, count) {
-  const normalizedCount = Math.round(Number(count));
-  if (!Number.isFinite(normalizedCount) || normalizedCount < 1) return 1;
-  const raw = state.deliveryCountMultipliers?.[String(normalizedCount)];
-  const value = asNumber(raw?.multiplier ?? raw, 1);
-  return Number.isFinite(value) && value >= 0 ? value : 1;
-}
-
 function bestDeliveryMultiplier(state) {
   if (!Array.isArray(state.reds) || state.reds.length === 0) return 1;
   let best = 1;
@@ -99,6 +94,15 @@ function bestDeliveryMultiplier(state) {
     best = Math.max(best, deliveryMultiplierAt(state, red.position));
   }
   return best;
+}
+
+function bestDeliveryBonus(state) {
+  if (!Array.isArray(state.reds) || state.reds.length === 0) return 0;
+  let best = Number.NEGATIVE_INFINITY;
+  for (const red of state.reds) {
+    best = Math.max(best, deliveryBonusAt(state, red.position));
+  }
+  return Number.isFinite(best) ? best : 0;
 }
 
 export function hasAvailablePackage(green, config) {
@@ -159,8 +163,14 @@ export function currentGreenValue(state, green, config) {
   const decayRate = packageDecayRate(green, config.decayRate);
   const currentValue = packageReward(green, config.meanPackageValue);
   const deliveryAwareValue = Math.max(0, currentValue - decayRate * etaTotal);
-  const adjustedValue = deliveryAwareValue * pickupMultiplierAt(state, green.position) * bestDeliveryMultiplier(state);
-  return packageConfidence(green) * winProbability(state, green, etaMe, config) * adjustedValue;
+  const pickupAdjustedValue = packageConfidence(green) * adjustPickupBaseValue(deliveryAwareValue, state, green.position);
+  const adjustedValue = adjustDeliveredBaseValue(pickupAdjustedValue, state, green.position, 1, {
+    deliveryMultiplier: bestDeliveryMultiplier(state),
+    deliveryBonus: bestDeliveryBonus(state),
+    countMultiplier: deliveryCountMultiplierAt(state, 1),
+    countBonus: deliveryCountBonusAt(state, 1)
+  });
+  return winProbability(state, green, etaMe, config) * adjustedValue;
 }
 
 export function computeGreenScore(state, green, config) {

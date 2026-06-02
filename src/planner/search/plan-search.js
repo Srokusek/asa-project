@@ -4,17 +4,22 @@ import { getOracleEdge } from "../path/distance-oracle.js";
 import { distanceFromAnyTileToRed } from "../path/red-distance-cache.js";
 import { shortestGridPath } from "../path/pathfinder.js";
 import {
-  deliveryCountMultiplierAt,
-  deliveryMultiplierAt,
   hasAvailablePackage,
   nearestRedDistance,
   packageConfidence,
   packageDecayRate,
   packageReward,
-  pickupMultiplierAt,
   rankingDistance,
   winProbability
 } from "../scoring/green-scorer.js";
+import {
+  adjustDeliveredBaseValue,
+  adjustPickupBaseValue,
+  deliveryBonusAt,
+  deliveryCountBonusAt,
+  deliveryCountMultiplierAt,
+  deliveryMultiplierAt
+} from "../scoring/reward-overlays.js";
 
 const EPSILON = 1e-9;
 
@@ -38,9 +43,15 @@ export function initialPlan(state) {
     greenId: pkg.greenId ?? "CARRIED",
     pickupSourceId: pkg.pickupSourceId ?? locationAnchorId(pkg.pickupPosition ?? { x: 0, y: 0 }),
     packageId: String(pkg.packageId ?? pkg.id),
-    valueAtPickup:
-      asNumber(pkg.valueAtPickup ?? pkg.value, 0) *
-      pickupMultiplierAt(state, pkg.pickupPosition ?? { x: 0, y: 0 }),
+    valueAtPickup: adjustPickupBaseValue(
+      asNumber(pkg.valueAtPickup ?? pkg.value, 0),
+      state,
+      pkg.pickupPosition ?? { x: 0, y: 0 },
+      {
+        multiplier: pkg.pickupMultiplierAtPickup,
+        bonus: pkg.pickupBonusAtPickup
+      }
+    ),
     pickupTime: asNumber(pkg.pickupTime, asNumber(state.time, 0)),
     decayRate: asNumber(pkg.decayRate, state.params?.decayRate ?? DEFAULT_PARAMS.decayRate),
     confidence: clamp(asNumber(pkg.confidence, 1), 0, 1),
@@ -65,8 +76,11 @@ export function packageValueAtPickup(state, green, pickupTime, config) {
   const currentValue = packageReward(green, config.meanPackageValue);
   const decayRate = packageDecayRate(green, config.decayRate);
   const elapsed = Math.max(0, pickupTime - asNumber(state.time, 0));
-  const pickupMultiplier = pickupMultiplierAt(state, green.position);
-  return packageConfidence(green) * Math.max(0, currentValue - decayRate * elapsed) * pickupMultiplier;
+  return packageConfidence(green) * adjustPickupBaseValue(
+    Math.max(0, currentValue - decayRate * elapsed),
+    state,
+    green.position
+  );
 }
 
 export function beatsEnemiesToGreen(state, green, etaMe, config) {
@@ -121,13 +135,11 @@ export function extendToGreen(plan, green, state, oracle, config) {
 }
 
 export function computeDeliveredValue(pickedPackages, deliveryTime, deliveryPosition, state) {
-  const deliveryMultiplier = deliveryMultiplierAt(state, deliveryPosition);
-  const countMultiplier = deliveryCountMultiplierAt(state, pickedPackages.length);
-  const effectiveMultiplier = deliveryMultiplier * countMultiplier;
-  return pickedPackages.reduce((sum, pkg) => {
+  const baseDeliveredValue = pickedPackages.reduce((sum, pkg) => {
     const elapsed = Math.max(0, deliveryTime - pkg.pickupTime);
-    return sum + Math.max(0, pkg.valueAtPickup - pkg.decayRate * elapsed) * effectiveMultiplier;
+    return sum + Math.max(0, pkg.valueAtPickup - pkg.decayRate * elapsed);
   }, 0);
+  return adjustDeliveredBaseValue(baseDeliveredValue, state, deliveryPosition, pickedPackages.length);
 }
 
 export function extendToRed(plan, red, _state, oracle, _config) {
@@ -245,10 +257,12 @@ export function betterPlan(a, b, state, oracle, config) {
   return b.moveCost < a.moveCost ? b : a;
 }
 
-function hasExplicitDeliveryMultiplier(state, position) {
+function hasExplicitDeliveryAdjustment(state, position) {
   const key = positionKey(position);
-  const raw = state.deliveryTileMultipliers?.[key];
-  return raw !== undefined && raw !== null;
+  return (
+    state.deliveryTileMultipliers?.[key] !== undefined ||
+    state.deliveryTileBonuses?.[key] !== undefined
+  );
 }
 
 function sourceForRedShortlist(plan, oracle) {
@@ -311,7 +325,7 @@ export function selectRedCandidatesForPlan(plan, reds, oracle, state, config) {
   const ranked = [];
 
   for (const red of reds) {
-    if (hasExplicitDeliveryMultiplier(state, red.position)) {
+    if (hasExplicitDeliveryAdjustment(state, red.position)) {
       mandatory.push(red);
       continue;
     }
@@ -325,6 +339,7 @@ export function selectRedCandidatesForPlan(plan, reds, oracle, state, config) {
     (a, b) =>
       a.distance - b.distance ||
       deliveryMultiplierAt(state, b.red.position) - deliveryMultiplierAt(state, a.red.position) ||
+      deliveryBonusAt(state, b.red.position) - deliveryBonusAt(state, a.red.position) ||
       a.red.id.localeCompare(b.red.id)
   );
 
