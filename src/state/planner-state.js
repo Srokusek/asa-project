@@ -10,6 +10,48 @@ function tileType(tile) {
   return String(tile && typeof tile === "object" ? tile.type ?? "0" : tile ?? "0");
 }
 
+function activeParcelHandoffTask(beliefs) {
+  if (!beliefs?.parcelHandoffTask?.target) return null;
+  const zoneTiles = Array.isArray(beliefs.parcelHandoffTask.zoneTiles) && beliefs.parcelHandoffTask.zoneTiles.length > 0
+    ? beliefs.parcelHandoffTask.zoneTiles.map((tile) => roundTilePosition(tile))
+    : [roundTilePosition(beliefs.parcelHandoffTask.target)];
+  return {
+    ...beliefs.parcelHandoffTask,
+    target: roundTilePosition(beliefs.parcelHandoffTask.target),
+    zoneTiles,
+    ignoredParcelIds: Array.isArray(beliefs.parcelHandoffTask.ignoredParcelIds)
+      ? [...new Set(beliefs.parcelHandoffTask.ignoredParcelIds.map((id) => String(id)).filter(Boolean))]
+      : []
+  };
+}
+
+function isBdiHandoffPickupSuppressed(parcel, handoffTask, config) {
+  if (config?.agentType !== "bdi" || !handoffTask || !parcel) return false;
+  return (handoffTask.zoneTiles ?? []).some((tile) => positionKey(parcel) === positionKey(tile));
+}
+
+function occupiedHandoffZoneKeys(beliefs, handoffTask, config) {
+  if (!handoffTask) return new Set();
+  const occupied = new Set();
+  for (const agent of beliefs.agents.values()) {
+    if (!agent || agent.id === beliefs.me?.id) continue;
+    if (Number(agent.confidence ?? 0) < Number(config?.planner?.minParcelConfidence ?? 0)) continue;
+    const key = positionKey(roundTilePosition(agent));
+    if ((handoffTask.zoneTiles ?? []).some((tile) => positionKey(tile) === key)) {
+      occupied.add(key);
+    }
+  }
+  return occupied;
+}
+
+function preferredHandoffZoneTiles(beliefs, handoffTask, config) {
+  const zoneTiles = (handoffTask?.zoneTiles ?? []).map((tile) => ({ ...tile }));
+  if (zoneTiles.length === 0) return [];
+  const occupiedKeys = occupiedHandoffZoneKeys(beliefs, handoffTask, config);
+  const freeTiles = zoneTiles.filter((tile) => !occupiedKeys.has(positionKey(tile)));
+  return freeTiles.length > 0 ? freeTiles : zoneTiles;
+}
+
 function parcelAvailableForPlanning(beliefs, parcel, config) {
   if (!parcel || parcel.carriedBy) return false;
   if (parcel.confidence < config.planner.minParcelConfidence) return false;
@@ -56,10 +98,15 @@ export function buildPlannerState(beliefs, config) {
   const reds = [];
   const parcelsByPosition = new Map();
   const greenPositions = new Set();
+  const handoffTask = activeParcelHandoffTask(beliefs);
+  const ignoreDroppedHandoffParcels = config?.agentType === "bdi" && handoffTask;
+  const preferredHandoffTiles = preferredHandoffZoneTiles(beliefs, handoffTask, config);
 
   //get the list of parcels from beliefs,
   // includes information such as location, reward, timeLastSeen, carriedBy, confidence etc.
   for (const parcel of beliefs.parcels.values()) {
+    if (ignoreDroppedHandoffParcels && beliefs.shouldIgnoreParcelForHandoff?.(parcel.id)) continue;
+    if (isBdiHandoffPickupSuppressed(parcel, handoffTask, config)) continue;
     const key = positionKey(parcel);
     const list = parcelsByPosition.get(key) ?? [];
     list.push(parcel);
@@ -109,6 +156,8 @@ export function buildPlannerState(beliefs, config) {
   // parcels at green tiles!
   for (const parcel of beliefs.parcels.values()) {
     // ignore parcels carried by other agents or with low confidence
+    if (ignoreDroppedHandoffParcels && beliefs.shouldIgnoreParcelForHandoff?.(parcel.id)) continue;
+    if (isBdiHandoffPickupSuppressed(parcel, handoffTask, config)) continue;
     if (!parcelAvailableForPlanning(beliefs, parcel, config)) continue;
 
     const position = { x: Number(parcel.x), y: Number(parcel.y) };
@@ -172,7 +221,7 @@ export function buildPlannerState(beliefs, config) {
   }));
 
   // return parsed map with all of the relevant information normalized
-  return parseMap({
+  const planningState = parseMap({
     width,
     height,
     grid,
@@ -216,4 +265,39 @@ export function buildPlannerState(beliefs, config) {
       sensingRange: beliefs.sensingRange
     }
   });
+
+  if (handoffTask && config?.agentType === "llm") {
+    planningState.greens = preferredHandoffTiles.map((tile) => {
+      const handoffBest = bestParcelAt(beliefs, parcelsByPosition.get(positionKey(tile)) ?? [], config);
+      return {
+        id: `HANDOFF_GREEN_${tile.x}_${tile.y}`,
+        position: { ...tile },
+        package: handoffBest
+          ? {
+              id: handoffBest.parcel.id,
+              value: handoffBest.reward,
+              reward: handoffBest.reward,
+              carriedBy: handoffBest.parcel.carriedBy,
+              decayRate: config.planner.decayRate,
+              confidence: handoffBest.parcel.confidence,
+              lastSeenTime: handoffBest.parcel.lastSeenTime
+            }
+          : null
+      };
+    });
+  }
+
+  if (handoffTask && config?.agentType === "bdi") {
+    planningState.reds = preferredHandoffTiles.map((tile) => ({
+      id: `HANDOFF_RED_${tile.x}_${tile.y}`,
+      position: { ...tile }
+    }));
+  }
+
+  Object.defineProperty(planningState, "__plannerStateNormalized", {
+    value: true,
+    enumerable: false
+  });
+
+  return planningState;
 }

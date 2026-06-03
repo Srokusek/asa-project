@@ -234,6 +234,34 @@ export function createToolExecutor({ beliefs, executor, logger, config }) {
     return { ok: true };
   }
 
+  function nearestWalkableTileFromSelf() {
+    const selfPosition = beliefs.me ? parseTargetValue(beliefs.me) : null;
+    if (!selfPosition) {
+      return { ok: false, reason: "missing_self_position" };
+    }
+
+    const candidates = [];
+    for (let y = 0; y < beliefs.height; y += 1) {
+      for (let x = 0; x < beliefs.width; x += 1) {
+        const candidate = { x, y };
+        if (!validateWalkableTarget(candidate).ok) continue;
+        candidates.push(candidate);
+      }
+    }
+
+    if (candidates.length === 0) {
+      return { ok: false, reason: "no_walkable_tiles" };
+    }
+
+    candidates.sort((a, b) =>
+      manhattan(a, selfPosition) - manhattan(b, selfPosition) ||
+      a.y - b.y ||
+      a.x - b.x
+    );
+
+    return { ok: true, value: candidates[0] };
+  }
+
   function resolveToolTarget(args, { defaultScope, allowedScopes, rejectForbidden = true } = {}) {
     const hasTarget = args?.target !== undefined;
     const hasSelector = args?.selector !== undefined;
@@ -337,6 +365,34 @@ export function createToolExecutor({ beliefs, executor, logger, config }) {
         target,
         maxDistance,
         reason: String(args?.reason ?? "team_rendezvous_instruction")
+      }
+    };
+  }
+
+  function validateParcelHandoffArgs(args) {
+    if (args?.target !== undefined) {
+      const target = parseTargetValue(args.target);
+      if (!target) return { ok: false, reason: "invalid_coordinates" };
+      const validation = validateTargetForScope(target, "walkable");
+      if (!validation.ok) return validation;
+      return {
+        ok: true,
+        value: {
+          target,
+          autoSelected: false,
+          reason: String(args?.reason ?? "parcel_handoff_instruction")
+        }
+      };
+    }
+
+    const autoTarget = nearestWalkableTileFromSelf();
+    if (!autoTarget.ok) return autoTarget;
+    return {
+      ok: true,
+      value: {
+        target: autoTarget.value,
+        autoSelected: true,
+        reason: String(args?.reason ?? "parcel_handoff_instruction")
       }
     };
   }
@@ -782,6 +838,56 @@ export function createToolExecutor({ beliefs, executor, logger, config }) {
     );
   }
 
+  async function executeParcelHandoffTool(parsedValue, { senderId, sourceChatId }) {
+    const toolName = "set_parcel_handoff_task";
+    if (!teammateId) {
+      return asToolError(toolName, "Parcel handoff rejected: missing_teammate_id.", {
+        toolArgs: parsedValue,
+        data: { reason: "missing_teammate_id" }
+      });
+    }
+
+    const validation = validateParcelHandoffArgs(parsedValue);
+    if (!validation.ok) {
+      return asToolError(toolName, `Parcel handoff rejected: ${validation.reason}.`, {
+        toolArgs: parsedValue,
+        data: { reason: validation.reason, details: validation.details ?? null }
+      });
+    }
+
+    const sourceChat = Number(sourceChatId ?? 0) || null;
+    const entry = beliefs.setParcelHandoffTask(validation.value.target, {
+      reason: validation.value.reason,
+      sourceChatId: sourceChat,
+      senderId
+    });
+    if (!entry) {
+      return asToolError(toolName, "Parcel handoff rejected: invalid_payload.", {
+        toolArgs: parsedValue,
+        data: { reason: "invalid_payload" }
+      });
+    }
+
+    await syncToolResultWithTeammate({
+      type: "parcel_handoff_set",
+      entry
+    });
+
+    return asToolSuccess(
+      toolName,
+      `Parcel handoff set at (${entry.target.x},${entry.target.y}).`,
+      {
+        parcelHandoffTask: entry,
+        toolArgs: parsedValue,
+        data: {
+          parcelHandoffTask: entry,
+          target: entry.target,
+          autoSelected: validation.value.autoSelected
+        }
+      }
+    );
+  }
+
   async function executeToolCall(call, { senderId, sourceChatId }) {
     const toolName = String(call?.function?.name ?? "").trim();
     const rawArgs = call?.function?.arguments;
@@ -877,6 +983,18 @@ export function createToolExecutor({ beliefs, executor, logger, config }) {
         beliefs.advanceTimeFromClock();
       }
       return executeTeamRendezvousTool(parsed.value, { senderId, sourceChatId });
+    }
+
+    if (toolName === "set_parcel_handoff_task") {
+      const parsed = parseJsonArguments(
+        rawArgs,
+        "I could not parse the parcel handoff request. Please provide an optional tile like (x,y)."
+      );
+      if (!parsed.ok) return asToolError(toolName, parsed.error);
+      if (typeof beliefs.advanceTimeFromClock === "function") {
+        beliefs.advanceTimeFromClock();
+      }
+      return executeParcelHandoffTool(parsed.value, { senderId, sourceChatId });
     }
 
     if (toolName === "set_forbidden_tile") {

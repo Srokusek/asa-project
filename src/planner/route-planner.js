@@ -346,7 +346,7 @@ function buildUnifiedPickupDeliveryPlan(state, profile, config, greenScores, can
 }
 
 export function replan(state) {
-  const planningState = parseMap(state);
+  const planningState = state?.__plannerStateNormalized ? state : parseMap(state);
   const profile = buildMapProfile(planningState);
   Object.defineProperty(planningState, "__mapProfile", { value: profile, enumerable: false });
   Object.defineProperty(planningState, "__rankingDistanceCache", { value: new Map(), enumerable: false });

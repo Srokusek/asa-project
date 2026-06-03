@@ -181,8 +181,51 @@ function createManualTaskSyncConfig() {
   };
 }
 
+function createParcelHandoffSyncConfig() {
+  const type = "parcel_handoff_set";
+  const defaultReason = "parcel_handoff_teammate_sync";
+  return {
+    type,
+    build(entry) {
+      const target = parseTarget(entry?.target ?? entry);
+      if (!target) return null;
+      return {
+        payload: {
+          target,
+          reason: String(entry?.reason ?? defaultReason)
+        },
+        meta: normalizeMeta(entry, defaultReason)
+      };
+    },
+    parse(message) {
+      const target = parseTarget(message?.payload?.target);
+      if (!target) return null;
+      return {
+        type,
+        payload: {
+          target,
+          reason: String(message?.payload?.reason ?? defaultReason)
+        },
+        meta: normalizeMeta(message.meta, defaultReason)
+      };
+    },
+    apply(parsed, context) {
+      context.beliefs.setParcelHandoffTask(
+        parsed.payload.target,
+        {
+          reason: parsed.payload.reason,
+          sourceChatId: parsed.meta.sourceChatId,
+          senderId: context.fromId ?? null
+        }
+      );
+      return true;
+    }
+  };
+}
+
 const teammateSyncHandlers = [
   createManualTaskSyncConfig(),
+  createParcelHandoffSyncConfig(),
   createTileNumericSyncConfig({
     type: "pickup_tile_multiplier_set",
     field: "multiplier",

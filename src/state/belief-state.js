@@ -45,6 +45,51 @@ function normalizeTileRecord(tile) {
   return normalized;
 }
 
+function tileRecordIsWalkable(tile) {
+  if (!tile) return true;
+  const type = normalizeTileType(tile.type ?? tile.kind ?? tile.tile ?? tile);
+  if (type === "0") return false;
+  if (tile.blocked === true) return false;
+  if (tile.walkable === false) return false;
+  return true;
+}
+
+function compareParcelHandoffZone(center, a, b) {
+  const centerDistanceA = Math.abs(a.x - center.x) + Math.abs(a.y - center.y);
+  const centerDistanceB = Math.abs(b.x - center.x) + Math.abs(b.y - center.y);
+  return centerDistanceA - centerDistanceB || a.y - b.y || a.x - b.x;
+}
+
+function buildParcelHandoffZoneTiles(beliefs, center) {
+  const zoneTiles = [];
+  const seen = new Set();
+  const hasKnownBounds = Number(beliefs?.width ?? 0) > 0 && Number(beliefs?.height ?? 0) > 0;
+  const maxX = Math.max(0, Number(beliefs?.width ?? 0) - 1);
+  const maxY = Math.max(0, Number(beliefs?.height ?? 0) - 1);
+
+  for (let dy = -1; dy <= 1; dy += 1) {
+    for (let dx = -1; dx <= 1; dx += 1) {
+      const candidate = { x: center.x + dx, y: center.y + dy };
+      if (candidate.x < 0 || candidate.y < 0) continue;
+      if (hasKnownBounds && (candidate.x < 0 || candidate.y < 0 || candidate.x > maxX || candidate.y > maxY)) {
+        continue;
+      }
+      const key = positionKey(candidate);
+      if (seen.has(key)) continue;
+      const tile = beliefs?.tiles?.get?.(key) ?? null;
+      if (!tileRecordIsWalkable(tile)) continue;
+      seen.add(key);
+      zoneTiles.push(candidate);
+    }
+  }
+
+  if (zoneTiles.length === 0) {
+    return [{ ...center }];
+  }
+
+  return zoneTiles.sort((a, b) => compareParcelHandoffZone(center, a, b));
+}
+
 function inferDimensions(width, height, tiles) {
   let maxX = -1;
   let maxY = -1;
@@ -117,6 +162,30 @@ function buildCountNumericRuleEntry(store, count, field, value, meta, defaults, 
   };
 }
 
+function buildParcelHandoffEntry(beliefs, target, meta, current, time) {
+  const cell = roundTilePosition(target);
+  if (!Number.isFinite(cell.x) || !Number.isFinite(cell.y)) return null;
+  const preserveIgnoredIds =
+    current &&
+    positionKey(current.target ?? {}) === positionKey(cell) &&
+    meta.ignoredParcelIds === undefined;
+  const zoneTiles = buildParcelHandoffZoneTiles(beliefs, cell);
+  const ignoredParcelIds = Array.isArray(meta.ignoredParcelIds)
+    ? [...new Set(meta.ignoredParcelIds.map((id) => String(id)).filter(Boolean))]
+    : preserveIgnoredIds
+      ? [...new Set((current?.ignoredParcelIds ?? []).map((id) => String(id)).filter(Boolean))]
+      : [];
+  return {
+    target: cell,
+    zoneTiles,
+    reason: String(meta.reason ?? current?.reason ?? "parcel_handoff_task"),
+    sourceChatId: Number(meta.sourceChatId ?? current?.sourceChatId ?? 0) || null,
+    senderId: meta.senderId ?? current?.senderId ?? null,
+    createdAtTick: Number(time),
+    ignoredParcelIds
+  };
+}
+
 export class BeliefState {
   constructor(config) {
     this.config = config; // config with parameters for scoring etc.
@@ -154,6 +223,7 @@ export class BeliefState {
     this.deliveryCountMultipliers = new Map(); // sticky delivery-value multiplier by delivered package count
     this.deliveryCountBonuses = new Map(); // sticky delivery-value additive bonus by delivered package count
     this.deliveryValueThresholdRule = null; // sticky delivery-value multiplier rule by per-parcel delivered value
+    this.parcelHandoffTask = null; // sticky cross-agent handoff target plus ignored dropped parcel ids
     this.sensingRange = normalizeSensingRange(config?.planner?.sensingRange, 5);
     this.manualTasks = [];
     this.manualTaskSequence = 0;
@@ -254,6 +324,97 @@ export class BeliefState {
 
   clearAllManualTasks() {
     return this.clearManualTasks(() => true);
+  }
+
+  setParcelHandoffTask(target, meta = {}) {
+    const entry = buildParcelHandoffEntry(this, target, meta, this.parcelHandoffTask, this.time);
+    if (!entry) return null;
+    this.parcelHandoffTask = entry;
+    this.pushEvent("PARCEL_HANDOFF_TASK_SET", {
+      ...entry,
+      target: { ...entry.target },
+      zoneTiles: entry.zoneTiles.map((tile) => ({ ...tile })),
+      ignoredParcelIds: [...entry.ignoredParcelIds]
+    });
+    this.markDirty();
+    return {
+      ...entry,
+      target: { ...entry.target },
+      zoneTiles: entry.zoneTiles.map((tile) => ({ ...tile })),
+      ignoredParcelIds: [...entry.ignoredParcelIds]
+    };
+  }
+
+  clearParcelHandoffTask(reason = "manual_clear") {
+    if (!this.parcelHandoffTask) return false;
+    const cleared = this.parcelHandoffTask;
+    this.parcelHandoffTask = null;
+    this.pushEvent("PARCEL_HANDOFF_TASK_CLEARED", {
+      target: { ...cleared.target },
+      zoneTiles: (cleared.zoneTiles ?? []).map((tile) => ({ ...tile })),
+      reason: String(reason),
+      sourceReason: cleared.reason,
+      ignoredParcelIds: [...(cleared.ignoredParcelIds ?? [])]
+    });
+    this.markDirty();
+    return true;
+  }
+
+  noteParcelHandoffDroppedParcelIds(parcelIds = []) {
+    if (!this.parcelHandoffTask) return null;
+    const normalizedIds = [...new Set(parcelIds.map((id) => String(id ?? "")).filter(Boolean))];
+    if (normalizedIds.length === 0) return {
+      ...this.parcelHandoffTask,
+      target: { ...this.parcelHandoffTask.target },
+      zoneTiles: (this.parcelHandoffTask.zoneTiles ?? []).map((tile) => ({ ...tile })),
+      ignoredParcelIds: [...(this.parcelHandoffTask.ignoredParcelIds ?? [])]
+    };
+
+    const ignored = new Set(this.parcelHandoffTask.ignoredParcelIds ?? []);
+    let changed = false;
+    for (const id of normalizedIds) {
+      if (ignored.has(id)) continue;
+      ignored.add(id);
+      changed = true;
+    }
+    if (!changed) {
+      return {
+        ...this.parcelHandoffTask,
+        target: { ...this.parcelHandoffTask.target },
+        zoneTiles: (this.parcelHandoffTask.zoneTiles ?? []).map((tile) => ({ ...tile })),
+        ignoredParcelIds: [...ignored]
+      };
+    }
+
+    this.parcelHandoffTask = {
+      ...this.parcelHandoffTask,
+      target: { ...this.parcelHandoffTask.target },
+      zoneTiles: (this.parcelHandoffTask.zoneTiles ?? []).map((tile) => ({ ...tile })),
+      ignoredParcelIds: [...ignored]
+    };
+    this.pushEvent("PARCEL_HANDOFF_DROPPED_IDS_ADDED", {
+      target: { ...this.parcelHandoffTask.target },
+      zoneTiles: (this.parcelHandoffTask.zoneTiles ?? []).map((tile) => ({ ...tile })),
+      ignoredParcelIds: [...this.parcelHandoffTask.ignoredParcelIds]
+    });
+    this.markDirty();
+    return {
+      ...this.parcelHandoffTask,
+      target: { ...this.parcelHandoffTask.target },
+      zoneTiles: (this.parcelHandoffTask.zoneTiles ?? []).map((tile) => ({ ...tile })),
+      ignoredParcelIds: [...this.parcelHandoffTask.ignoredParcelIds]
+    };
+  }
+
+  shouldIgnoreParcelForHandoff(parcelId) {
+    if (!this.parcelHandoffTask) return false;
+    return (this.parcelHandoffTask.ignoredParcelIds ?? []).includes(String(parcelId ?? ""));
+  }
+
+  isParcelHandoffTile(position) {
+    if (!this.parcelHandoffTask || !position) return false;
+    const key = positionKey(roundTilePosition(position));
+    return (this.parcelHandoffTask.zoneTiles ?? []).some((tile) => positionKey(tile) === key);
   }
 
   setForbiddenTile(position, meta = {}) {
@@ -637,6 +798,7 @@ export class BeliefState {
     this.deliveryCountMultipliers.clear();
     this.deliveryCountBonuses.clear();
     this.deliveryValueThresholdRule = null;
+    this.parcelHandoffTask = null;
 
     for (const tile of tiles) { // iteratively add tiles along with their type
       const position = roundTilePosition(tile);

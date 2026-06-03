@@ -81,6 +81,22 @@ export const teamRendezvousTool = {
   }
 };
 
+export const parcelHandoffTool = {
+  type: "function",
+  function: {
+    name: "set_parcel_handoff_task",
+    description: "Create a sticky parcel handoff task shared across the LLM agent and its BDI teammate. If target is omitted, auto-pick the nearest walkable tile to the LLM agent. The handoff uses the walkable tiles in the 3x3 zone centered on that tile. The LLM agent will treat only that zone as checkpoint candidates and the BDI teammate will treat only that zone as drop tiles until /clear.",
+    parameters: {
+      type: "object",
+      properties: {
+        target: coordinateTargetSchema,
+        reason: { type: "string", description: "Short operational reason for the parcel handoff." }
+      },
+      additionalProperties: false
+    }
+  }
+};
+
 export const calculateExpressionsTool = {
   type: "function",
   function: {
@@ -273,6 +289,7 @@ export const chatTools = [
   calculateExpressionsTool,
   explicitPlanTool,
   teamRendezvousTool,
+  parcelHandoffTool,
   setForbiddenTileTool,
   setPickupTileMultiplierTool,
   setPickupTileBonusTool,

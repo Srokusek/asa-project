@@ -63,15 +63,17 @@ function observedSensingRange(config) {
   return normalizeSensingRange(config?.GAME?.player?.observation_distance, null);
 }
 
-function clearManualTasks(beliefs, fromId, logger) {
+function clearManualState(beliefs, fromId, logger) {
   const removed = beliefs.clearAllManualTasks?.() ?? [];
-  if (removed.length > 0) {
-    logger?.info?.("manual tasks cleared", {
+  const handoffCleared = beliefs.clearParcelHandoffTask?.("teammate_clear") ?? false;
+  if (removed.length > 0 || handoffCleared) {
+    logger?.info?.("manual state cleared", {
       fromId: fromId ?? null,
-      taskIds: removed.map((task) => task.id)
+      taskIds: removed.map((task) => task.id),
+      parcelHandoffCleared: Boolean(handoffCleared)
     });
   }
-  return removed.length > 0;
+  return removed.length > 0 || handoffCleared;
 }
 
 export function registerSdkListeners(socket, beliefs, config, logger = null) {
@@ -134,7 +136,7 @@ export function registerSdkListeners(socket, beliefs, config, logger = null) {
     if (config?.agentType === "bdi") {
       if (!teammateId || fromId !== teammateId) return;
       if (text === "/clear") {
-        clearManualTasks(beliefs, normalized.fromId ?? null, logger);
+        clearManualState(beliefs, normalized.fromId ?? null, logger);
         return;
       }
       applyTeammateSyncMessage({
@@ -147,12 +149,13 @@ export function registerSdkListeners(socket, beliefs, config, logger = null) {
     }
 
     if (teammateId && fromId === teammateId && text === "/clear") {
-      clearManualTasks(beliefs, normalized.fromId ?? null, logger);
+      clearManualState(beliefs, normalized.fromId ?? null, logger);
       return;
     }
 
     if (!config?.llm?.chatEnabled) return;
-    if (fromId !== String(config.llm.adminId)) return;
-    beliefs.pushChatMessage(normalized);
+    if (fromId === String(config.llm.adminId) || fromId === teammateId) {;
+    beliefs.pushChatMessage(normalized)
+    } return;
   });
 }

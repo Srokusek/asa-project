@@ -199,9 +199,13 @@ export class Executor {
     try {
       const result = selected ? await this.socket.emitPutdown(selected) : await this.socket.emitPutdown();
       if (Array.isArray(result) && result.length > 0) {
+        const droppedParcelIds = result.map((parcel) => String(parcel?.id ?? "")).filter(Boolean);
         for (const delivered of result) {
           this.beliefs.parcels.delete(delivered.id);
           this.beliefs.carriedParcels.delete(delivered.id);
+        }
+        if (this.config?.agentType === "bdi" && droppedParcelIds.length > 0) {
+          this.beliefs.noteParcelHandoffDroppedParcelIds?.(droppedParcelIds);
         }
         if (this.beliefs.me) {
           this.beliefs.lastDeliveryPosition = { x: this.beliefs.me.x, y: this.beliefs.me.y };
