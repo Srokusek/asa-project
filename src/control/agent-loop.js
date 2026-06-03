@@ -124,6 +124,10 @@ function isStartOnlyPlan(routePlan, executablePlan) {
   );
 }
 
+function isWaitingManualTask(task) {
+  return task?.priority === "sticky_until_done" && task?.payload?.waitAtTarget === true;
+}
+
 function summarizeEvents(events = []) {
   // summarize events from event queue (such as failed movement, new package observation etc.)
   const counts = new Map();
@@ -433,9 +437,20 @@ export class AgentLoop {
   }
 
   isInvalidTargetZeroAction(routePlan = this.currentRoutePlan, executablePlan = this.currentExecutablePlan) {
+    if (this.isManualWaitPlan(routePlan, executablePlan)) return false;
     if (!TARGET_PLAN_MODES.has(routePlan?.mode)) return false;
     if (Array.isArray(executablePlan) && executablePlan.length > 0) return false;
     return true;
+  }
+
+  isManualWaitPlan(routePlan = this.currentRoutePlan, executablePlan = this.currentExecutablePlan) {
+    return (
+      routePlan?.mode === "MANUAL_GOTO" &&
+      isWaitingManualTask(this.activeManualTask) &&
+      Array.isArray(executablePlan) &&
+      executablePlan.length === 0 &&
+      sameTile(routePlan?.manualTarget ?? this.activeManualTask?.payload?.target, this.activeManualTask?.payload?.target)
+    );
   }
 
   rejectInvalidZeroActionPlan(routePlan, reason = "invalid_non_idle_zero_action") {
@@ -538,19 +553,13 @@ export class AgentLoop {
   }
 
   ensureManualPlan() {
-    if (this.activeManualTask && Number(this.activeManualTask.expiresAtTick ?? -1) <= this.beliefs.time) {
-      this.telemetry.record("manual_task_failed", {
+    if (this.activeManualTask && !this.beliefs.hasManualTaskId?.(this.activeManualTask.id)) {
+      this.logger.info("manual task cleared", {
         taskId: this.activeManualTask.id,
-        reason: "expired",
-        target: this.activeManualTask?.payload?.target ?? null
-      });
-      this.logger.warn("manual task failed", {
-        taskId: this.activeManualTask.id,
-        reason: "expired",
-        target: this.activeManualTask?.payload?.target ?? null
+        taskKey: this.activeManualTask?.payload?.taskKey ?? null
       });
       this.activeManualTask = null;
-      this.invalidatePlan("manual_task_expired");
+      this.invalidatePlan("manual_task_cleared");
     }
 
     const task = this.activeManualTask ?? this.beliefs.peekManualTask?.();
@@ -841,6 +850,9 @@ export class AgentLoop {
       // get the next action in plan
       const action = this.currentExecutablePlan?.[this.actionIndex];
       if (!action) {
+        if (this.isManualWaitPlan(this.currentRoutePlan, this.currentExecutablePlan)) {
+          return;
+        }
         // if there is no executable action, check for possible reasons
         if (this.isInvalidTargetZeroAction(this.currentRoutePlan, this.currentExecutablePlan)) {
           this.rejectInvalidZeroActionPlan(this.currentRoutePlan);
@@ -985,6 +997,7 @@ export class AgentLoop {
       this.actionIndex += 1;
       if (this.actionIndex >= this.currentExecutablePlan.length) {
         const completedManualTask = this.currentRoutePlan?.mode === "MANUAL_GOTO" ? this.activeManualTask : null;
+        const waitingManualTask = isWaitingManualTask(completedManualTask);
         // if this has finished the plan:
         if (SCOUT_PLAN_MODES.has(this.currentRoutePlan?.mode) && this.currentRoutePlan.scoutTarget) {
           // if the plan was a scouting plan, mark target location as scouted
@@ -1001,18 +1014,31 @@ export class AgentLoop {
           currentPosition: this.beliefs.me ? { x: this.beliefs.me.x, y: this.beliefs.me.y } : null
         });
         if (completedManualTask) {
-          this.telemetry.record("manual_task_completed", {
-            taskId: completedManualTask.id,
-            target: this.currentRoutePlan?.manualTarget ?? completedManualTask?.payload?.target ?? null
-          });
-          this.logger.info("manual task completed", {
-            taskId: completedManualTask.id,
-            target: this.currentRoutePlan?.manualTarget ?? completedManualTask?.payload?.target ?? null
-          });
-          this.beliefs.consumeManualTask?.();
-          this.activeManualTask = null;
+          if (waitingManualTask) {
+            this.telemetry.record("manual_task_waiting", {
+              taskId: completedManualTask.id,
+              target: this.currentRoutePlan?.manualTarget ?? completedManualTask?.payload?.target ?? null,
+              taskKey: completedManualTask?.payload?.taskKey ?? null
+            });
+            this.logger.info("manual task waiting", {
+              taskId: completedManualTask.id,
+              target: this.currentRoutePlan?.manualTarget ?? completedManualTask?.payload?.target ?? null,
+              taskKey: completedManualTask?.payload?.taskKey ?? null
+            });
+          } else {
+            this.telemetry.record("manual_task_completed", {
+              taskId: completedManualTask.id,
+              target: this.currentRoutePlan?.manualTarget ?? completedManualTask?.payload?.target ?? null
+            });
+            this.logger.info("manual task completed", {
+              taskId: completedManualTask.id,
+              target: this.currentRoutePlan?.manualTarget ?? completedManualTask?.payload?.target ?? null
+            });
+            this.beliefs.consumeManualTask?.();
+            this.activeManualTask = null;
+          }
         }
-        this.invalidatePlan("plan_completed");
+        this.invalidatePlan(waitingManualTask ? "manual_task_waiting" : "plan_completed");
       }
     } catch (error) {
       this.logger.error("loop tick failed", error);

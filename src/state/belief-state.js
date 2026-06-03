@@ -197,14 +197,12 @@ export class BeliefState {
   }
 
   pushManualTask(task = {}) {
-    const ttl = Math.max(1, Number(task.expiresTicks ?? 30) || 30);
     const entry = {
       id: ++this.manualTaskSequence,
       type: String(task.type ?? "manual_task"),
       sourceChatId: Number(task.sourceChatId ?? 0) || null,
       senderId: task.senderId ?? null,
       createdAtTick: this.time,
-      expiresAtTick: this.time + ttl,
       priority: String(task.priority ?? "override_once"),
       payload: task.payload ?? {}
     };
@@ -216,6 +214,42 @@ export class BeliefState {
     });
     this.markDirty();
     return entry;
+  }
+
+  findManualTaskById(taskId) {
+    const normalizedId = Number(taskId);
+    if (!Number.isFinite(normalizedId)) return null;
+    return this.manualTasks.find((task) => Number(task.id) === normalizedId) ?? null;
+  }
+
+  hasManualTaskId(taskId) {
+    return Boolean(this.findManualTaskById(taskId));
+  }
+
+  clearManualTasks(predicate) {
+    if (typeof predicate !== "function") return [];
+    const removed = [];
+    this.manualTasks = this.manualTasks.filter((task) => {
+      if (!predicate(task)) return true;
+      removed.push(task);
+      return false;
+    });
+    if (removed.length > 0) {
+      for (const task of removed) {
+        this.pushEvent("MANUAL_TASK_CLEARED", {
+          taskId: task.id,
+          taskType: task.type,
+          priority: task.priority,
+          taskKey: task?.payload?.taskKey ?? null
+        });
+      }
+      this.markDirty();
+    }
+    return removed;
+  }
+
+  clearRendezvousManualTasks() {
+    return this.clearManualTasks((task) => task?.payload?.kind === "team_rendezvous");
   }
 
   setForbiddenTile(position, meta = {}) {
@@ -368,18 +402,14 @@ export class BeliefState {
   }
 
   clearExpiredManualTasks() {
-    const previousLength = this.manualTasks.length;
-    this.manualTasks = this.manualTasks.filter((task) => Number(task.expiresAtTick ?? -1) > this.time);
-    if (this.manualTasks.length !== previousLength) this.markDirty();
+    return [];
   }
 
   peekManualTask() {
-    this.clearExpiredManualTasks();
     return this.manualTasks[0] ?? null;
   }
 
   consumeManualTask() {
-    this.clearExpiredManualTasks();
     const task = this.manualTasks.shift() ?? null;
     if (task) this.markDirty();
     return task;

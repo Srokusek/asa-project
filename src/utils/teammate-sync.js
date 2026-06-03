@@ -35,11 +35,48 @@ function parsePositiveCount(count) {
   return value;
 }
 
+function parseNonNegativeInteger(value) {
+  const normalized = Math.round(Number(value));
+  if (!Number.isFinite(normalized) || normalized < 0) return null;
+  return normalized;
+}
+
 function normalizeMeta(meta, fallbackReason) {
   const input = isPlainObject(meta) ? meta : {};
   return {
     reason: String(input.reason ?? fallbackReason),
     sourceChatId: Number(input.sourceChatId ?? 0) || null
+  };
+}
+
+function parseManualTaskPayload(payload) {
+  if (!isPlainObject(payload)) return null;
+  const type = String(payload.type ?? "").trim();
+  const priority = String(payload.priority ?? "").trim();
+  const target = parseTarget(payload.payload?.target);
+  if (!type || !priority || !target) return null;
+
+  const kind = payload.payload?.kind === undefined ? null : String(payload.payload.kind);
+  const taskKey = payload.payload?.taskKey === undefined ? null : String(payload.payload.taskKey);
+  const waitAtTarget = payload.payload?.waitAtTarget === true;
+  const maxDistance = payload.payload?.maxDistance === undefined ? null : parseNonNegativeInteger(payload.payload.maxDistance);
+  const center = payload.payload?.center === undefined ? null : parseTarget(payload.payload.center);
+  if (payload.payload?.maxDistance !== undefined && maxDistance === null) return null;
+  if (payload.payload?.center !== undefined && !center) return null;
+
+  return {
+    type,
+    priority,
+    payload: {
+      target,
+      reason: String(payload.payload?.reason ?? "manual_task_teammate_sync"),
+      goalType: String(payload.payload?.goalType ?? "goto_tile"),
+      ...(kind ? { kind } : {}),
+      ...(taskKey ? { taskKey } : {}),
+      ...(waitAtTarget ? { waitAtTarget: true } : {}),
+      ...(center ? { center } : {}),
+      ...(maxDistance !== null ? { maxDistance } : {})
+    }
   };
 }
 
@@ -109,7 +146,43 @@ function createCountNumericSyncConfig({ type, field, defaultReason, parser, appl
   };
 }
 
+function createManualTaskSyncConfig() {
+  const type = "manual_task_set";
+  const defaultReason = "manual_task_teammate_sync";
+  return {
+    type,
+    build(entry) {
+      const parsed = parseManualTaskPayload(entry);
+      if (!parsed) return null;
+      return {
+        payload: parsed,
+        meta: normalizeMeta(entry, defaultReason)
+      };
+    },
+    parse(message) {
+      const parsed = parseManualTaskPayload(message?.payload);
+      if (!parsed) return null;
+      return {
+        type,
+        payload: parsed,
+        meta: normalizeMeta(message.meta, defaultReason)
+      };
+    },
+    apply(parsed, context) {
+      context.beliefs.pushManualTask({
+        type: parsed.payload.type,
+        sourceChatId: parsed.meta.sourceChatId,
+        senderId: context.fromId ?? null,
+        priority: parsed.payload.priority,
+        payload: parsed.payload.payload
+      });
+      return true;
+    }
+  };
+}
+
 const teammateSyncHandlers = [
+  createManualTaskSyncConfig(),
   createTileNumericSyncConfig({
     type: "pickup_tile_multiplier_set",
     field: "multiplier",

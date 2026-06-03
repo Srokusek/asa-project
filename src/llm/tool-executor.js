@@ -1,6 +1,7 @@
 import { chatTools } from "./tool-definitions.js";
 import { resolveTileSelector } from "./tile-selector.js";
 import { buildTeammateSyncMessage } from "../utils/teammate-sync.js";
+import { manhattan, positionKey } from "../utils/geometry.js";
 
 function asToolError(toolName, message, extra = {}) {
   return {
@@ -91,6 +92,13 @@ function parsePositiveIntegerCount(args) {
   const count = Math.round(Number(args?.count));
   if (!Number.isFinite(count) || count < 1) return null;
   return count;
+}
+
+function parseNonNegativeIntegerRadius(value, fallback = 3) {
+  if (value === undefined) return fallback;
+  const radius = Math.round(Number(value));
+  if (!Number.isFinite(radius) || radius < 0) return null;
+  return radius;
 }
 
 function parseThresholdComparison(args) {
@@ -220,6 +228,12 @@ export function createToolExecutor({ beliefs, executor, logger, config }) {
     return { ok: true };
   }
 
+  function validateCoordinateTarget(target) {
+    if (!target) return { ok: false, reason: "invalid_coordinates" };
+    if (!inBounds(target)) return { ok: false, reason: "out_of_bounds", details: target };
+    return { ok: true };
+  }
+
   function resolveToolTarget(args, { defaultScope, allowedScopes, rejectForbidden = true } = {}) {
     const hasTarget = args?.target !== undefined;
     const hasSelector = args?.selector !== undefined;
@@ -304,8 +318,77 @@ export function createToolExecutor({ beliefs, executor, logger, config }) {
         targets,
         selector: resolvedSelector,
         reason: String(args.reason ?? "manual_explicit_plan"),
-        priority: args.priority === "sticky_until_done" ? "sticky_until_done" : "override_once",
-        expiresTicks: Math.max(1, Math.min(300, Number(args.expiresTicks ?? 120) || 120))
+        priority: args.priority === "sticky_until_done" ? "sticky_until_done" : "override_once"
+      }
+    };
+  }
+
+  function validateTeamRendezvousArgs(args) {
+    const target = parseTargetValue(args?.target);
+    const targetValidation = validateCoordinateTarget(target);
+    if (!targetValidation.ok) return targetValidation;
+
+    const maxDistance = parseNonNegativeIntegerRadius(args?.maxDistance, 3);
+    if (maxDistance === null) return { ok: false, reason: "invalid_max_distance" };
+
+    return {
+      ok: true,
+      value: {
+        target,
+        maxDistance,
+        reason: String(args?.reason ?? "team_rendezvous_instruction")
+      }
+    };
+  }
+
+  function listRendezvousCandidates(center, maxDistance) {
+    const candidates = [];
+    const seen = new Set();
+    const minX = beliefs.width > 0 ? Math.max(0, center.x - maxDistance) : center.x - maxDistance;
+    const maxX = beliefs.width > 0 ? Math.min(beliefs.width - 1, center.x + maxDistance) : center.x + maxDistance;
+    const minY = beliefs.height > 0 ? Math.max(0, center.y - maxDistance) : center.y - maxDistance;
+    const maxY = beliefs.height > 0 ? Math.min(beliefs.height - 1, center.y + maxDistance) : center.y + maxDistance;
+
+    for (let y = minY; y <= maxY; y += 1) {
+      for (let x = minX; x <= maxX; x += 1) {
+        const candidate = { x, y };
+        if (manhattan(candidate, center) > maxDistance) continue;
+        if (!validateWalkableTarget(candidate).ok) continue;
+        const key = positionKey(candidate);
+        if (seen.has(key)) continue;
+        seen.add(key);
+        candidates.push(candidate);
+      }
+    }
+
+    candidates.sort((a, b) =>
+      manhattan(a, center) - manhattan(b, center) ||
+      a.y - b.y ||
+      a.x - b.x
+    );
+    return candidates;
+  }
+
+  function selectRendezvousTargets(center, maxDistance) {
+    const candidates = listRendezvousCandidates(center, maxDistance);
+    if (candidates.length < 2) {
+      return { ok: false, reason: "insufficient_walkable_tiles", details: { target: center, maxDistance } };
+    }
+
+    const selfPosition = beliefs.me ? parseTargetValue(beliefs.me) : null;
+    const selfKey = selfPosition ? positionKey(selfPosition) : null;
+    const localTarget = (selfKey && candidates.find((candidate) => positionKey(candidate) === selfKey)) ?? candidates[0];
+    const teammateTarget = candidates.find((candidate) => positionKey(candidate) !== positionKey(localTarget)) ?? null;
+    if (!teammateTarget) {
+      return { ok: false, reason: "insufficient_walkable_tiles", details: { target: center, maxDistance } };
+    }
+
+    return {
+      ok: true,
+      value: {
+        localTarget,
+        teammateTarget,
+        candidates
       }
     };
   }
@@ -618,6 +701,87 @@ export function createToolExecutor({ beliefs, executor, logger, config }) {
     );
   }
 
+  async function executeTeamRendezvousTool(parsedValue, { senderId, sourceChatId }) {
+    const toolName = "set_team_rendezvous_task";
+    if (!teammateId) {
+      return asToolError(toolName, "Rendezvous rejected: missing_teammate_id.", {
+        toolArgs: parsedValue,
+        data: { reason: "missing_teammate_id" }
+      });
+    }
+
+    const validation = validateTeamRendezvousArgs(parsedValue);
+    if (!validation.ok) {
+      return asToolError(toolName, `Rendezvous rejected: ${validation.reason}.`, {
+        toolArgs: parsedValue,
+        data: { reason: validation.reason, details: validation.details ?? null }
+      });
+    }
+
+    const selection = selectRendezvousTargets(validation.value.target, validation.value.maxDistance);
+    if (!selection.ok) {
+      return asToolError(toolName, `Rendezvous rejected: ${selection.reason}.`, {
+        toolArgs: parsedValue,
+        data: { reason: selection.reason, details: selection.details ?? null }
+      });
+    }
+
+    const taskKey = `team_rendezvous:${beliefs.time}:${beliefs.manualTaskSequence + 1}`;
+    const sourceChat = Number(sourceChatId ?? 0) || null;
+    const localPlan = beliefs.pushManualTask({
+      type: "goto_tile",
+      sourceChatId: sourceChat,
+      senderId,
+      priority: "sticky_until_done",
+      payload: {
+        target: selection.value.localTarget,
+        reason: validation.value.reason,
+        goalType: "goto_tile",
+        kind: "team_rendezvous",
+        taskKey,
+        waitAtTarget: true,
+        center: validation.value.target,
+        maxDistance: validation.value.maxDistance
+      }
+    });
+
+    await syncToolResultWithTeammate({
+      type: "manual_task_set",
+      entry: {
+        type: "goto_tile",
+        sourceChatId: sourceChat,
+        senderId,
+        priority: "sticky_until_done",
+        payload: {
+          target: selection.value.teammateTarget,
+          reason: validation.value.reason,
+          goalType: "goto_tile",
+          kind: "team_rendezvous",
+          taskKey,
+          waitAtTarget: true,
+          center: validation.value.target,
+          maxDistance: validation.value.maxDistance
+        }
+      }
+    });
+
+    return asToolSuccess(
+      toolName,
+      `Rendezvous accepted: self -> (${selection.value.localTarget.x},${selection.value.localTarget.y}), teammate -> (${selection.value.teammateTarget.x},${selection.value.teammateTarget.y}).`,
+      {
+        plan: localPlan,
+        toolArgs: parsedValue,
+        data: {
+          target: validation.value.target,
+          maxDistance: validation.value.maxDistance,
+          localTarget: selection.value.localTarget,
+          teammateTarget: selection.value.teammateTarget,
+          taskKey
+        }
+      }
+    );
+  }
+
   async function executeToolCall(call, { senderId, sourceChatId }) {
     const toolName = String(call?.function?.name ?? "").trim();
     const rawArgs = call?.function?.arguments;
@@ -672,7 +836,6 @@ export function createToolExecutor({ beliefs, executor, logger, config }) {
           type: "goto_tile",
           sourceChatId: Number(sourceChatId ?? 0) || null,
           senderId,
-          expiresTicks: validation.value.expiresTicks,
           priority: validation.value.priority,
           payload: {
             target,
@@ -702,6 +865,15 @@ export function createToolExecutor({ beliefs, executor, logger, config }) {
           }
         }
       );
+    }
+
+    if (toolName === "set_team_rendezvous_task") {
+      const parsed = parseJsonArguments(rawArgs, "I could not parse the rendezvous request. Please provide a tile like (x,y).");
+      if (!parsed.ok) return asToolError(toolName, parsed.error);
+      if (typeof beliefs.advanceTimeFromClock === "function") {
+        beliefs.advanceTimeFromClock();
+      }
+      return executeTeamRendezvousTool(parsed.value, { senderId, sourceChatId });
     }
 
     if (toolName === "set_forbidden_tile") {

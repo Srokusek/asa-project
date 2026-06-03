@@ -50,10 +50,32 @@ export const explicitPlanTool = {
           maxItems: 12
         },
         reason: { type: "string", description: "Short operational reason for the override." },
-        priority: { type: "string", enum: ["override_once", "sticky_until_done"] },
-        expiresTicks: { type: "integer", minimum: 1, maximum: 300 }
+        priority: { type: "string", enum: ["override_once", "sticky_until_done"] }
       },
       required: ["goalType"],
+      additionalProperties: false
+    }
+  }
+};
+
+export const teamRendezvousTool = {
+  type: "function",
+  function: {
+    name: "set_team_rendezvous_task",
+    description: "Create a sticky rendezvous task for both agents near a target tile. Use this when the admin asks both agents to move to the neighborhood of a coordinate and wait for each other. The executor chooses nearby walkable hold tiles for each agent.",
+    parameters: {
+      type: "object",
+      properties: {
+        target: coordinateTargetSchema,
+        maxDistance: {
+          type: "integer",
+          minimum: 0,
+          maximum: 30,
+          description: "Maximum Manhattan distance from the target tile for the chosen hold tiles. Omit to use the default radius 3."
+        },
+        reason: { type: "string", description: "Short operational reason for the rendezvous override." }
+      },
+      required: ["target"],
       additionalProperties: false
     }
   }
@@ -250,6 +272,7 @@ export const setDeliveryValueThresholdMultiplierTool = {
 export const chatTools = [
   calculateExpressionsTool,
   explicitPlanTool,
+  teamRendezvousTool,
   setForbiddenTileTool,
   setPickupTileMultiplierTool,
   setPickupTileBonusTool,
