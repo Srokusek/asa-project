@@ -74,9 +74,12 @@ The chat path and the planning path use the same beliefs, but they are intention
 
 The ordering is important:
 
-- in `llm` mode with chat enabled, admin chat is queued in beliefs,
+- in `llm` mode with chat enabled, admin chat is queued in beliefs and non-release teammate chat is also visible to the chat path,
+- in `bdi` mode with `TEAMMATE_ID` configured, direct chat from that teammate can be parsed as sync messages and applied to beliefs immediately,
+- in `bdi` mode, teammate `"/clear"` or `"green light"` bypasses sync parsing and clears active manual tasks plus the sticky parcel-handoff task locally,
+- in `llm` mode, admin or teammate `"/clear"` / `"green light"` bypasses chat queuing and clears that same sticky manual state locally,
 - in `llm` mode with chat enabled, the loop consumes chat first,
-- in `bdi` mode, chat is ignored entirely,
+- in `bdi` mode, all other chat is ignored,
 - then the agent continues with planning/execution,
 - the executor is the only module that sends actions back to Deliveroo.
 
@@ -108,9 +111,14 @@ This maps environment variables into a structured config object via `createConfi
 Key fields:
 
 - `agentType` from required `AGENT_TYPE`,
-- `HOST`, `TOKEN`, `AGENT_NAME`, `LOG_LEVEL`, `ACTION_DELAY_MS`,
+- `HOST`, `TOKEN`, `AGENT_NAME`, `TEAMMATE_ID`, `LOG_LEVEL`, `ACTION_DELAY_MS`,
 - `llm.*` for admin filtering, model access, diagnostics, and tool-loop limits,
 - `planner.*` for tuning the search/planning/scout behavior.
+
+`TEAMMATE_ID` is shared across both modes:
+
+- in `llm` mode, it identifies the paired BDI teammate for best-effort sync messages,
+- in `bdi` mode, it identifies the only sender whose sync chat messages should be applied.
 
 It also exports `DEFAULT_PLANNER_CONFIG` so planner code and tests can use planner defaults without depending on a process-global runtime config instance.
 
@@ -122,8 +130,9 @@ Responsibilities:
 
 - normalize `you`, `tile`, and chat payload shapes,
 - update beliefs for map, parcels, agents, and sensing,
-- in `llm` mode with chat enabled, queue only chat from the configured admin id,
-- in `bdi` mode, ignore all incoming chat events,
+- in `llm` mode with chat enabled, queue chat from the configured admin id and currently also from `TEAMMATE_ID`, except release messages,
+- in `bdi` mode, ignore ordinary chat but accept teammate sync messages only from `TEAMMATE_ID`,
+- treat `"/clear"`, `"green light"`, and `"greenlight"` as immediate sticky-state release commands on the accepted sender paths,
 - in `llm` mode without `ADMIN_ID`, ignore all incoming chat events,
 - never plan or execute actions.
 
@@ -173,10 +182,15 @@ This turns abstract actions into SDK calls.
 Responsibilities:
 
 - `move(...)`, `pickUp(...)`, `putDown(...)`,
-- `writeMessage(...)` for chat replies,
+- `writeMessage(...)` for chat replies and teammate sync messages,
 - push failure/success events back into beliefs,
 - record telemetry,
 - mark temporary blocks when movement fails.
+
+Important handoff-specific behavior:
+
+- after a successful `putDown(...)`, the BDI agent records the dropped parcel ids into the active parcel-handoff task when one exists,
+- those dropped ids are then filtered out of later BDI pickup planning until the handoff task is cleared.
 
 ### `src/llm/`
 
@@ -188,9 +202,23 @@ Main modules:
 - `src/llm/model-client.js`: OpenAI/LiteLLM client setup and model calls,
 - `src/llm/tool-definitions.js`: chat tool schemas,
 - `src/llm/tool-executor.js`: tool argument validation and belief/executor side effects,
+- `src/llm/tile-selector.js`: deterministic grounding of relative tile selectors against planner state,
 - `src/llm/diagnostics.js`: optional JSONL diagnostics logging.
 
+Related shared utility:
+
+- `src/utils/teammate-sync.js`: versioned teammate-sync envelope builder/parser/applier used by both the LLM sender path and the BDI receiver path.
+
 This subsystem is intentionally separate so the main loop stays readable.
+
+Important LLM design rule:
+
+- the LLM does not infer relative tiles from raw map text,
+- for requests like `leftmost`, `rightmost`, `topmost`, or `bottommost`, the LLM should emit a symbolic `selector`,
+- `tool-executor` accepts either exact `target` coordinates or a `selector`, never both,
+- `tile-selector.js` resolves selectors deterministically from normalized planner state,
+- tool stability for selector-based requests depends heavily on explicit schema metadata and prompt examples,
+- some local/open-weight models may otherwise output pseudo-tool JSON in assistant text instead of real `tool_calls`.
 
 ## BDI Architecture
 
@@ -221,11 +249,16 @@ Important concepts:
 
 It also stores sticky manual overlays and tasks:
 
-- `manualTasks`: queued explicit goto tasks from chat tools,
+- `manualTasks`: queued explicit goto tasks from chat tools, including sticky team-rendezvous waits and parity-line wait tasks,
+- `parcelHandoffTask`: sticky cross-agent parcel exchange state with one chosen center tile, a derived walkable 3x3 `zoneTiles` set, and `ignoredParcelIds` used by the BDI side after handoff drops,
 - `forbiddenTiles`: manually forbidden walkability overrides,
 - `pickupTileMultipliers`: pickup-value multipliers by tile,
+- `pickupTileBonuses`: pickup-value additive bonuses by tile,
 - `deliveryTileMultipliers`: delivery-value multipliers by tile,
-- `deliveryCountMultipliers`: delivery-value multipliers by delivered package count.
+- `deliveryTileBonuses`: delivery-value additive bonuses by tile,
+- `deliveryCountMultipliers`: delivery-value multipliers by delivered package count,
+- `deliveryCountBonuses`: delivery-value additive bonuses by delivered package count,
+- `deliveryValueThresholdRule`: one sticky global delivery-value multiplier rule by per-parcel delivered value threshold.
 
 These overlays are planner-facing constraints/preferences. They are intentionally separate from base map observation updates.
 
@@ -246,6 +279,21 @@ It prepares data for the planner such as:
 - map profile and planner params.
 
 This module is the bridge between raw belief memory and search-ready planner input.
+
+It also contains the parcel-handoff planner shaping:
+
+- in `llm` mode with an active handoff task, greens are replaced by synthetic `HANDOFF_GREEN_*` candidates over the walkable 3x3 handoff zone,
+- in `bdi` mode with an active handoff task, reds are replaced by synthetic `HANDOFF_RED_*` candidates over that same zone,
+- if another agent is currently occupying one handoff-zone tile, that tile is removed from the active synthetic handoff set when other zone tiles are free,
+- on the BDI side, parcels on any handoff-zone tile are suppressed as pickup candidates, and previously dropped parcel ids in `ignoredParcelIds` are also filtered out,
+- the produced planner state is already normalized and is marked so `route-planner.js` does not re-parse it and accidentally restore static grid delivery tiles.
+
+It also exports the manual reward overlays used by the planner:
+
+- pickup tile multipliers and bonuses,
+- delivery tile multipliers and bonuses,
+- delivery count multipliers and bonuses,
+- delivery value threshold multiplier rule.
 
 ## Planning and Search
 
@@ -298,6 +346,14 @@ Important functions include:
 
 Candidate selection is intentionally filtered. Low-confidence, unreachable, or unprofitable parcels are excluded.
 
+Pickup scoring is no longer multiplier-only. The planner can apply:
+
+- pickup tile multipliers,
+- pickup tile bonuses,
+- pickup-time overlay metadata recorded on carried parcels so reconstruction matches real pickup conditions.
+
+Delivery-side candidate scoring and route diagnostics now reuse the same delivered-value semantics as final search evaluation for the single-package case, so ranking and final valuation stay aligned.
+
 ### Search Over Pickup/Delivery Sequences
 
 `src/planner/search/plan-search.js` performs the beam search over route-level sequences.
@@ -320,9 +376,27 @@ The search is not a full-state solver. It is a guided sequence search over a red
 
 Delivery scoring (`computeDeliveredValue(...)`) applies:
 
+- per-parcel delivery-value threshold multipliers before parcel values are summed,
 - delivery tile multipliers,
 - delivery count multipliers (exact count rules like `1 -> 0x`, `3 -> 3x`),
-- multiplicative composition between both.
+- delivery tile bonuses,
+- delivery count bonuses,
+- multiplicative composition between the multiplier rules,
+- flat additive composition for the bonus rules after multiplicative effects.
+
+The ordering matters:
+
+1. compute each parcel's predicted delivered base value from `valueAtPickup` and delivery-time decay,
+2. apply the optional global threshold rule to each parcel independently,
+3. sum the adjusted parcel values for the drop,
+4. apply delivery tile / delivery count overlays to that subtotal.
+
+The threshold rule is currently delivery-only and intentionally narrow:
+
+- exactly one active rule at a time,
+- `comparison: "gt" | "lt"`,
+- finite numeric `threshold`,
+- `multiplier >= 0`, so "no reward" is represented as `0`.
 
 ### Distance Oracle and Path Reconstruction
 
@@ -448,7 +522,8 @@ That path:
 
 - receives `msg` events from Deliveroo,
 - in `llm` mode with chat enabled, normalizes and stores admin messages in beliefs,
-- in `bdi` mode, ignores chat entirely,
+- in `llm` mode, can also mirror selected successful tool side effects to `TEAMMATE_ID` as normalized JSON sync envelopes,
+- in `bdi` mode, ignores ordinary chat and only accepts sync envelopes from the configured teammate id,
 - lets the loop process pending chat before planning when chat is enabled,
 - sends replies through the executor.
 
@@ -458,7 +533,7 @@ This exists for the LLM integration work, but it should remain a side concern in
 
 The runtime supports two explicit agent types:
 
-- `bdi`: pure BDI agent, no chat queuing, no chat processing, no LLM calls,
+- `bdi`: pure BDI planning/execution agent, no chat queuing, no LLM calls, but it may still apply teammate sync messages from `TEAMMATE_ID`,
 - `llm`: standard BDI loop plus admin-gated LLM chat handling.
 
 ### Current Chat Tooling Surface
@@ -467,14 +542,32 @@ Actionable chat instructions are expected to map to tools, not raw JSON replies.
 
 - arithmetic helper: `calculate_expressions` (used before actionable calls when numeric args need computation),
 - explicit manual movement: `set_explicit_plan` (single target or sequence via `targets`),
+- sticky paired waiting task: `set_team_rendezvous_task`,
+- sticky parity wait task: `set_parity_line_wait_task` for nearest walkable odd/even row or column holds,
+- sticky parcel exchange task: `set_parcel_handoff_task` (auto-picks a nearby walkable center when omitted, then derives a shared walkable 3x3 handoff zone),
 - sticky map constraints: `set_forbidden_tile`,
 - sticky pickup-value rules: `set_pickup_tile_multiplier`,
+- sticky pickup-value bonuses: `set_pickup_tile_bonus`,
 - sticky delivery-tile rules: `set_delivery_tile_multiplier`,
+- sticky delivery-tile bonuses: `set_delivery_tile_bonus`,
 - sticky delivery-count rules: `set_delivery_count_multiplier`,
+- sticky delivery-count bonuses: `set_delivery_count_bonus`,
+- sticky delivery-value-threshold rule: `set_delivery_value_threshold_multiplier`.
 
 The chat processor executes tool calls in a bounded multi-step loop (`CHAT_MAX_LLM_ITERATIONS`, `CHAT_MAX_TOOL_CALLS`) and logs optional diagnostics (`CHAT_DIAGNOSTICS_*` env vars). These settings now live under `config.llm.*`.
 
+`src/llm/chat-processor.js` also contains a narrow recovery path for some model non-compliance: if the model returns a valid serialized function payload as plain JSON in `assistant.content` instead of populating `assistant.tool_calls`, the processor upgrades that payload into a synthetic tool call and executes it through the normal tool loop. This recovery only accepts known tool names and valid JSON object arguments.
+
 These commands update belief overlays/events and trigger replanning through normal loop invalidation.
+
+Some tool side effects can also be mirrored to a paired BDI teammate. The current sync protocol:
+
+- uses raw JSON chat messages with a versioned envelope shape: `{ v, type, payload, meta }`,
+- is one-way in the current implementation: `llm -> bdi`,
+- is built and parsed through a central registry in `src/utils/teammate-sync.js`,
+- currently covers reward-overlay sync plus generic `manual_task_set` for sticky manual goto tasks such as rendezvous/parity waits, and `parcel_handoff_set` for sticky parcel-exchange zones,
+- treats sync send failures as non-fatal to the original local tool execution,
+- ignores malformed payloads and unknown sync types defensively on the BDI side.
 
 ## Deliveroo.js Environment Context
 
@@ -565,8 +658,21 @@ That is the main architecture. The LLM chat layer is a small adjacent feature, n
 Recent additions relevant to planner behavior:
 
 - sticky forbidden-tile overlay is enforced by planner/path walkability checks,
-- explicit goto tasks are queued and consumed through `manualTasks`,
-- reward shaping supports pickup tile, delivery tile, and delivery count multipliers.
+- explicit goto tasks are queued and consumed through `manualTasks`, and they now persist until completion or explicit clear,
+- team rendezvous now reuses sticky `manualTasks`, picks nearby walkable hold tiles in the tool-execution path, and waits at target until an accepted release message clears the sticky state,
+- parity-line wait tasks now reuse the same sticky `manualTasks` path by selecting the nearest walkable tile on the requested odd/even row or column for each agent,
+- parcel handoff now uses a sticky shared `parcelHandoffTask` with a walkable 3x3 zone centered on one chosen tile,
+- the LLM side only considers synthetic handoff greens inside that zone while the task is active,
+- the BDI side only considers synthetic handoff reds inside that zone while the task is active,
+- occupied handoff-zone tiles are dynamically excluded from the active synthetic handoff set when alternatives exist,
+- after BDI drops parcels in the handoff zone, their ids are recorded and filtered so the BDI agent does not pick them back up,
+- accepted release messages (`"/clear"`, `"green light"`, `"greenlight"`) now clear both sticky manual tasks and the parcel handoff task, while leaving reward overlays and forbidden-tile overlays intact,
+- reward shaping supports pickup tile, delivery tile, delivery count, and per-parcel delivery-value-threshold multipliers,
+- pickup-tile and delivery-tile multiplier overlays can now also be synchronized from an LLM agent to a paired BDI teammate over chat.
+
+Current limitation worth preserving unless explicitly extended:
+
+- the delivery-value-threshold rule is local-only for now and is not propagated through teammate sync.
 
 ## Verification Notes
 
