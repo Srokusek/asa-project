@@ -318,7 +318,7 @@ export function createToolExecutor({ beliefs, executor, logger, config }) {
         targets,
         selector: resolvedSelector,
         reason: String(args.reason ?? "manual_explicit_plan"),
-        priority: args.priority === "sticky_until_done" ? "sticky_until_done" : "override_once"
+        priority: args.priority === "override_once" ? "override_once" : "sticky_until_done"
       }
     };
   }
@@ -831,16 +831,19 @@ export function createToolExecutor({ beliefs, executor, logger, config }) {
       }
 
       const plans = [];
-      for (const target of validation.value.targets) {
+      for (const [index, target] of validation.value.targets.entries()) {
+        const isFinalTarget = index === validation.value.targets.length - 1;
+        const shouldWaitAtTarget = isFinalTarget && validation.value.priority === "sticky_until_done";
         const plan = beliefs.pushManualTask({
           type: "goto_tile",
           sourceChatId: Number(sourceChatId ?? 0) || null,
           senderId,
-          priority: validation.value.priority,
+          priority: shouldWaitAtTarget ? "sticky_until_done" : "override_once",
           payload: {
             target,
             reason: validation.value.reason,
-            goalType: validation.value.goalType
+            goalType: validation.value.goalType,
+            ...(shouldWaitAtTarget ? { waitAtTarget: true } : {})
           }
         });
         plans.push(plan);

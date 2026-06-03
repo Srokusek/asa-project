@@ -252,6 +252,10 @@ export class BeliefState {
     return this.clearManualTasks((task) => task?.payload?.kind === "team_rendezvous");
   }
 
+  clearAllManualTasks() {
+    return this.clearManualTasks(() => true);
+  }
+
   setForbiddenTile(position, meta = {}) {
     const cell = roundTilePosition(position);
     const key = positionKey(cell);

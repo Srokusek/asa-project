@@ -63,10 +63,10 @@ function observedSensingRange(config) {
   return normalizeSensingRange(config?.GAME?.player?.observation_distance, null);
 }
 
-function clearRendezvousTasks(beliefs, fromId, logger) {
-  const removed = beliefs.clearRendezvousManualTasks?.() ?? [];
+function clearManualTasks(beliefs, fromId, logger) {
+  const removed = beliefs.clearAllManualTasks?.() ?? [];
   if (removed.length > 0) {
-    logger?.info?.("rendezvous manual task cleared", {
+    logger?.info?.("manual tasks cleared", {
       fromId: fromId ?? null,
       taskIds: removed.map((task) => task.id)
     });
@@ -134,7 +134,7 @@ export function registerSdkListeners(socket, beliefs, config, logger = null) {
     if (config?.agentType === "bdi") {
       if (!teammateId || fromId !== teammateId) return;
       if (text === "/clear") {
-        clearRendezvousTasks(beliefs, normalized.fromId ?? null, logger);
+        clearManualTasks(beliefs, normalized.fromId ?? null, logger);
         return;
       }
       applyTeammateSyncMessage({
@@ -147,7 +147,7 @@ export function registerSdkListeners(socket, beliefs, config, logger = null) {
     }
 
     if (teammateId && fromId === teammateId && text === "/clear") {
-      clearRendezvousTasks(beliefs, normalized.fromId ?? null, logger);
+      clearManualTasks(beliefs, normalized.fromId ?? null, logger);
       return;
     }
 
