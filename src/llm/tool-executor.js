@@ -449,6 +449,91 @@ export function createToolExecutor({ beliefs, executor, logger, config }) {
     };
   }
 
+  function validateParityLineWaitArgs(args) {
+    const axis = String(args?.axis ?? "").trim().toLowerCase();
+    const parity = String(args?.parity ?? "").trim().toLowerCase();
+    if (!["row", "column"].includes(axis)) return { ok: false, reason: "invalid_axis" };
+    if (!["odd", "even"].includes(parity)) return { ok: false, reason: "invalid_parity" };
+    return {
+      ok: true,
+      value: {
+        axis,
+        parity,
+        reason: String(args?.reason ?? "parity_line_wait_instruction")
+      }
+    };
+  }
+
+  function listParityLineCandidates({ axis, parity }) {
+    const candidates = [];
+    const expected = parity === "odd" ? 1 : 0;
+    for (let y = 0; y < beliefs.height; y += 1) {
+      for (let x = 0; x < beliefs.width; x += 1) {
+        const candidate = { x, y };
+        if (!validateWalkableTarget(candidate).ok) continue;
+        const coordinate = axis === "row" ? y : x;
+        if (Math.abs(coordinate % 2) !== expected) continue;
+        candidates.push(candidate);
+      }
+    }
+    return candidates;
+  }
+
+  function sortCandidatesByAnchor(candidates, anchor) {
+    return [...candidates].sort((a, b) =>
+      manhattan(a, anchor) - manhattan(b, anchor) ||
+      a.y - b.y ||
+      a.x - b.x
+    );
+  }
+
+  function selectDistinctCandidate(candidates, anchor, occupiedKeys = new Set()) {
+    const sorted = sortCandidatesByAnchor(candidates, anchor);
+    return sorted.find((candidate) => !occupiedKeys.has(positionKey(candidate))) ?? sorted[0] ?? null;
+  }
+
+  function knownAgentPosition(agentId) {
+    const agent = beliefs.agents.get(String(agentId));
+    if (!agent) return null;
+    const x = Math.round(Number(agent.x));
+    const y = Math.round(Number(agent.y));
+    if (!Number.isFinite(x) || !Number.isFinite(y)) return null;
+    return { x, y };
+  }
+
+  function selectParityLineTargets({ axis, parity }) {
+    const candidates = listParityLineCandidates({ axis, parity });
+    if (candidates.length === 0) {
+      return { ok: false, reason: "no_matching_walkable_tiles", details: { axis, parity } };
+    }
+
+    const selfPosition = beliefs.me ? parseTargetValue(beliefs.me) : null;
+    if (!selfPosition) {
+      return { ok: false, reason: "missing_self_position", details: { axis, parity } };
+    }
+
+    const localTarget = selectDistinctCandidate(candidates, selfPosition);
+    if (!localTarget) {
+      return { ok: false, reason: "no_matching_walkable_tiles", details: { axis, parity } };
+    }
+
+    const teammatePosition = teammateId ? knownAgentPosition(teammateId) : null;
+    const occupiedKeys = new Set([positionKey(localTarget)]);
+    const teammateAnchor = teammatePosition ?? selfPosition;
+    const teammateTarget =
+      selectDistinctCandidate(candidates, teammateAnchor, occupiedKeys) ??
+      localTarget;
+
+    return {
+      ok: true,
+      value: {
+        localTarget,
+        teammateTarget,
+        candidateCount: candidates.length
+      }
+    };
+  }
+
   function validateForbiddenTileArgs(args, { allowCurrentTile = false } = {}) {
     if (!args || (args.goalType && args.goalType !== "forbid_tile")) return { ok: false, reason: "unsupported_goal_type" };
     const resolvedTarget = resolveToolTarget(args, {
@@ -838,6 +923,88 @@ export function createToolExecutor({ beliefs, executor, logger, config }) {
     );
   }
 
+  async function executeParityLineWaitTool(parsedValue, { senderId, sourceChatId }) {
+    const toolName = "set_parity_line_wait_task";
+    if (!teammateId) {
+      return asToolError(toolName, "Parity wait rejected: missing_teammate_id.", {
+        toolArgs: parsedValue,
+        data: { reason: "missing_teammate_id" }
+      });
+    }
+
+    const validation = validateParityLineWaitArgs(parsedValue);
+    if (!validation.ok) {
+      return asToolError(toolName, `Parity wait rejected: ${validation.reason}.`, {
+        toolArgs: parsedValue,
+        data: { reason: validation.reason, details: validation.details ?? null }
+      });
+    }
+
+    const selection = selectParityLineTargets(validation.value);
+    if (!selection.ok) {
+      return asToolError(toolName, `Parity wait rejected: ${selection.reason}.`, {
+        toolArgs: parsedValue,
+        data: { reason: selection.reason, details: selection.details ?? null }
+      });
+    }
+
+    const taskKey = `parity_line_wait:${beliefs.time}:${beliefs.manualTaskSequence + 1}`;
+    const sourceChat = Number(sourceChatId ?? 0) || null;
+    const localPlan = beliefs.pushManualTask({
+      type: "goto_tile",
+      sourceChatId: sourceChat,
+      senderId,
+      priority: "sticky_until_done",
+      payload: {
+        target: selection.value.localTarget,
+        reason: validation.value.reason,
+        goalType: "goto_tile",
+        kind: "parity_line_wait",
+        taskKey,
+        waitAtTarget: true,
+        axis: validation.value.axis,
+        parity: validation.value.parity
+      }
+    });
+
+    await syncToolResultWithTeammate({
+      type: "manual_task_set",
+      entry: {
+        type: "goto_tile",
+        sourceChatId: sourceChat,
+        senderId,
+        priority: "sticky_until_done",
+        payload: {
+          target: selection.value.teammateTarget,
+          reason: validation.value.reason,
+          goalType: "goto_tile",
+          kind: "parity_line_wait",
+          taskKey,
+          waitAtTarget: true,
+          axis: validation.value.axis,
+          parity: validation.value.parity
+        }
+      }
+    });
+
+    return asToolSuccess(
+      toolName,
+      `Parity wait accepted: self -> (${selection.value.localTarget.x},${selection.value.localTarget.y}), teammate -> (${selection.value.teammateTarget.x},${selection.value.teammateTarget.y}).`,
+      {
+        plan: localPlan,
+        toolArgs: parsedValue,
+        data: {
+          axis: validation.value.axis,
+          parity: validation.value.parity,
+          localTarget: selection.value.localTarget,
+          teammateTarget: selection.value.teammateTarget,
+          candidateCount: selection.value.candidateCount,
+          taskKey
+        }
+      }
+    );
+  }
+
   async function executeParcelHandoffTool(parsedValue, { senderId, sourceChatId }) {
     const toolName = "set_parcel_handoff_task";
     if (!teammateId) {
@@ -983,6 +1150,18 @@ export function createToolExecutor({ beliefs, executor, logger, config }) {
         beliefs.advanceTimeFromClock();
       }
       return executeTeamRendezvousTool(parsed.value, { senderId, sourceChatId });
+    }
+
+    if (toolName === "set_parity_line_wait_task") {
+      const parsed = parseJsonArguments(
+        rawArgs,
+        "I could not parse the parity wait request. Please specify axis='row' or 'column' and parity='odd' or 'even'."
+      );
+      if (!parsed.ok) return asToolError(toolName, parsed.error);
+      if (typeof beliefs.advanceTimeFromClock === "function") {
+        beliefs.advanceTimeFromClock();
+      }
+      return executeParityLineWaitTool(parsed.value, { senderId, sourceChatId });
     }
 
     if (toolName === "set_parcel_handoff_task") {

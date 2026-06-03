@@ -81,6 +81,32 @@ export const teamRendezvousTool = {
   }
 };
 
+export const parityLineWaitTool = {
+  type: "function",
+  function: {
+    name: "set_parity_line_wait_task",
+    description: "Create a sticky wait task for both agents on the nearest walkable tile whose row or column index has the requested parity. Use this for instructions like 'move to an odd row and wait' or 'move to an even column and stop until green light'.",
+    parameters: {
+      type: "object",
+      properties: {
+        axis: {
+          type: "string",
+          enum: ["row", "column"],
+          description: "Whether the parity rule applies to y (row) or x (column)."
+        },
+        parity: {
+          type: "string",
+          enum: ["odd", "even"],
+          description: "Required parity of the chosen row or column index."
+        },
+        reason: { type: "string", description: "Short operational reason for the wait-line override." }
+      },
+      required: ["axis", "parity"],
+      additionalProperties: false
+    }
+  }
+};
+
 export const parcelHandoffTool = {
   type: "function",
   function: {
@@ -289,6 +315,7 @@ export const chatTools = [
   calculateExpressionsTool,
   explicitPlanTool,
   teamRendezvousTool,
+  parityLineWaitTool,
   parcelHandoffTool,
   setForbiddenTileTool,
   setPickupTileMultiplierTool,

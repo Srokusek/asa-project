@@ -57,12 +57,14 @@ function buildPrompt(message) {
         "You may call multiple tools sequentially when one instruction contains several requested changes.",
         "If one tool call fails, continue with any remaining tool calls that can still make valid progress, then report a concise final status.",
         "If the request is ambiguous, underspecified, contradictory, or asks for unsupported capabilities, do not guess. Ask a short clarification question or state the limitation plainly.",
+        "Use '/clear' or 'green light' to release sticky wait tasks that were holding position for a later admin message.",
         "If the admin message is just a general question or conversation unrelated to the agent, the map, planning, tasks, rewards, or Deliveroo state, answer it directly in plain text without using any tool.",
         "Keep final replies brief and operational. Prefer wording like 'queued', 'applied', 'rejected', or 'need clarification' over verbose explanations.",
         "Tool mapping:",
         "- calculate_expressions: evaluate arithmetic expressions and return numeric results for later tool calls.",
         "- set_explicit_plan: create explicit goto_tile manual tasks, optionally as a sequence with targets=[{x,y},...] or with a selector for one relative tile.",
         "- set_team_rendezvous_task: create a sticky rendezvous task for both agents near one target coordinate. Use target={x,y} and include maxDistance when the admin states one.",
+        "- set_parity_line_wait_task: create sticky wait tasks for both agents on the nearest walkable odd/even row or column. Use axis='row' or axis='column' with parity='odd' or parity='even'.",
         "- set_parcel_handoff_task: create a sticky parcel handoff task for both agents. Use target={x,y} when provided, otherwise omit target to auto-pick the nearest walkable tile to the LLM agent. The handoff zone is the walkable 3x3 neighborhood centered on that tile.",
         "- set_forbidden_tile: add sticky forbidden tiles, optionally using a selector for one relative tile.",
         "- set_pickup_tile_multiplier: add sticky pickup reward multipliers. For relative pickup instructions like 'rightmost pickup tile' or 'leftmost pickup tile', use selector with scope='pickup' instead of coordinates.",
@@ -154,6 +156,48 @@ function buildPrompt(message) {
     {
       role: "assistant",
       content: "Queued a parcel handoff around the resolved nearby tile."
+    },
+    {
+      role: "user",
+      content: "All agents must move to an odd-numbered row and wait for our message before moving again."
+    },
+    {
+      role: "assistant",
+      content: "",
+      tool_calls: [
+        {
+          id: "example_parity_line_wait",
+          type: "function",
+          function: {
+            name: "set_parity_line_wait_task",
+            arguments: JSON.stringify({
+              axis: "row",
+              parity: "odd",
+              reason: "admin red light instruction"
+            })
+          }
+        }
+      ]
+    },
+    {
+      role: "tool",
+      tool_call_id: "example_parity_line_wait",
+      name: "set_parity_line_wait_task",
+      content: JSON.stringify({
+        ok: true,
+        tool: "set_parity_line_wait_task",
+        message: "Parity wait accepted for both agents.",
+        data: {
+          axis: "row",
+          parity: "odd",
+          localTarget: { x: 4, y: 9 },
+          teammateTarget: { x: 6, y: 7 }
+        }
+      })
+    },
+    {
+      role: "assistant",
+      content: "Queued an odd-row hold for both agents."
     },
     {
       role: "user",

@@ -63,6 +63,11 @@ function observedSensingRange(config) {
   return normalizeSensingRange(config?.GAME?.player?.observation_distance, null);
 }
 
+function isReleaseMessage(text) {
+  const normalized = String(text ?? "").trim().toLowerCase();
+  return normalized === "/clear" || normalized === "green light" || normalized === "greenlight";
+}
+
 function clearManualState(beliefs, fromId, logger) {
   const removed = beliefs.clearAllManualTasks?.() ?? [];
   const handoffCleared = beliefs.clearParcelHandoffTask?.("teammate_clear") ?? false;
@@ -132,10 +137,12 @@ export function registerSdkListeners(socket, beliefs, config, logger = null) {
     const fromId = String(normalized.fromId ?? "");
     const teammateId = String(config?.teammateId ?? "");
     const text = String(normalized.text ?? "").trim();
+    const isAdminRelease = fromId === String(config?.llm?.adminId ?? "") && isReleaseMessage(text);
+    const isTeammateRelease = teammateId && fromId === teammateId && isReleaseMessage(text);
 
     if (config?.agentType === "bdi") {
       if (!teammateId || fromId !== teammateId) return;
-      if (text === "/clear") {
+      if (isReleaseMessage(text)) {
         clearManualState(beliefs, normalized.fromId ?? null, logger);
         return;
       }
@@ -148,14 +155,14 @@ export function registerSdkListeners(socket, beliefs, config, logger = null) {
       return;
     }
 
-    if (teammateId && fromId === teammateId && text === "/clear") {
+    if (isTeammateRelease || isAdminRelease) {
       clearManualState(beliefs, normalized.fromId ?? null, logger);
       return;
     }
 
     if (!config?.llm?.chatEnabled) return;
-    if (fromId === String(config.llm.adminId) || fromId === teammateId) {;
-    beliefs.pushChatMessage(normalized)
-    } return;
+    if (fromId === String(config.llm.adminId) || fromId === teammateId) {
+      beliefs.pushChatMessage(normalized);
+    }
   });
 }
