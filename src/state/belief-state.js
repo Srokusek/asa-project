@@ -600,15 +600,8 @@ export class BeliefState {
     return this.time;
   }
 
-  advanceTime(ticks = 1) { // manually advance time by a tick amount
-    const step = Math.max(0, Number(ticks) || 0);
-    this.time += step;
-    return this.afterTimeAdvanced();
-  }
-
   advanceTimeFromClock() { // use local time to advance time
     const now = Date.now();
-
     if (!this.lastWallClock) {
       this.lastWallClock = now;
       return this.time;

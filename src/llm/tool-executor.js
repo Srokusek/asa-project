@@ -1091,9 +1091,7 @@ export function createToolExecutor({ beliefs, executor, logger, config }) {
     if (toolName === "set_explicit_plan") {
       const parsed = parseJsonArguments(rawArgs, "I could not parse your plan request. Please provide a tile like (x,y).");
       if (!parsed.ok) return asToolError(toolName, parsed.error);
-      if (typeof beliefs.advanceTimeFromClock === "function") {
-        beliefs.advanceTimeFromClock();
-      }
+      beliefs.advanceTimeFromClock();
       const validation = validateExplicitPlanArgs(parsed.value);
       if (!validation.ok) {
         return asToolError(toolName, `Plan rejected: ${validation.reason}.`, {
@@ -1146,9 +1144,7 @@ export function createToolExecutor({ beliefs, executor, logger, config }) {
     if (toolName === "set_team_rendezvous_task") {
       const parsed = parseJsonArguments(rawArgs, "I could not parse the rendezvous request. Please provide a tile like (x,y).");
       if (!parsed.ok) return asToolError(toolName, parsed.error);
-      if (typeof beliefs.advanceTimeFromClock === "function") {
-        beliefs.advanceTimeFromClock();
-      }
+      beliefs.advanceTimeFromClock();
       return executeTeamRendezvousTool(parsed.value, { senderId, sourceChatId });
     }
 
@@ -1158,9 +1154,7 @@ export function createToolExecutor({ beliefs, executor, logger, config }) {
         "I could not parse the parity wait request. Please specify axis='row' or 'column' and parity='odd' or 'even'."
       );
       if (!parsed.ok) return asToolError(toolName, parsed.error);
-      if (typeof beliefs.advanceTimeFromClock === "function") {
-        beliefs.advanceTimeFromClock();
-      }
+      beliefs.advanceTimeFromClock();
       return executeParityLineWaitTool(parsed.value, { senderId, sourceChatId });
     }
 
@@ -1170,9 +1164,7 @@ export function createToolExecutor({ beliefs, executor, logger, config }) {
         "I could not parse the parcel handoff request. Please provide an optional tile like (x,y)."
       );
       if (!parsed.ok) return asToolError(toolName, parsed.error);
-      if (typeof beliefs.advanceTimeFromClock === "function") {
-        beliefs.advanceTimeFromClock();
-      }
+      beliefs.advanceTimeFromClock();
       return executeParcelHandoffTool(parsed.value, { senderId, sourceChatId });
     }
 

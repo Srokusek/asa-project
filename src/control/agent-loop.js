@@ -804,11 +804,7 @@ export class AgentLoop {
 
     try {
       this.telemetry.nextTick();
-      if (typeof this.beliefs.advanceTimeFromClock === "function") {
-        this.beliefs.advanceTimeFromClock();
-      } else {
-        this.beliefs.advanceTime();
-      }
+      this.beliefs.advanceTimeFromClock();
       const events = this.beliefs.consumeEvents();
       for (const event of events) {
         const payload = forbiddenTileEventPayload(event);
