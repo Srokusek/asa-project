@@ -156,7 +156,3 @@ export function distanceFromAnyTileToRed(cacheIndex, sourcePosition, redId) {
   const distance = map.get(positionKey(sourcePosition));
   return Number.isFinite(distance) ? distance : Infinity;
 }
-
-export function __resetRedDistanceCacheForTests() {
-  RED_DISTANCE_CACHE.clear();
-}

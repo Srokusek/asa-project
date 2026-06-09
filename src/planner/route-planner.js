@@ -28,7 +28,6 @@ import {
   getDirectedNeighbors,
   manhattanGridPath,
   PriorityQueue,
-  reachableRedFromPosition,
   shortestGridPath
 } from "./path/pathfinder.js";
 import { buildDistanceOracle, getOracleEdge, reconstructGridPath } from "./path/distance-oracle.js";

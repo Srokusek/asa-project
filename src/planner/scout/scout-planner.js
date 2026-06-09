@@ -28,14 +28,6 @@ export function tileInformationValue(state, position, config) {
   return base;
 }
 
-export function visibleAvailablePackages(state, config) {
-  return state.greens.filter((green) => {
-    if (!hasAvailablePackage(green, config)) return false;
-    const lastSeen = asNumber(green.package?.lastSeenTime, NaN);
-    return packageConfidence(green) >= 1 || lastSeen >= asNumber(state.time, 0);
-  });
-}
-
 function returnToRedPenalty(state, position, config) { // penalty for getting trapped or long travel distance
   const distance = distanceToNearestReachableRed(state, position);
   if (!Number.isFinite(distance)) {

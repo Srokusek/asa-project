@@ -20,11 +20,6 @@ export function sameTile(a, b) {
   return positionKey(a) === positionKey(b);
 }
 
-export function isWithinSensingRange(a, b, range) {
-  if (!Number.isFinite(range)) return false;
-  return manhattan(a, b) <= range;
-}
-
 export function directionFromPositions(from, to) {
   const a = roundTilePosition(from);
   const b = roundTilePosition(to);

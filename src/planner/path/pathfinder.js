@@ -252,10 +252,6 @@ export function distanceToNearestReachableRed(state, position) {
   return Number.isFinite(distance) ? distance : Infinity;
 }
 
-export function reachableRedFromPosition(state, position) {
-  return directedDistanceFields(state).nearestReachableRedByCell.get(positionKey(position)) ?? null;
-}
-
 export function aStarGridPath(state, from, to) {
   if (!isWalkable(state, from) || !isWalkable(state, to)) return { cost: Infinity, path: [] };
   if (positionKey(from) === positionKey(to)) return { cost: 0, path: [copyPosition(from)] };
