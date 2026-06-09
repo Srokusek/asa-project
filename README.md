@@ -54,6 +54,15 @@ HOST=deliveroojs.bears.disi.unitn.it
 npm start
 ```
 
+To run a paired team from one checkout, keep two env files in the repo root and start each runtime with its matching script:
+
+```bash
+npm run start:bdi
+npm run start:llm
+```
+
+These scripts load `.env.bdi` and `.env.llm` respectively via `DOTENV_CONFIG_PATH`.
+
 ## Test
 
 ```bash
