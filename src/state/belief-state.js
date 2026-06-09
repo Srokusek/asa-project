@@ -1,9 +1,5 @@
 import { directionFromPositions, positionKey, roundTilePosition } from "../utils/geometry.js";
 
-function nowTime(fallback) {
-  return Number.isFinite(Number(fallback)) ? Number(fallback) : null;
-}
-
 export function normalizeSensingRange(value, fallback = null) {
   if (value === undefined || value === null) return fallback;
   if (value === Infinity) return Infinity;
@@ -596,10 +592,7 @@ export class BeliefState {
     this.dirty = false;
   }
 
-  updateTime(optionalServerTime) { // update belief time from server or locally if unavailable
-    const serverTime = nowTime(optionalServerTime);
-    if (serverTime === null) return this.time;
-    this.time = serverTime;
+  afterTimeAdvanced() {
     this.decayUnseenAgents(); // decay beliefs on unseen agents
     this.clearExpiredTemporaryBlocks(); // clear beliefs about temporarily blocked tiles which have expired (enough time has passed)
     this.clearExpiredTemporaryBlockedEdges(); // --||-- but for blocked edges
@@ -610,11 +603,7 @@ export class BeliefState {
   advanceTime(ticks = 1) { // manually advance time by a tick amount
     const step = Math.max(0, Number(ticks) || 0);
     this.time += step;
-    this.decayUnseenAgents(); // same belief decay as in previous functions
-    this.clearExpiredTemporaryBlocks();
-    this.clearExpiredTemporaryBlockedEdges();
-    this.clearExpiredManualTasks();
-    return this.time;
+    return this.afterTimeAdvanced();
   }
 
   advanceTimeFromClock() { // use local time to advance time
@@ -632,10 +621,7 @@ export class BeliefState {
     if (ticks > 0) {
       this.time += ticks;
       this.lastWallClock += ticks * Math.max(1, tickMs);
-      this.decayUnseenAgents(); // same belief decay as in previous functions
-      this.clearExpiredTemporaryBlocks();
-      this.clearExpiredTemporaryBlockedEdges();
-      this.clearExpiredManualTasks();
+      this.afterTimeAdvanced();
     }
 
     return this.time;
@@ -1007,7 +993,6 @@ export class BeliefState {
   }
 
   updateSensing(sensing = {}) {
-    this.updateTime(sensing.time);
     this.updateAgentsSensing(sensing.agents ?? []);
     this.updateParcelsSensing(sensing.parcels ?? [], sensing.positions ?? []);
   }

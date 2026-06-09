@@ -127,8 +127,7 @@ export function registerSdkListeners(socket, beliefs, config, logger = null) {
     beliefs.updateSensing({
       positions: asArray(sensing.positions),
       agents: asArray(sensing.agents),
-      parcels: asArray(sensing.parcels),
-      time: sensing.time
+      parcels: asArray(sensing.parcels)
     });
   });
 
