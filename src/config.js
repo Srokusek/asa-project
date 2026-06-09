@@ -39,7 +39,6 @@ function requiredAgentType(env) {
 
 export const DEFAULT_PLANNER_CONFIG = Object.freeze({
   meanPackageValue: 10,
-  packageVariance: 0,
   decayRate: 0.05,
   kWin: 1,
   ignoreEnemyEta: true,
@@ -51,7 +50,7 @@ export const DEFAULT_PLANNER_CONFIG = Object.freeze({
   enemySafetyMargin: 0,
   beliefDecayRate: 0.08,
   sensingRange: 5,
-  scoutCooldownTicks: 8,
+  scoutCooldownTicks: 200,
   scoutCongestionPenalty: 10,
   maxStalenessValue: 10000,
   greenInfoMultiplier: 4,
@@ -71,7 +70,7 @@ export const DEFAULT_PLANNER_CONFIG = Object.freeze({
   returnToRedWeight: 0.5,
   unifiedScoutCheckpointCount: 24,
   unifiedScoutStalenessWeight: 1.0,
-  unifiedScoutDistanceWeight: 1.0,
+  unifiedScoutDistanceWeight: 0.2,
   unifiedScoutTopKForRedTieBreak: 5,
   unifiedScoutRepeatTargetPenalty: 50,
   unifiedScoutRepeatSectorPenalty: 10,
@@ -81,7 +80,6 @@ export const DEFAULT_PLANNER_CONFIG = Object.freeze({
   enableEdgeTemporaryBlocks: true,
   temporaryEdgeBlockTtlTicks: 10,
   maxRepeatedBlockedMovesBeforeReplan: 2,
-  targetCongestionPenalty: 0,
   beamWidth: 100,
   topK: 16
 });
