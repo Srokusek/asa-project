@@ -14,6 +14,7 @@ import { createTelemetry } from "../telemetry/telemetry.js";
 import { createLogger } from "../utils/logger.js";
 import { directionFromPositions, manhattan, positionKey, sameTile } from "../utils/geometry.js";
 import { createChatProcessor } from "../llm/chat-processor.js";
+import { createAgentLoopDiagnostics } from "../llm/diagnostics.js";
 
 const HARD_REPLAN_EVENTS = new Set([
   "MOVE_FAILED",
@@ -65,39 +66,6 @@ function hasVisibleParcelEvent(events) {
   // if we have sensed a positive number of parcels, return true
 }
 
-function forbiddenTileEventPayload(event) {
-  if (!event || typeof event !== "object") return null;
-  const type = event.type;
-  if (!type || !String(type).startsWith("FORBIDDEN_TILE_")) return null;
-  const x = Number(event.payload?.x ?? event.payload?.target?.x);
-  const y = Number(event.payload?.y ?? event.payload?.target?.y);
-  return {
-    type,
-    x: Number.isFinite(x) ? x : null,
-    y: Number.isFinite(y) ? y : null,
-    reason: event.payload?.reason
-  };
-}
-
-function multiplierEventPayload(event) {
-  if (!event || typeof event !== "object") return null;
-  const type = event.type;
-  if (!type || !String(type).includes("MULTIPLIER_")) return null;
-  const x = Number(event.payload?.x ?? event.payload?.target?.x);
-  const y = Number(event.payload?.y ?? event.payload?.target?.y);
-  const multiplier = Number(event.payload?.multiplier);
-  const count = Number(event.payload?.count);
-  return {
-    type,
-    x: Number.isFinite(x) ? x : null,
-    y: Number.isFinite(y) ? y : null,
-    count: Number.isFinite(count) ? count : null,
-    multiplier: Number.isFinite(multiplier) ? multiplier : null,
-    reason: event.payload?.reason
-  };
-}
-
-
 export function routePathIsExecutable(routePlan) {
   /**
    * function for checking whether a path is executable
@@ -128,74 +96,6 @@ function isWaitingManualTask(task) {
   return task?.priority === "sticky_until_done" && task?.payload?.waitAtTarget === true;
 }
 
-function summarizeEvents(events = []) {
-  // summarize events from event queue (such as failed movement, new package observation etc.)
-  const counts = new Map();
-
-  for (const event of events) {
-    const type = eventType(event);
-    if (!type) continue;
-    counts.set(type, (counts.get(type) ?? 0) + 1);
-  }
-
-  if (counts.size === 0) return "missing_or_periodic_plan";
-
-  return [...counts.entries()]
-    .sort((a, b) => a[0].localeCompare(b[0]))
-    .map(([type, count]) => `${type}x${count}`)
-    .join(",");
-}
-
-function summarizeScoutTarget(target) {
-  // summarize the scouting target
-  if (!target) return null;
-  const rawId = String(target.id ?? "");
-  const compactId = // compact id usefu for logging
-    rawId.length > 80 ? `${rawId.slice(0, 60)}...` : rawId;
-  return {
-    id: compactId,
-    score: target.score,
-    primaryScore: target.primaryScore,
-    position: target.position,
-    distanceFromMe: target.distanceFromMe,
-    distanceToNearestRed: target.distanceToNearestRed,
-    trapPenaltyApplied: target.trapPenaltyApplied,
-    pathCost: target.pathCost,
-    checkpointValue: target.checkpointValue,
-    stalenessComponent: target.stalenessComponent,
-    multiplierComponent: target.multiplierComponent,
-    repeatPenalty: target.repeatPenalty,
-    coveredGreenCount: target.coveredGreenCount,
-    sampleGreenIds: Array.isArray(target.sampleGreenIds) ? target.sampleGreenIds.slice(0, 5) : undefined
-  };
-}
-
-export function compactSequence(sequence = []) {
-  // move sequence for logging
-  if (!Array.isArray(sequence)) return { text: "", sequenceLength: 0, truncated: false };
-  if (sequence.length <= 8) {
-    return { text: sequence.join(" -> "), sequenceLength: sequence.length, truncated: false };
-  }
-  return {
-    text: `${sequence[0]} -> ${sequence[1]} -> ${sequence[2]} -> ... -> ${sequence.at(-1)}`,
-    sequenceLength: sequence.length,
-    truncated: true
-  };
-}
-
-function compactCandidateDiagnostics(diagnostics = []) {
-  if (!Array.isArray(diagnostics)) return [];
-  const compact = diagnostics.slice(0, 10);
-  if (diagnostics.length <= 10) return compact;
-  return [...compact, { truncated: true, total: diagnostics.length }];
-}
-
-function compactScoutTargetId(id) {
-  const rawId = String(id ?? "");
-  if (rawId.length <= 80) return rawId;
-  return `${rawId.slice(0, 60)}...`;
-}
-
 function copyPosition(position) {
   return { x: Math.round(Number(position.x)), y: Math.round(Number(position.y)) };
 }
@@ -208,6 +108,7 @@ export class AgentLoop {
     this.logger = createLogger(config.logLevel);
     this.telemetry = createTelemetry(config);
     this.executor = new Executor(socket, beliefs, config, this.telemetry); // handes all executions with Deliveroo.js
+    this.diagnostics = createAgentLoopDiagnostics({ logger: this.logger, telemetry: this.telemetry, config: this.config });
     this.currentRoutePlan = null;
     this.currentExecutablePlan = null;
     this.actionIndex = 0;
@@ -339,12 +240,11 @@ export class AgentLoop {
     }
 
     this.recordBlockedMove(action, "move_failed");
-
-    this.logger.warn("move failed", {
-      blockedCell: action.to,
+    this.diagnostics.onMoveFailed({
+      beliefs: this.beliefs,
+      action,
       consecutiveMoveFailures: this.consecutiveMoveFailures,
-      sameBlockedMoveCount: this.sameBlockedMoveCount,
-      temporaryBlockedCells: this.beliefs.temporaryBlockedCells?.size ?? 0
+      sameBlockedMoveCount: this.sameBlockedMoveCount
     });
 
     return this.consecutiveMoveFailures;
@@ -370,45 +270,6 @@ export class AgentLoop {
     }
 
     return this.sameBlockedMoveCount;
-  }
-
-  summarizeVisiblePackages(routePlan) {
-    const minConfidence = Number(this.config.planner.minParcelConfidence ?? 0.3);
-    const candidatePackageIds = new Set(
-      (routePlan?.candidateGreens ?? [])
-        .map((green) => green.package?.id)
-        .filter((id) => id !== undefined && id !== null)
-        .map(String)
-    );
-    const ignoredVisiblePackages = [];
-    let visiblePackagesCount = 0;
-
-    for (const parcel of this.beliefs.parcels.values()) {
-      if (parcel.carriedBy) continue;
-      const reward = this.beliefs.estimateParcelReward?.(parcel) ?? Number(parcel.reward ?? 0);
-      const confidence = Number(parcel.confidence ?? 0);
-      const lastSeenTime = Number(parcel.lastSeenTime ?? -Infinity);
-      const isVisible = confidence >= 1 || lastSeenTime >= Number(this.beliefs.time ?? 0);
-      if (!isVisible || reward <= 0 || confidence < minConfidence) continue;
-
-      visiblePackagesCount += 1;
-      if (candidatePackageIds.has(String(parcel.id))) continue;
-      if (ignoredVisiblePackages.length >= 10) continue;
-
-      ignoredVisiblePackages.push({
-        id: String(parcel.id),
-        reward,
-        confidence,
-        distance: this.beliefs.me ? manhattan(this.beliefs.me, parcel) : null,
-        reason: "not_candidate"
-      });
-    }
-
-    return {
-      visiblePackagesCount,
-      candidatePackagesCount: candidatePackageIds.size,
-      ignoredVisiblePackages
-    };
   }
 
   resetMoveFailures() {
@@ -455,15 +316,10 @@ export class AgentLoop {
 
   rejectInvalidZeroActionPlan(routePlan, reason = "invalid_non_idle_zero_action") {
     this.invalidNonIdleZeroActionCount += 1;
-    const sequenceSummary = compactSequence(routePlan?.sequence);
-    this.logger.warn("invalid non-idle zero-action plan", {
-      mode: routePlan?.mode,
-      sequence: sequenceSummary.text,
-      sequenceLength: sequenceSummary.sequenceLength,
-      sequenceTruncated: sequenceSummary.truncated,
+    this.diagnostics.onInvalidZeroActionPlan({
+      routePlan,
       invalidNonIdleZeroActionCount: this.invalidNonIdleZeroActionCount,
-      fallbackStage:
-        this.invalidNonIdleZeroActionCount >= INVALID_TARGET_PLAN_LIMIT ? "scout" : routePlan?.fallbackStage
+      invalidTargetPlanLimit: INVALID_TARGET_PLAN_LIMIT
     });
     this.invalidatePlan(reason);
   }
@@ -554,10 +410,7 @@ export class AgentLoop {
 
   ensureManualPlan() {
     if (this.activeManualTask && !this.beliefs.hasManualTaskId?.(this.activeManualTask.id)) {
-      this.logger.info("manual task cleared", {
-        taskId: this.activeManualTask.id,
-        taskKey: this.activeManualTask?.payload?.taskKey ?? null
-      });
+      this.diagnostics.onManualTaskCleared({ task: this.activeManualTask });
       this.activeManualTask = null;
       this.invalidatePlan("manual_task_cleared");
     }
@@ -577,12 +430,7 @@ export class AgentLoop {
     const plannerState = buildPlannerState(this.beliefs, this.config);
     const routePlan = this.buildManualGotoPlan(task, plannerState);
     if (!routePlan) {
-      this.telemetry.record("manual_task_retry", {
-        taskId: task.id,
-        reason: "path_not_found",
-        target: task?.payload?.target ?? null
-      });
-      this.logger.warn("manual task retry", {
+      this.diagnostics.onManualTaskRetry({
         taskId: task.id,
         reason: "path_not_found",
         target: task?.payload?.target ?? null
@@ -596,15 +444,9 @@ export class AgentLoop {
     this.actionIndex = 0;
     this.lastPlanTime = this.beliefs.time;
     this.lastReplanCause = "manual_task";
-    this.telemetry.record("manual_task_started", {
+    this.diagnostics.onManualTaskStarted({
       taskId: task.id,
-      mode: routePlan.mode,
-      target: routePlan.manualTarget,
-      actionCount: this.currentExecutablePlan.length
-    });
-    this.logger.info("manual task started", {
-      taskId: task.id,
-      target: routePlan.manualTarget,
+      routePlan,
       actionCount: this.currentExecutablePlan.length
     });
     return true;
@@ -612,34 +454,14 @@ export class AgentLoop {
 
   makePlan(events = []) {
     const start = Date.now();
-    // collect the planner state
     const plannerState = buildPlannerState(this.beliefs, this.config);
-    const plannerSummary = {
-      width: plannerState.width,
-      height: plannerState.height,
-      greens: plannerState.greens.length,
-      greensWithPackage: plannerState.greens.filter((green) => green.package).length,
-      reds: plannerState.reds.length,
-      parcelsInBelief: this.beliefs.parcels.size,
-      carried: this.beliefs.carriedParcels.size,
-      temporaryBlockedCells: this.beliefs.temporaryBlockedCells?.size ?? 0,
-      pickupMultiplierRules: this.beliefs.pickupTileMultipliers?.size ?? 0,
-      deliveryMultiplierRules: this.beliefs.deliveryTileMultipliers?.size ?? 0,
-      me: this.beliefs.me
-    };
     const routePlan = replan(plannerState);
     let executablePlan = routePathIsExecutable(routePlan) ? buildExecutablePlan(routePlan) : [];
     const elapsed = Date.now() - start;
-    this.logger.debug("planner state summary", { ...plannerSummary, mode: routePlan.mode });
+    this.diagnostics.onPlannerStateSummary({ beliefs: this.beliefs, plannerState, routePlan });
 
     if (routePlan.mode !== "IDLE" && executablePlan.length === 0) {
-      const sequenceSummary = compactSequence(routePlan.sequence);
-      this.logger.warn("non-idle plan produced zero actions", {
-        mode: routePlan.mode,
-        sequence: sequenceSummary.text,
-        sequenceLength: sequenceSummary.sequenceLength,
-        sequenceTruncated: sequenceSummary.truncated
-      });
+      this.diagnostics.onNonIdleZeroActionPlan({ routePlan });
 
       if (!this.canUseFallbackExploration(routePlan)) {
         this.currentRoutePlan = routePlan;
@@ -662,12 +484,7 @@ export class AgentLoop {
     }
 
     if (executablePlan.length === 0 && routePlan.sequence.length > 1) {
-      const sequenceSummary = compactSequence(routePlan.sequence);
-      this.logger.warn("planner produced a non-executable path", {
-        sequence: sequenceSummary.text,
-        sequenceLength: sequenceSummary.sequenceLength,
-        sequenceTruncated: sequenceSummary.truncated
-      });
+      this.diagnostics.onNonExecutablePath({ routePlan });
     }
 
     this.currentRoutePlan = routePlan;
@@ -680,114 +497,21 @@ export class AgentLoop {
       this.beliefs.markScoutTargetAttempt?.(routePlan.scoutTarget.id, this.beliefs.time);
     }
 
-    const eventsSeen = summarizeEvents(events);
-    const replanCause = this.lastReplanCause ?? "missing_plan";
-    const candidates = (routePlan.candidateGreens ?? []).map((green) => green.id).join(",");
-    const scoutTarget = summarizeScoutTarget(routePlan.scoutTarget);
-    const sequenceSummary = compactSequence(routePlan.sequence);
-    const candidateDiagnostics = compactCandidateDiagnostics(routePlan.candidateDiagnostics);
-    const visiblePackageSummary = this.summarizeVisiblePackages(routePlan);
-    const adjustedValues = (routePlan.candidateDiagnostics ?? [])
-      .map((entry) => Number(entry?.estimatedDeliveredValue))
-      .filter((value) => Number.isFinite(value));
-    const adjustedDeliveredEstimateMax =
-      adjustedValues.length > 0 ? Math.max(...adjustedValues) : null;
-    this.logger.info("replan", {
-      eventsSeen,
-      replanCause,
-      mode: routePlan.mode,
-      sequence: sequenceSummary.text,
-      sequenceLength: sequenceSummary.sequenceLength,
-      sequenceTruncated: sequenceSummary.truncated,
-      value: routePlan.value,
-      actions: executablePlan.length,
-      candidates,
-      invalidPlanDetected: Boolean(routePlan.invalidPlanDetected),
-      fallbackStage: routePlan.fallbackStage ?? "full_plan",
-      hasDirectionalTiles: Boolean(routePlan.hasDirectionalTiles ?? routePlan.profile?.hasDirectionalTiles),
-      directedDistanceFieldsBuilt: Boolean(routePlan.directedDistanceFieldsBuilt),
-      candidateDiagnostics,
-      ...visiblePackageSummary,
-      activePickupMultiplierRules: this.beliefs.pickupTileMultipliers?.size ?? 0,
-      activeDeliveryMultiplierRules: this.beliefs.deliveryTileMultipliers?.size ?? 0,
-      adjustedDeliveredEstimateMax,
-      scoutTarget,
-      oraclePoints: routePlan.oracle?.points?.length ?? 0,
-      oraclePathfindingCalls: routePlan.oracle?.stats?.pathfindingCalls ?? 0,
-      oracleSingleSourceBfsRuns: routePlan.oracle?.stats?.singleSourceBfsRuns ?? 0,
-      oracleEdgeRequests: routePlan.oracle?.stats?.edgeRequests ?? 0,
-      oracleLazyEdgeComputes: routePlan.oracle?.stats?.lazyEdgeComputes ?? 0,
-      oracleCostCacheHits: routePlan.oracle?.stats?.costCacheHits ?? 0,
-      oraclePathComputes: routePlan.oracle?.stats?.pathComputes ?? 0,
-      staticIndexBuildMs: routePlan.oracle?.stats?.staticIndexBuildMs ?? 0,
-      staticIndexReuseCount: routePlan.oracle?.stats?.staticIndexReuseCount ?? 0,
-      startSingleSourceMs: routePlan.oracle?.stats?.startSingleSourceMs ?? 0,
-      dynamicPathRepairs: routePlan.oracle?.stats?.dynamicPathRepairs ?? 0,
-      dynamicRepairFailReplans: routePlan.oracle?.stats?.dynamicRepairFailReplans ?? 0,
-      redDistanceCacheHit: routePlan.oracle?.stats?.redDistanceCacheHit ?? 0,
-      redDistanceCacheMiss: routePlan.oracle?.stats?.redDistanceCacheMiss ?? 0,
-      redDistanceCacheBuildMs: routePlan.oracle?.stats?.redDistanceCacheBuildMs ?? 0,
-      redDistanceCacheTopologyHit: routePlan.oracle?.stats?.redDistanceCacheTopologyHit ?? 0,
-      greenRecentlyVisited: routePlan.scoutTarget
-        ? this.beliefs.greenRecentlyVisited?.(
-            routePlan.scoutTarget.id,
-            this.config.planner.scoutCooldownTicks ?? 8
-          )
-        : undefined,
-      temporaryBlockedCells: this.beliefs.temporaryBlockedCells?.size ?? 0,
+    this.diagnostics.onReplan({
+      beliefs: this.beliefs,
+      plannerState,
+      routePlan,
+      executablePlan,
+      events,
+      replanCause: this.lastReplanCause ?? "missing_plan",
       elapsedMs: elapsed
     });
 
-    this.telemetry.record("replan", {
-      mode: routePlan.mode,
-      currentPosition: plannerState.me?.position,
-      target: routePlan.scoutTarget?.position ?? routePlan.path?.at?.(-1) ?? null,
-      sequence: sequenceSummary.text,
-      sequenceLength: sequenceSummary.sequenceLength,
-      sequenceTruncated: sequenceSummary.truncated,
-      expectedValue: routePlan.value,
-      score: this.beliefs.me?.score,
-      parcelsInBelief: this.beliefs.parcels.size,
-      greensWithPackage: plannerSummary.greensWithPackage,
-      carriedCount: this.beliefs.carriedParcels.size,
-      planningTimeMs: elapsed,
-      temporaryBlockedCells: this.beliefs.temporaryBlockedCells?.size ?? 0,
-      scoutTarget: compactScoutTargetId(routePlan.scoutTarget?.id),
-      scoutTargetDetails: scoutTarget,
-      candidateCount: routePlan.candidateGreens?.length ?? 0,
-      invalidPlanDetected: Boolean(routePlan.invalidPlanDetected),
-      fallbackStage: routePlan.fallbackStage ?? "full_plan",
-      hasDirectionalTiles: Boolean(routePlan.hasDirectionalTiles ?? routePlan.profile?.hasDirectionalTiles),
-      directedDistanceFieldsBuilt: Boolean(routePlan.directedDistanceFieldsBuilt),
-      candidateDiagnostics,
-      ...visiblePackageSummary,
-      activePickupMultiplierRules: this.beliefs.pickupTileMultipliers?.size ?? 0,
-      activeDeliveryMultiplierRules: this.beliefs.deliveryTileMultipliers?.size ?? 0,
-      adjustedDeliveredEstimateMax,
-      oraclePoints: routePlan.oracle?.points?.length ?? 0,
-      oraclePathfindingCalls: routePlan.oracle?.stats?.pathfindingCalls ?? 0,
-      oracleSingleSourceBfsRuns: routePlan.oracle?.stats?.singleSourceBfsRuns ?? 0,
-      oracleEdgeRequests: routePlan.oracle?.stats?.edgeRequests ?? 0,
-      oracleLazyEdgeComputes: routePlan.oracle?.stats?.lazyEdgeComputes ?? 0,
-      oracleCostCacheHits: routePlan.oracle?.stats?.costCacheHits ?? 0,
-      oraclePathComputes: routePlan.oracle?.stats?.pathComputes ?? 0,
-      staticIndexBuildMs: routePlan.oracle?.stats?.staticIndexBuildMs ?? 0,
-      staticIndexReuseCount: routePlan.oracle?.stats?.staticIndexReuseCount ?? 0,
-      startSingleSourceMs: routePlan.oracle?.stats?.startSingleSourceMs ?? 0,
-      dynamicPathRepairs: routePlan.oracle?.stats?.dynamicPathRepairs ?? 0,
-      dynamicRepairFailReplans: routePlan.oracle?.stats?.dynamicRepairFailReplans ?? 0,
-      redDistanceCacheHit: routePlan.oracle?.stats?.redDistanceCacheHit ?? 0,
-      redDistanceCacheMiss: routePlan.oracle?.stats?.redDistanceCacheMiss ?? 0,
-      redDistanceCacheBuildMs: routePlan.oracle?.stats?.redDistanceCacheBuildMs ?? 0,
-      redDistanceCacheTopologyHit: routePlan.oracle?.stats?.redDistanceCacheTopologyHit ?? 0,
-      actionCount: executablePlan.length,
-      eventsSeen,
-      replanCause,
-      reason: replanCause
-    });
-
     if (elapsed > this.config.planner.planningBudgetMs) {
-      this.logger.warn("planning exceeded budget", { elapsedMs: elapsed, budgetMs: this.config.planner.planningBudgetMs });
+      this.diagnostics.onPlanningExceededBudget({
+        elapsedMs: elapsed,
+        budgetMs: this.config.planner.planningBudgetMs
+      });
     }
   }
 
@@ -806,26 +530,7 @@ export class AgentLoop {
       this.telemetry.nextTick();
       this.beliefs.advanceTimeFromClock();
       const events = this.beliefs.consumeEvents();
-      for (const event of events) {
-        const payload = forbiddenTileEventPayload(event);
-        if (payload) {
-          if (payload.type === "FORBIDDEN_TILE_ADDED") {
-            this.telemetry.record("forbidden_tile_added", payload);
-          } else if (payload.type === "FORBIDDEN_TILE_REJECTED") {
-            this.telemetry.record("forbidden_tile_rejected", payload);
-          }
-        }
-        const multiplierPayload = multiplierEventPayload(event);
-        if (multiplierPayload) {
-          if (multiplierPayload.type === "PICKUP_MULTIPLIER_SET") {
-            this.telemetry.record("pickup_multiplier_set", multiplierPayload);
-          } else if (multiplierPayload.type === "DELIVERY_MULTIPLIER_SET") {
-            this.telemetry.record("delivery_multiplier_set", multiplierPayload);
-          } else if (multiplierPayload.type === "DELIVERY_COUNT_MULTIPLIER_SET") {
-            this.telemetry.record("delivery_count_multiplier_set", multiplierPayload);
-          }
-        }
-      }
+      this.diagnostics.recordBeliefEvents(events);
       // events is a list of all events that the agent has sensed since the last tick
       if (!this.beliefs.ready) return; // stop if connection, map or other crucial steps have not been resolved yet
 
@@ -872,86 +577,49 @@ export class AgentLoop {
         return;
       }
 
-      this.logger.debug("execute action", {
-        index: this.actionIndex,
+      this.diagnostics.onExecuteAction({
+        routePlan: this.currentRoutePlan,
         action,
-        sequence: compactSequence(this.currentRoutePlan?.sequence).text
+        actionIndex: this.actionIndex
       });
 
       // take note if there is another agent in the target tile of a move action
       if (action.type === "move" && action.to && this.enemyOccupies(action.to)) {
-        const blockedMode = this.currentRoutePlan?.mode;
-        // keep track of repeated cases of this happening
         const repeated = this.recordBlockedMove(action, "enemy_in_next_cell");
-        // mark the tile as temporarily blocked for 2 ticks
         this.beliefs.markTemporaryBlocked(action.to, 2, "enemy_in_next_cell");
-        this.logger.warn("enemy_in_next_cell", {
-          blockedCell: action.to,
-          repeatedBlockedMove: repeated,
-          temporaryBlockedCells: this.beliefs.temporaryBlockedCells?.size ?? 0
-        });
-        this.telemetry.record("enemy_in_next_cell", {
-          mode: blockedMode,
-          currentPosition: this.beliefs.me ? { x: this.beliefs.me.x, y: this.beliefs.me.y } : null,
+        this.diagnostics.onEnemyBlockedMove({
+          beliefs: this.beliefs,
+          routePlan: this.currentRoutePlan,
           action,
-          result: false,
-          temporaryBlockedCells: this.beliefs.temporaryBlockedCells?.size ?? 0
+          repeated
         });
-        if (repeated >= Number(this.config.planner.maxRepeatedBlockedMovesBeforeReplan ?? 2)) {
-          this.logger.warn("repeatedBlockedMove", {
-            action,
-            sameBlockedMoveCount: repeated,
-            reason: "enemy_in_next_cell"
-          });
-        }
         this.invalidatePlan("enemy_in_next_cell");
         return;
       }
 
-      // if we have an executable action, record the start of the action with related beliefs
-      this.telemetry.record("action_start", {
-        mode: this.currentRoutePlan?.mode,
-        currentPosition: this.beliefs.me ? { x: this.beliefs.me.x, y: this.beliefs.me.y } : null,
-        target: this.currentRoutePlan?.path?.at?.(-1) ?? null,
-        sequence: compactSequence(this.currentRoutePlan?.sequence).text,
-        action,
-        score: this.beliefs.me?.score,
-        expectedValue: this.currentRoutePlan?.value,
-        parcelsInBelief: this.beliefs.parcels.size,
-        greensWithPackage: this.currentRoutePlan?.state?.greens?.filter((green) => green.package).length ?? 0,
-        carriedCount: this.beliefs.carriedParcels.size,
-        temporaryBlockedCells: this.beliefs.temporaryBlockedCells?.size ?? 0,
-        scoutTarget: this.currentRoutePlan?.scoutTarget?.id,
-        candidateCount: this.currentRoutePlan?.candidateGreens?.length ?? 0
+      this.diagnostics.onActionStart({
+        beliefs: this.beliefs,
+        routePlan: this.currentRoutePlan,
+        action
       });
 
-      // await response from deliveroo
       const ok = await this.executor.execute(action);
 
-      // if action failed:
       if (ok === false) {
         if (action.type === "move") {
-          // if the action was a move, count how many times it has failed (specific to lcoation)
-          // note: the count gets reset after a success
           const failures = this.recordMoveFailure(action);
           const repeatedLimit = Number(this.config.planner.maxRepeatedBlockedMovesBeforeReplan ?? 2);
-          // log warning about failure
           if (this.sameBlockedMoveCount >= repeatedLimit) {
-            this.logger.warn("repeatedBlockedMove", {
+            this.diagnostics.onRepeatedBlockedMove({
+              routePlan: this.currentRoutePlan,
               action,
               sameBlockedMoveCount: this.sameBlockedMoveCount,
               reason: "move_failed"
             });
-            this.telemetry.record("repeated_blocked_move", {
-              mode: this.currentRoutePlan?.mode,
-              action,
-              sameBlockedMoveCount: this.sameBlockedMoveCount
-            });
           } else if (failures >= 3) {
-            // if we have 3 or more move failures here, force a "sidestep" action
             const sidestep = this.explorationAction();
             if (sidestep) {
-              this.logger.warn("forced sidestep after repeated move failure", {
+              this.diagnostics.onForcedSidestep({
                 action: sidestep,
                 consecutiveMoveFailures: failures
               });
@@ -959,22 +627,17 @@ export class AgentLoop {
             }
           }
         }
-        this.telemetry.record("action_failed", {
-          mode: this.currentRoutePlan?.mode,
+        this.diagnostics.onActionFailed({
+          beliefs: this.beliefs,
+          routePlan: this.currentRoutePlan,
           action,
-          result: false,
-          consecutiveMoveFailures: this.consecutiveMoveFailures,
-          temporaryBlockedCells: this.beliefs.temporaryBlockedCells?.size ?? 0
+          consecutiveMoveFailures: this.consecutiveMoveFailures
         });
         if (this.currentRoutePlan?.mode === "MANUAL_GOTO" && this.activeManualTask) {
-          this.telemetry.record("manual_task_retry", {
+          this.diagnostics.onManualTaskRetry({
             taskId: this.activeManualTask.id,
             reason: "action_failed",
-            target: this.currentRoutePlan?.manualTarget ?? this.activeManualTask?.payload?.target ?? null
-          });
-          this.logger.warn("manual task retry", {
-            taskId: this.activeManualTask.id,
-            reason: "action_failed_replan",
+            logReason: "action_failed_replan",
             target: this.currentRoutePlan?.manualTarget ?? this.activeManualTask?.payload?.target ?? null
           });
         }
@@ -996,39 +659,25 @@ export class AgentLoop {
         const waitingManualTask = isWaitingManualTask(completedManualTask);
         // if this has finished the plan:
         if (SCOUT_PLAN_MODES.has(this.currentRoutePlan?.mode) && this.currentRoutePlan.scoutTarget) {
-          // if the plan was a scouting plan, mark target location as scouted
           this.beliefs.markScoutVisited(
             this.currentRoutePlan.scoutTarget.id,
             this.currentRoutePlan.scoutTarget.position
           );
         }
-        this.telemetry.record("plan_completed", {
-          // for other plan types, mark as completed
-          mode: this.currentRoutePlan?.mode,
-          sequence: compactSequence(this.currentRoutePlan?.sequence).text,
-          scoutTarget: compactScoutTargetId(this.currentRoutePlan?.scoutTarget?.id),
-          currentPosition: this.beliefs.me ? { x: this.beliefs.me.x, y: this.beliefs.me.y } : null
+        this.diagnostics.onPlanCompleted({
+          beliefs: this.beliefs,
+          routePlan: this.currentRoutePlan
         });
         if (completedManualTask) {
           if (waitingManualTask) {
-            this.telemetry.record("manual_task_waiting", {
-              taskId: completedManualTask.id,
-              target: this.currentRoutePlan?.manualTarget ?? completedManualTask?.payload?.target ?? null,
-              taskKey: completedManualTask?.payload?.taskKey ?? null
-            });
-            this.logger.info("manual task waiting", {
-              taskId: completedManualTask.id,
-              target: this.currentRoutePlan?.manualTarget ?? completedManualTask?.payload?.target ?? null,
-              taskKey: completedManualTask?.payload?.taskKey ?? null
+            this.diagnostics.onManualTaskWaiting({
+              task: completedManualTask,
+              routePlan: this.currentRoutePlan
             });
           } else {
-            this.telemetry.record("manual_task_completed", {
-              taskId: completedManualTask.id,
-              target: this.currentRoutePlan?.manualTarget ?? completedManualTask?.payload?.target ?? null
-            });
-            this.logger.info("manual task completed", {
-              taskId: completedManualTask.id,
-              target: this.currentRoutePlan?.manualTarget ?? completedManualTask?.payload?.target ?? null
+            this.diagnostics.onManualTaskCompleted({
+              task: completedManualTask,
+              routePlan: this.currentRoutePlan
             });
             this.beliefs.consumeManualTask?.();
             this.activeManualTask = null;
