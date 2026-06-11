@@ -60,8 +60,6 @@ export const DEFAULT_PLANNER_CONFIG = Object.freeze({
   maxStalenessValue: 10000,
   greenInfoMultiplier: 4,
   redInfoMultiplier: 0.2,
-  localExploreReversePenalty: 20,
-  localExploreInfoWeight: 1,
   coverageSectorSize: 5,
   returnToRedWeight: 0.1,
   unifiedScoutCheckpointCount: 24,

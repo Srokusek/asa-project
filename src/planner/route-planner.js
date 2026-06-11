@@ -67,8 +67,7 @@ import { baseRoutePlan } from "./route-plan.js";
 import {
   buildScoutCheckpointIndex,
   buildScoutCheckpointSignature,
-  buildUnifiedScoutPlan,
-  buildLocalExplorePlan
+  buildUnifiedScoutPlan
 } from "./scout/scout-planner.js";
 
 const EPSILON = 1e-9;
@@ -425,16 +424,6 @@ export function replan(state) {
         scoutCheckpointCacheHit: checkpointIndex.cacheHit
       };
     }
-  }
-
-  const localExplorePlan = buildLocalExplorePlan(planningState, profile, config);
-  if (localExplorePlan) {
-    return {
-      ...localExplorePlan,
-      invalidPlanDetected,
-      fallbackStage: "local_explore",
-      candidateDiagnostics
-    };
   }
 
   return {

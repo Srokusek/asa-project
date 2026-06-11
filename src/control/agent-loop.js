@@ -45,8 +45,7 @@ const TARGET_PLAN_MODES = new Set([
 ]);
 const INVALID_TARGET_PLAN_LIMIT = 3;
 const SCOUT_PLAN_MODES = new Set([
-  "SCOUT_UNIFIED",
-  "LOCAL_EXPLORE"
+  "SCOUT_UNIFIED"
 ]);
 
 function eventType(event) {
@@ -290,7 +289,7 @@ export class AgentLoop {
   }
 
   canUseFallbackExploration(routePlan = this.currentRoutePlan) {
-    if (routePlan?.mode === "IDLE" || routePlan?.mode === "LOCAL_EXPLORE") return true;
+    if (routePlan?.mode === "IDLE") return true;
     if (TARGET_PLAN_MODES.has(routePlan?.mode)) return false;
     const hasCandidates = (routePlan?.candidateGreens ?? []).length > 0;
     const hasCarried = this.beliefs.carriedParcels.size > 0;

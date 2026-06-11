@@ -3,29 +3,12 @@ import { normalizeSensingRange, sensingRangeSignature } from "../../state/belief
 import { DEFAULT_PARAMS } from "../default-params.js";
 import { baseRoutePlan } from "../route-plan.js";
 import { initialPlan } from "../search/plan-search.js";
-import { asNumber, copyPosition, getCell, isWalkable, positionKey } from "../path/grid-utils.js";
+import { asNumber, copyPosition, isWalkable, positionKey } from "../path/grid-utils.js";
 import { bfsAllDistancesFrom, distanceToNearestReachableRed, pathFromBfsAll, shortestGridPath } from "../path/pathfinder.js";
-import { hasAvailablePackage, packageConfidence, pickupMultiplierAt } from "../scoring/green-scorer.js";
+import { pickupMultiplierAt } from "../scoring/green-scorer.js";
 
 function pairKey(fromId, toId) {
   return `${fromId}->${toId}`;
-}
-
-export function tileInformationValue(state, position, config) {
-  const cell = getCell(state, position);
-  if (!cell || cell.blocked) return 0;
-
-  const key = positionKey(position);
-  const observedMap = cell.type === "green" ? state.lastObservedAtByGreen : state.lastObservedAtByTile;
-  const fallbackMap = state.lastObservedAtByTile;
-  const last = observedMap?.[key] ?? fallbackMap?.[key];
-  const staleness =
-    last === undefined ? config.maxStalenessValue : Math.max(0, asNumber(state.time, 0) - asNumber(last, 0));
-
-  let base = Math.min(config.maxStalenessValue, staleness);
-  if (cell.type === "green") base *= config.greenInfoMultiplier;
-  if (cell.type === "red") base *= config.redInfoMultiplier;
-  return base;
 }
 
 function returnToRedPenalty(state, position, config) { // penalty for getting trapped or long travel distance
@@ -314,110 +297,4 @@ export function buildUnifiedScoutPlan(state, profile, config, greenScores, check
 function sectorIdFor(position, config) {
   const size = Math.max(1, asNumber(config.coverageSectorSize, DEFAULT_PARAMS.coverageSectorSize));
   return `${Math.floor(position.x / size)},${Math.floor(position.y / size)}`;
-}
-
-function previousExplorePosition(state) {
-  if (state.lastPosition) return copyPosition(state.lastPosition);
-  if (Array.isArray(state.recentPositions) && state.recentPositions.length > 0) {
-    return copyPosition(state.recentPositions.at(-1));
-  }
-  return null;
-}
-
-function temporaryBlockScorePenalty(state, position) {
-  const key = positionKey(position);
-  const blocks = state.temporaryBlockedCells;
-  if (!blocks) return 0;
-  if (blocks instanceof Map) return blocks.has(key) ? 100 : 0;
-  if (Array.isArray(blocks)) {
-    return blocks.some((block) => positionKey(block.position ?? block) === key) ? 100 : 0;
-  }
-  return blocks[key] ? 100 : 0;
-}
-
-function enemyProximityPenalty(state, position, config) {
-  let penalty = 0;
-  for (const enemy of state.enemies ?? []) {
-    const distance = manhattan(enemy.position, position);
-    if (distance <= 1) penalty += asNumber(config.scoutCongestionPenalty, 10);
-    else if (distance === 2) penalty += asNumber(config.scoutCongestionPenalty, 10) / 2;
-  }
-  return penalty;
-}
-
-function localExploreTieBreaker(state, position) {
-  const seed = asNumber(state.time, 0) + position.x * 31 + position.y * 17;
-  return (Math.abs(seed) % 4) * 1e-3;
-}
-
-export function buildLocalExplorePlan(state, profile, config) {
-  const start = copyPosition(state.me.position);
-  const previous = previousExplorePosition(state);
-  const reverseKey = previous ? positionKey(previous) : null;
-  const candidates = [];
-
-  for (const position of [
-    { x: start.x + 1, y: start.y },
-    { x: start.x - 1, y: start.y },
-    { x: start.x, y: start.y + 1 },
-    { x: start.x, y: start.y - 1 }
-  ]) {
-    if (!isWalkable(state, position)) continue;
-    const edge = shortestGridPath(state, start, position, profile);
-    if (!Number.isFinite(edge.cost) || edge.path.length < 2) continue;
-    const returnPenalty = returnToRedPenalty(state, position, config);
-
-    const isReverse = reverseKey !== null && positionKey(position) === reverseKey;
-    const score =
-      asNumber(config.localExploreInfoWeight, 1) * tileInformationValue(state, position, config) +
-      localExploreTieBreaker(state, position) -
-      returnPenalty.penalty -
-      (isReverse ? asNumber(config.localExploreReversePenalty, 20) : 0) -
-      temporaryBlockScorePenalty(state, position) -
-      enemyProximityPenalty(state, position, config);
-    candidates.push({ position, edge, score, isReverse, returnPenalty });
-  }
-
-  candidates.sort((a, b) => b.score - a.score || Number(a.isReverse) - Number(b.isReverse));
-
-  for (const candidate of candidates) {
-    const { position, edge } = candidate;
-    const startPoint = { id: "START", type: "start", position: start };
-    const explorePoint = { id: "EXPLORE", type: "explore", position: copyPosition(position), noPickup: true };
-    const oracle = {
-      entries: new Map([
-        [
-          pairKey("START", "EXPLORE"),
-          {
-            fromId: "START",
-            toId: "EXPLORE",
-            cost: edge.cost,
-            path: edge.path
-          }
-        ]
-      ]),
-      points: [startPoint, explorePoint],
-      pointsById: new Map([
-        ["START", startPoint],
-        ["EXPLORE", explorePoint]
-      ]),
-      profile
-    };
-
-    return baseRoutePlan({
-      mode: "LOCAL_EXPLORE",
-      sequence: ["START", "EXPLORE"],
-      path: edge.path.map(copyPosition),
-      value: candidate.score,
-      plan: initialPlan(state),
-      profile,
-      config,
-      greenScores: {},
-      candidateGreens: [],
-      oracle,
-      state
-    });
-  }
-
-  return null;
 }
