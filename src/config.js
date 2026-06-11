@@ -38,23 +38,41 @@ function requiredAgentType(env) {
 }
 
 export const DEFAULT_PLANNER_CONFIG = Object.freeze({
+  // Parcel scoring and competition.
   meanPackageValue: 10,
   decayRate: 0.05,
   kWin: 1,
-  ignoreEnemyEta: true,
+  ignoreEnemyEta: false,
   moveWeight: 1,
   betaCarry: 0.5,
-  periodicReplanTicks: 50,
-  timeTickMs: 50,
   minParcelConfidence: 0.3,
   enemySafetyMargin: 0,
+
+  // Belief aging and world-state timing.
+  periodicReplanTicks: 50,
+  timeTickMs: 1,
   beliefDecayRate: 0.08,
   sensingRange: 5,
+
+  // Scouting and exploration behavior.
   scoutCooldownTicks: 200,
   scoutCongestionPenalty: 10,
   maxStalenessValue: 10000,
   greenInfoMultiplier: 4,
   redInfoMultiplier: 0.2,
+  localExploreReversePenalty: 20,
+  localExploreInfoWeight: 1,
+  coverageSectorSize: 5,
+  returnToRedWeight: 0.1,
+  unifiedScoutCheckpointCount: 24,
+  unifiedScoutStalenessWeight: 1.0,
+  unifiedScoutDistanceWeight: 0.0,
+  unifiedScoutTopKForRedTieBreak: 5,
+  unifiedScoutRepeatTargetPenalty: 50,
+  unifiedScoutRepeatSectorPenalty: 10,
+  failedScoutTargetCooldownTicks: 40,
+
+  // Candidate selection and green clustering.
   clusterPickupRadius: 3,
   clusterPickupBonusWeight: 0.6,
   minClusterPackageValue: 3,
@@ -63,23 +81,18 @@ export const DEFAULT_PLANNER_CONFIG = Object.freeze({
   clusterExpansionRadius: 3,
   clusterExpansionLimit: 6,
   maxCandidateGreens: 16,
-  localExploreReversePenalty: 20,
-  localExploreInfoWeight: 1,
-  failedScoutTargetCooldownTicks: 40,
-  coverageSectorSize: 5,
-  returnToRedWeight: 0.5,
-  unifiedScoutCheckpointCount: 24,
-  unifiedScoutStalenessWeight: 1.0,
-  unifiedScoutDistanceWeight: 0.2,
-  unifiedScoutTopKForRedTieBreak: 5,
-  unifiedScoutRepeatTargetPenalty: 50,
-  unifiedScoutRepeatSectorPenalty: 10,
-  trapPenalty: 10000,
+
+  // Search cost, safety, and planning budget.
+  trapPenalty: 1000000,
   planningBudgetMs: 200,
   topKRedCandidates: 5,
+
+  // Recovery from blocked movement.
   enableEdgeTemporaryBlocks: true,
-  temporaryEdgeBlockTtlTicks: 10,
+  temporaryEdgeBlockTtlTicks: 2000,
   maxRepeatedBlockedMovesBeforeReplan: 2,
+
+  // Search breadth limits.
   beamWidth: 100,
   topK: 16
 });
