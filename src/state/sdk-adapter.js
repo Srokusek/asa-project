@@ -70,12 +70,12 @@ function isReleaseMessage(text) {
 
 function clearManualState(beliefs, fromId, logger) {
   const removed = beliefs.clearAllManualTasks?.() ?? [];
-  const handoffCleared = beliefs.clearParcelHandoffTask?.("teammate_clear") ?? false;
+  const handoffCleared = beliefs.clearParcelTileTasks?.("teammate_clear") ?? false;
   if (removed.length > 0 || handoffCleared) {
     logger?.info?.("manual state cleared", {
       fromId: fromId ?? null,
       taskIds: removed.map((task) => task.id),
-      parcelHandoffCleared: Boolean(handoffCleared)
+      parcelTileTasksCleared: Boolean(handoffCleared)
     });
   }
   return removed.length > 0 || handoffCleared;
