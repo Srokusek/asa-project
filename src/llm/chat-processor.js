@@ -65,7 +65,7 @@ function buildPrompt(message) {
         "- set_explicit_plan: create explicit goto_tile manual tasks, optionally as a sequence with targets=[{x,y},...] or with a selector for one relative tile.",
         "- set_team_rendezvous_task: create a sticky rendezvous task for both agents near one target coordinate. Use target={x,y} and include maxDistance when the admin states one.",
         "- set_parity_line_wait_task: create sticky wait tasks for both agents on the nearest walkable odd/even row or column. Use axis='row' or axis='column' with parity='odd' or parity='even'.",
-        "- set_parcel_handoff_task: create a sticky parcel handoff task for both agents. Use target={x,y} when provided, otherwise omit target to auto-pick the nearest walkable tile to the LLM agent. The handoff zone is the walkable 3x3 neighborhood centered on that tile.",
+        "- set_parcel_handoff: create a sticky parcel handoff by setting a hard pickup-tile task for the LLM agent and a hard delivery-tile task for the BDI teammate. Use target={x,y} when provided, otherwise omit target to auto-pick the nearest walkable tile to the LLM agent. The handoff zone is the walkable 3x3 neighborhood centered on that tile.",
         "- set_forbidden_tile: add sticky forbidden tiles, optionally using a selector for one relative tile.",
         "- set_pickup_tile_multiplier: add sticky pickup reward multipliers. For relative pickup instructions like 'rightmost pickup tile' or 'leftmost pickup tile', use selector with scope='pickup' instead of coordinates.",
         "- set_pickup_tile_bonus: add sticky pickup reward bonuses. For relative pickup instructions like 'topmost pickup tile' or 'bottommost pickup tile', use selector with scope='pickup' instead of coordinates.",
@@ -132,7 +132,7 @@ function buildPrompt(message) {
           id: "example_parcel_handoff",
           type: "function",
           function: {
-            name: "set_parcel_handoff_task",
+            name: "set_parcel_handoff",
             arguments: JSON.stringify({
               reason: "admin parcel handoff request"
             })
@@ -143,10 +143,10 @@ function buildPrompt(message) {
     {
       role: "tool",
       tool_call_id: "example_parcel_handoff",
-      name: "set_parcel_handoff_task",
+      name: "set_parcel_handoff",
       content: JSON.stringify({
         ok: true,
-        tool: "set_parcel_handoff_task",
+        tool: "set_parcel_handoff",
         message: "Parcel handoff accepted.",
         data: {
           target: { x: 5, y: 9 }

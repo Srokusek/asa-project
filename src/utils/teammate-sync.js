@@ -181,9 +181,7 @@ function createManualTaskSyncConfig() {
   };
 }
 
-function createParcelHandoffSyncConfig() {
-  const type = "parcel_handoff_set";
-  const defaultReason = "parcel_handoff_teammate_sync";
+function createParcelTileTaskSyncConfig({ type, defaultReason, apply }) {
   return {
     type,
     build(entry) {
@@ -210,14 +208,11 @@ function createParcelHandoffSyncConfig() {
       };
     },
     apply(parsed, context) {
-      context.beliefs.setParcelHandoffTask(
-        parsed.payload.target,
-        {
-          reason: parsed.payload.reason,
-          sourceChatId: parsed.meta.sourceChatId,
-          senderId: context.fromId ?? null
-        }
-      );
+      apply(parsed.payload.target, {
+        reason: parsed.payload.reason,
+        sourceChatId: parsed.meta.sourceChatId,
+        senderId: context.fromId ?? null
+      }, context.beliefs);
       return true;
     }
   };
@@ -225,7 +220,20 @@ function createParcelHandoffSyncConfig() {
 
 const teammateSyncHandlers = [
   createManualTaskSyncConfig(),
-  createParcelHandoffSyncConfig(),
+  createParcelTileTaskSyncConfig({
+    type: "set_pickup_tile",
+    defaultReason: "pickup_tile_task_teammate_sync",
+    apply(target, meta, beliefs) {
+      beliefs.setPickupTileTask(target, meta);
+    }
+  }),
+  createParcelTileTaskSyncConfig({
+    type: "set_delivery_tile",
+    defaultReason: "delivery_tile_task_teammate_sync",
+    apply(target, meta, beliefs) {
+      beliefs.setDeliveryTileTask(target, meta);
+    }
+  }),
   createTileNumericSyncConfig({
     type: "pickup_tile_multiplier_set",
     field: "multiplier",

@@ -10,44 +10,44 @@ function tileType(tile) {
   return String(tile && typeof tile === "object" ? tile.type ?? "0" : tile ?? "0");
 }
 
-function activeParcelHandoffTask(beliefs) {
-  if (!beliefs?.parcelHandoffTask?.target) return null;
-  const zoneTiles = Array.isArray(beliefs.parcelHandoffTask.zoneTiles) && beliefs.parcelHandoffTask.zoneTiles.length > 0
-    ? beliefs.parcelHandoffTask.zoneTiles.map((tile) => roundTilePosition(tile))
-    : [roundTilePosition(beliefs.parcelHandoffTask.target)];
+function activeParcelTileTask(task) {
+  if (!task?.target) return null;
+  const zoneTiles = Array.isArray(task.zoneTiles) && task.zoneTiles.length > 0
+    ? task.zoneTiles.map((tile) => roundTilePosition(tile))
+    : [roundTilePosition(task.target)];
   return {
-    ...beliefs.parcelHandoffTask,
-    target: roundTilePosition(beliefs.parcelHandoffTask.target),
+    ...task,
+    target: roundTilePosition(task.target),
     zoneTiles,
-    ignoredParcelIds: Array.isArray(beliefs.parcelHandoffTask.ignoredParcelIds)
-      ? [...new Set(beliefs.parcelHandoffTask.ignoredParcelIds.map((id) => String(id)).filter(Boolean))]
+    ignoredParcelIds: Array.isArray(task.ignoredParcelIds)
+      ? [...new Set(task.ignoredParcelIds.map((id) => String(id)).filter(Boolean))]
       : []
   };
 }
 
-function isBdiHandoffPickupSuppressed(parcel, handoffTask, config) {
-  if (config?.agentType !== "bdi" || !handoffTask || !parcel) return false;
-  return (handoffTask.zoneTiles ?? []).some((tile) => positionKey(parcel) === positionKey(tile));
+function isBdiDeliveryTaskPickupSuppressed(parcel, deliveryTask, config) {
+  if (config?.agentType !== "bdi" || !deliveryTask || !parcel) return false;
+  return (deliveryTask.zoneTiles ?? []).some((tile) => positionKey(parcel) === positionKey(tile));
 }
 
-function occupiedHandoffZoneKeys(beliefs, handoffTask, config) {
-  if (!handoffTask) return new Set();
+function occupiedTaskZoneKeys(beliefs, task, config) {
+  if (!task) return new Set();
   const occupied = new Set();
   for (const agent of beliefs.agents.values()) {
     if (!agent || agent.id === beliefs.me?.id) continue;
     if (Number(agent.confidence ?? 0) < Number(config?.planner?.minParcelConfidence ?? 0)) continue;
     const key = positionKey(roundTilePosition(agent));
-    if ((handoffTask.zoneTiles ?? []).some((tile) => positionKey(tile) === key)) {
+    if ((task.zoneTiles ?? []).some((tile) => positionKey(tile) === key)) {
       occupied.add(key);
     }
   }
   return occupied;
 }
 
-function preferredHandoffZoneTiles(beliefs, handoffTask, config) {
-  const zoneTiles = (handoffTask?.zoneTiles ?? []).map((tile) => ({ ...tile }));
+function preferredTaskZoneTiles(beliefs, task, config) {
+  const zoneTiles = (task?.zoneTiles ?? []).map((tile) => ({ ...tile }));
   if (zoneTiles.length === 0) return [];
-  const occupiedKeys = occupiedHandoffZoneKeys(beliefs, handoffTask, config);
+  const occupiedKeys = occupiedTaskZoneKeys(beliefs, task, config);
   const freeTiles = zoneTiles.filter((tile) => !occupiedKeys.has(positionKey(tile)));
   return freeTiles.length > 0 ? freeTiles : zoneTiles;
 }
@@ -98,15 +98,17 @@ export function buildPlannerState(beliefs, config) {
   const reds = [];
   const parcelsByPosition = new Map();
   const greenPositions = new Set();
-  const handoffTask = activeParcelHandoffTask(beliefs);
-  const ignoreDroppedHandoffParcels = config?.agentType === "bdi" && handoffTask;
-  const preferredHandoffTiles = preferredHandoffZoneTiles(beliefs, handoffTask, config);
+  const pickupTileTask = activeParcelTileTask(beliefs?.parcelPickupTileTask);
+  const deliveryTileTask = activeParcelTileTask(beliefs?.parcelDeliveryTileTask);
+  const activeRoleTask = config?.agentType === "llm" ? pickupTileTask : config?.agentType === "bdi" ? deliveryTileTask : null;
+  const ignoreDroppedDeliveryTileParcels = config?.agentType === "bdi" && deliveryTileTask;
+  const preferredTaskTiles = preferredTaskZoneTiles(beliefs, activeRoleTask, config);
 
   //get the list of parcels from beliefs,
   // includes information such as location, reward, timeLastSeen, carriedBy, confidence etc.
   for (const parcel of beliefs.parcels.values()) {
-    if (ignoreDroppedHandoffParcels && beliefs.shouldIgnoreParcelForHandoff?.(parcel.id)) continue;
-    if (isBdiHandoffPickupSuppressed(parcel, handoffTask, config)) continue;
+    if (ignoreDroppedDeliveryTileParcels && beliefs.shouldIgnoreParcelForDeliveryTile?.(parcel.id)) continue;
+    if (isBdiDeliveryTaskPickupSuppressed(parcel, deliveryTileTask, config)) continue;
     const key = positionKey(parcel);
     const list = parcelsByPosition.get(key) ?? [];
     list.push(parcel);
@@ -156,8 +158,8 @@ export function buildPlannerState(beliefs, config) {
   // parcels at green tiles!
   for (const parcel of beliefs.parcels.values()) {
     // ignore parcels carried by other agents or with low confidence
-    if (ignoreDroppedHandoffParcels && beliefs.shouldIgnoreParcelForHandoff?.(parcel.id)) continue;
-    if (isBdiHandoffPickupSuppressed(parcel, handoffTask, config)) continue;
+    if (ignoreDroppedDeliveryTileParcels && beliefs.shouldIgnoreParcelForDeliveryTile?.(parcel.id)) continue;
+    if (isBdiDeliveryTaskPickupSuppressed(parcel, deliveryTileTask, config)) continue;
     if (!parcelAvailableForPlanning(beliefs, parcel, config)) continue;
 
     const position = { x: Number(parcel.x), y: Number(parcel.y) };
@@ -266,8 +268,8 @@ export function buildPlannerState(beliefs, config) {
     }
   });
 
-  if (handoffTask && config?.agentType === "llm") {
-    planningState.greens = preferredHandoffTiles.map((tile) => {
+  if (pickupTileTask && config?.agentType === "llm") {
+    planningState.greens = preferredTaskTiles.map((tile) => {
       const handoffBest = bestParcelAt(beliefs, parcelsByPosition.get(positionKey(tile)) ?? [], config);
       return {
         id: `HANDOFF_GREEN_${tile.x}_${tile.y}`,
@@ -287,8 +289,8 @@ export function buildPlannerState(beliefs, config) {
     });
   }
 
-  if (handoffTask && config?.agentType === "bdi") {
-    planningState.reds = preferredHandoffTiles.map((tile) => ({
+  if (deliveryTileTask && config?.agentType === "bdi") {
+    planningState.reds = preferredTaskTiles.map((tile) => ({
       id: `HANDOFF_RED_${tile.x}_${tile.y}`,
       position: { ...tile }
     }));

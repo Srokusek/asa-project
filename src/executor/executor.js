@@ -205,7 +205,7 @@ export class Executor {
           this.beliefs.carriedParcels.delete(delivered.id);
         }
         if (this.config?.agentType === "bdi" && droppedParcelIds.length > 0) {
-          this.beliefs.noteParcelHandoffDroppedParcelIds?.(droppedParcelIds);
+          this.beliefs.noteDeliveryTileDroppedParcelIds?.(droppedParcelIds);
         }
         if (this.beliefs.me) {
           this.beliefs.lastDeliveryPosition = { x: this.beliefs.me.x, y: this.beliefs.me.y };

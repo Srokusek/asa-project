@@ -110,8 +110,8 @@ export const parityLineWaitTool = {
 export const parcelHandoffTool = {
   type: "function",
   function: {
-    name: "set_parcel_handoff_task",
-    description: "Create a sticky parcel handoff task shared across the LLM agent and its BDI teammate. If target is omitted, auto-pick the nearest walkable tile to the LLM agent. The handoff uses the walkable tiles in the 3x3 zone centered on that tile. The LLM agent will treat only that zone as checkpoint candidates and the BDI teammate will treat only that zone as drop tiles until /clear.",
+    name: "set_parcel_handoff",
+    description: "Create a sticky parcel handoff by setting a hard pickup-tile task for the LLM agent and a hard delivery-tile task for its BDI teammate. If target is omitted, auto-pick the nearest walkable tile to the LLM agent. Both tasks use the walkable tiles in the 3x3 zone centered on that tile until /clear.",
     parameters: {
       type: "object",
       properties: {

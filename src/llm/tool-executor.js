@@ -1006,7 +1006,7 @@ export function createToolExecutor({ beliefs, executor, logger, config }) {
   }
 
   async function executeParcelHandoffTool(parsedValue, { senderId, sourceChatId }) {
-    const toolName = "set_parcel_handoff_task";
+    const toolName = "set_parcel_handoff";
     if (!teammateId) {
       return asToolError(toolName, "Parcel handoff rejected: missing_teammate_id.", {
         toolArgs: parsedValue,
@@ -1023,7 +1023,7 @@ export function createToolExecutor({ beliefs, executor, logger, config }) {
     }
 
     const sourceChat = Number(sourceChatId ?? 0) || null;
-    const entry = beliefs.setParcelHandoffTask(validation.value.target, {
+    const entry = beliefs.setPickupTileTask(validation.value.target, {
       reason: validation.value.reason,
       sourceChatId: sourceChat,
       senderId
@@ -1036,7 +1036,7 @@ export function createToolExecutor({ beliefs, executor, logger, config }) {
     }
 
     await syncToolResultWithTeammate({
-      type: "parcel_handoff_set",
+      type: "set_delivery_tile",
       entry
     });
 
@@ -1044,10 +1044,10 @@ export function createToolExecutor({ beliefs, executor, logger, config }) {
       toolName,
       `Parcel handoff set at (${entry.target.x},${entry.target.y}).`,
       {
-        parcelHandoffTask: entry,
+        parcelPickupTileTask: entry,
         toolArgs: parsedValue,
         data: {
-          parcelHandoffTask: entry,
+          parcelPickupTileTask: entry,
           target: entry.target,
           autoSelected: validation.value.autoSelected
         }
@@ -1158,7 +1158,7 @@ export function createToolExecutor({ beliefs, executor, logger, config }) {
       return executeParityLineWaitTool(parsed.value, { senderId, sourceChatId });
     }
 
-    if (toolName === "set_parcel_handoff_task") {
+    if (toolName === "set_parcel_handoff") {
       const parsed = parseJsonArguments(
         rawArgs,
         "I could not parse the parcel handoff request. Please provide an optional tile like (x,y)."
