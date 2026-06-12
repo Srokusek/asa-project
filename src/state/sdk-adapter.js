@@ -135,16 +135,17 @@ export function registerSdkListeners(socket, beliefs, config, logger = null) {
     const normalized = normalizeChatArgs(args);
     const fromId = String(normalized.fromId ?? "");
     const teammateId = String(config?.teammateId ?? "");
+    const adminId = String(config?.llm?.adminId ?? "");
     const text = String(normalized.text ?? "").trim();
-    const isAdminRelease = fromId === String(config?.llm?.adminId ?? "") && isReleaseMessage(text);
+    const isAdminRelease = adminId && fromId === adminId && isReleaseMessage(text);
     const isTeammateRelease = teammateId && fromId === teammateId && isReleaseMessage(text);
 
     if (config?.agentType === "bdi") {
-      if (!teammateId || fromId !== teammateId) return;
-      if (isReleaseMessage(text)) {
+      if (isAdminRelease || isTeammateRelease) {
         clearManualState(beliefs, normalized.fromId ?? null, logger);
         return;
       }
+      if (!teammateId || fromId !== teammateId) return;
       applyTeammateSyncMessage({
         rawText: normalized.text,
         fromId: normalized.fromId ?? null,
@@ -160,7 +161,7 @@ export function registerSdkListeners(socket, beliefs, config, logger = null) {
     }
 
     if (!config?.llm?.chatEnabled) return;
-    if (fromId === String(config.llm.adminId) || fromId === teammateId) {
+    if (fromId === adminId || fromId === teammateId) {
       beliefs.pushChatMessage(normalized);
     }
   });
