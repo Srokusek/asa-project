@@ -7,4 +7,6 @@ CONFIG_PARAMETERS.md
 parameters_to_remove.md
 plan-search-report.md
 node_modules
+.env.llm
+.env.bdi
 test
