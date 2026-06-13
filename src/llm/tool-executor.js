@@ -2,6 +2,8 @@ import { readFile } from "node:fs/promises";
 
 import { chatTools } from "./tool-definitions.js";
 import { resolveTileSelector } from "./tile-selector.js";
+import { PDDL_MAP_REGISTRY } from "../pddl/map-registry.js";
+import { parsePddlPlan } from "../pddl/plan-parser.js";
 import { solvePddl } from "../pddl/planner-client.js";
 import { buildPddlProblem } from "../pddl/problem-builder.js";
 import { buildTeammateSyncMessage } from "../utils/teammate-sync.js";
@@ -1176,12 +1178,33 @@ export function createToolExecutor({ beliefs, executor, logger, config }) {
           });
         }
 
+        let parsedPlan;
+        try {
+          parsedPlan = parsePddlPlan(result.solutionPlan, PDDL_MAP_REGISTRY);
+        } catch (error) {
+          return asToolError(
+            toolName,
+            `The PDDL planner result could not be parsed: ${error.message}`,
+            {
+              toolArgs: constraints,
+              data: {
+                reason: "plan_parse_error",
+                status: result.status,
+                constraints,
+                solutionPlan: result.solutionPlan
+              }
+            }
+          );
+        }
+
+        
         return asToolSuccess(toolName, "PDDL sector-routing solution received.", {
           toolArgs: constraints,
           data: {
             status: result.status,
             constraints,
-            solutionPlan: result.solutionPlan
+            solutionPlan: result.solutionPlan,
+            parsedPlan
           }
         });
       } catch (error) {
