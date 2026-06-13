@@ -1,8 +1,10 @@
 AGENT_PSEUDOCODE.md
 IMPLEMENTATION_REPORT.md
-.env
+.env.bdi
+.env.llm
 PLAN_MODES.md
 CONFIG_PARAMETERS.md
 parameters_to_remove.md
 plan-search-report.md
 node_modules
+test
