@@ -1,23 +1,22 @@
 // test-map.json stores its tile matrix as tiles[x][y].
-// Replace these fixture ids with the three Deliveroo agent ids for the live team.
-const FIXTURE_AGENT_IDS = Object.freeze({
-  a1: "fixture-agent-a1",
-  a2: "fixture-agent-a2",
-  a3: "fixture-agent-a3"
+const RUNTIME_AGENT_IDS = Object.freeze({
+  a1: "5759fb",
+  a2: "0e69d4",
+  a3: "0e01e5"
 });
 
 export const PDDL_MAP_REGISTRY = Object.freeze({
   agents: Object.freeze({
     a1: Object.freeze({
-      runtimeAgentId: FIXTURE_AGENT_IDS.a1,
+      runtimeAgentId: RUNTIME_AGENT_IDS.a1,
       sectorId: "l1"
     }),
     a2: Object.freeze({
-      runtimeAgentId: FIXTURE_AGENT_IDS.a2,
+      runtimeAgentId: RUNTIME_AGENT_IDS.a2,
       sectorId: "l2"
     }),
     a3: Object.freeze({
-      runtimeAgentId: FIXTURE_AGENT_IDS.a3,
+      runtimeAgentId: RUNTIME_AGENT_IDS.a3,
       sectorId: "l3"
     })
   }),
@@ -54,6 +53,24 @@ export const PDDL_MAP_REGISTRY = Object.freeze({
       kind: "transfer",
       sectors: Object.freeze(["l1", "l2"]),
       tiles: Object.freeze([Object.freeze({ x: 4, y: 13 })]),
+      tilesBySector: Object.freeze({
+        l1: Object.freeze({
+          pickup: Object.freeze([
+            Object.freeze({ x: 4, y: 11 }),
+            Object.freeze({ x: 4, y: 12 }),
+            Object.freeze({ x: 4, y: 13 })
+          ]),
+          dropoff: Object.freeze([Object.freeze({ x: 4, y: 13 })])
+        }),
+        l2: Object.freeze({
+          pickup: Object.freeze([
+            Object.freeze({ x: 4, y: 13 }),
+            Object.freeze({ x: 4, y: 14 }),
+            Object.freeze({ x: 4, y: 15 })
+          ]),
+          dropoff: Object.freeze([Object.freeze({ x: 4, y: 13 })])
+        })
+      }),
       idleTiles: Object.freeze({
         l1: Object.freeze({ x: 4, y: 11 }),
         l2: Object.freeze({ x: 4, y: 15 })
@@ -63,6 +80,24 @@ export const PDDL_MAP_REGISTRY = Object.freeze({
       kind: "transfer",
       sectors: Object.freeze(["l1", "l3"]),
       tiles: Object.freeze([Object.freeze({ x: 15, y: 4 })]),
+      tilesBySector: Object.freeze({
+        l1: Object.freeze({
+          pickup: Object.freeze([
+            Object.freeze({ x: 13, y: 4 }),
+            Object.freeze({ x: 14, y: 4 }),
+            Object.freeze({ x: 15, y: 4 })
+          ]),
+          dropoff: Object.freeze([Object.freeze({ x: 15, y: 4 })])
+        }),
+        l3: Object.freeze({
+          pickup: Object.freeze([
+            Object.freeze({ x: 15, y: 4 }),
+            Object.freeze({ x: 16, y: 4 }),
+            Object.freeze({ x: 17, y: 4 })
+          ]),
+          dropoff: Object.freeze([Object.freeze({ x: 15, y: 4 })])
+        })
+      }),
       idleTiles: Object.freeze({
         l1: Object.freeze({ x: 13, y: 4 }),
         l3: Object.freeze({ x: 17, y: 4 })
@@ -72,6 +107,24 @@ export const PDDL_MAP_REGISTRY = Object.freeze({
       kind: "transfer",
       sectors: Object.freeze(["l2", "l3"]),
       tiles: Object.freeze([Object.freeze({ x: 15, y: 18 })]),
+      tilesBySector: Object.freeze({
+        l2: Object.freeze({
+          pickup: Object.freeze([
+            Object.freeze({ x: 13, y: 18 }),
+            Object.freeze({ x: 14, y: 18 }),
+            Object.freeze({ x: 15, y: 18 })
+          ]),
+          dropoff: Object.freeze([Object.freeze({ x: 15, y: 18 })])
+        }),
+        l3: Object.freeze({
+          pickup: Object.freeze([
+            Object.freeze({ x: 15, y: 18 }),
+            Object.freeze({ x: 16, y: 18 }),
+            Object.freeze({ x: 17, y: 18 })
+          ]),
+          dropoff: Object.freeze([Object.freeze({ x: 15, y: 18 })])
+        })
+      }),
       idleTiles: Object.freeze({
         l2: Object.freeze({ x: 13, y: 18 }),
         l3: Object.freeze({ x: 17, y: 18 })

@@ -3,7 +3,7 @@ import { normalizeSensingRange, sensingRangeSignature } from "../../state/belief
 import { DEFAULT_PARAMS } from "../default-params.js";
 import { baseRoutePlan } from "../route-plan.js";
 import { initialPlan } from "../search/plan-search.js";
-import { asNumber, copyPosition, isWalkable, positionKey } from "../path/grid-utils.js";
+import { asNumber, copyPosition, isWalkable, positionKey, getCell } from "../path/grid-utils.js";
 import { bfsAllDistancesFrom, distanceToNearestReachableRed, pathFromBfsAll, shortestGridPath } from "../path/pathfinder.js";
 import { pickupMultiplierAt } from "../scoring/green-scorer.js";
 
@@ -109,6 +109,13 @@ export function buildScoutCheckpointSignature(state, config, profile = null) {
   ].join("::");
 }
 
+function isRejectedOrchestrationScoutTarget(state, green) {
+  if (!green.orchestrationRuleId) return false;
+
+  const cell = getCell(state, green.position);
+  return cell?.rawType === "5" || cell?.rawType === "5!";
+}
+
 export function buildScoutCheckpointIndex(state, config, profile = null, signature = null) {
   const maxCheckpoints = Math.max(1, Math.round(asNumber(config.unifiedScoutCheckpointCount, 24)));
   const sensingRange = normalizeSensingRange(config.sensingRange, DEFAULT_PARAMS.sensingRange);
@@ -117,6 +124,7 @@ export function buildScoutCheckpointIndex(state, config, profile = null, signatu
   const allGreenIds = (state.greens ?? []).map((green) => green.id).sort();
 
   for (const green of state.greens ?? []) {
+    if (isRejectedOrchestrationScoutTarget(state, green)) continue;
     const position = copyPosition(green.position);
     if (!isWalkable(state, position)) continue;
     const coveredGreenIds =

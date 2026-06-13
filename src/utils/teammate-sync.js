@@ -41,6 +41,47 @@ function parseNonNegativeInteger(value) {
   return normalized;
 }
 
+function parseOrchestrationTiles(tiles) {
+  if (!Array.isArray(tiles) || tiles.length === 0) return null;
+  const normalized = [];
+  const seen = new Set();
+  for (const tile of tiles) {
+    const target = parseTarget(tile);
+    if (!target) return null;
+    const key = `${target.x},${target.y}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    normalized.push(target);
+  }
+  return normalized.length > 0 ? normalized : null;
+}
+
+function parseOrchestrationRules(rules) {
+  if (!Array.isArray(rules)) return null;
+  const normalized = [];
+  const ruleIds = new Set();
+  for (const rule of rules) {
+    if (!isPlainObject(rule)) return null;
+    const id = String(rule.id ?? "").trim();
+    const pickupPoiId = String(rule.pickupPoiId ?? "").trim();
+    const dropoffPoiId = String(rule.dropoffPoiId ?? "").trim();
+    const pickupTiles = parseOrchestrationTiles(rule.pickupTiles);
+    const dropoffTiles = parseOrchestrationTiles(rule.dropoffTiles);
+    if (!id || !pickupPoiId || !dropoffPoiId || !pickupTiles || !dropoffTiles) return null;
+    if (ruleIds.has(id)) return null;
+    ruleIds.add(id);
+    normalized.push({
+      id,
+      pickupPoiId,
+      dropoffPoiId,
+      pickupTiles,
+      dropoffTiles,
+      ...(Object.hasOwn(rule, "priority") ? { priority: rule.priority } : {})
+    });
+  }
+  return normalized;
+}
+
 function normalizeMeta(meta, fallbackReason) {
   const input = isPlainObject(meta) ? meta : {};
   return {
@@ -218,8 +259,46 @@ function createParcelTileTaskSyncConfig({ type, defaultReason, apply }) {
   };
 }
 
+function createOrchestrationRulesSyncConfig() {
+  const type = "orchestration_rules_replace";
+  const defaultReason = "orchestration_rules_teammate_sync";
+  return {
+    type,
+    build(entry) {
+      const rules = parseOrchestrationRules(entry?.rules);
+      if (!rules) return null;
+      return {
+        payload: { rules },
+        meta: normalizeMeta(entry, defaultReason)
+      };
+    },
+    parse(message) {
+      const rules = parseOrchestrationRules(message?.payload?.rules);
+      if (!rules) return null;
+      return {
+        type,
+        payload: { rules },
+        meta: normalizeMeta(message.meta, defaultReason)
+      };
+    },
+    apply(parsed, context) {
+      try {
+        context.beliefs.replaceOrchestrationRules(parsed.payload.rules);
+        return true;
+      } catch (error) {
+        context.logger?.warn?.("orchestration teammate sync failed", {
+          fromId: context.fromId ?? null,
+          error: error.message
+        });
+        return false;
+      }
+    }
+  };
+}
+
 const teammateSyncHandlers = [
   createManualTaskSyncConfig(),
+  createOrchestrationRulesSyncConfig(),
   createParcelTileTaskSyncConfig({
     type: "set_pickup_tile",
     defaultReason: "pickup_tile_task_teammate_sync",

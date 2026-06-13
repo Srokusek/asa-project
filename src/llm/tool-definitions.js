@@ -146,7 +146,7 @@ export const solveSectorRoutingTool = {
   type: "function",
   function: {
     name: "solve_sector_routing",
-    description: "Solve the fixture PDDL sector-routing problem from structured constraints. Translate references like 'sector 2' to 'l2'. This only requests a planner solution; it does not apply rules or change agent beliefs.",
+    description: "Solve the fixture PDDL sector-routing problem from structured constraints. Translate references like 'sector 2' to 'l2'. A successful solve replaces this LLM agent's local a3 rules and distributes complete rule sets to the other registry agents.",
     parameters: {
       type: "object",
       properties: {

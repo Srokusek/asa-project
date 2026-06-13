@@ -54,7 +54,7 @@ function resolveAgent(registry, pddlAgentId, sectorId) {
   };
 }
 
-function resolvePoi(registry, poiId, sectorId) {
+function resolvePoi(registry, poiId, sectorId, role) {
   const poi = registry.pois[poiId];
   if (!poi) {
     throw new Error(`unknown PDDL point of interest: ${poiId}`);
@@ -70,14 +70,17 @@ function resolvePoi(registry, poiId, sectorId) {
     throw new Error(`PDDL point of interest ${poiId} is not in sector ${sectorId}`);
   }
 
-  if (!Array.isArray(poi.tiles) || poi.tiles.length === 0) {
-    throw new TypeError(`registry POI ${poiId} tiles must be a non-empty array`);
+  const tiles = poi.tilesBySector?.[sectorId]?.[role] ?? poi.tiles;
+  if (!Array.isArray(tiles) || tiles.length === 0) {
+    throw new TypeError(
+      `registry POI ${poiId} ${role} tiles for ${sectorId} must be a non-empty array`
+    );
   }
 
   const resolved = {
     kind: normalizeIdentifier(poi.kind, `registry POI ${poiId} kind`),
-    tiles: poi.tiles.map((tile, index) =>
-      copyTile(tile, `registry POI ${poiId} tile at index ${index}`)
+    tiles: tiles.map((tile, index) =>
+      copyTile(tile, `registry POI ${poiId} ${role} tile at index ${index}`)
     )
   };
 
@@ -139,8 +142,8 @@ export function parsePddlPlan(solutionPlan, registry) {
 
     const [pickupPoiId, dropoffPoiId, pddlAgentId, sectorId] = parameters;
     const agent = resolveAgent(normalizedRegistry, pddlAgentId, sectorId);
-    const pickup = resolvePoi(normalizedRegistry, pickupPoiId, sectorId);
-    const dropoff = resolvePoi(normalizedRegistry, dropoffPoiId, sectorId);
+    const pickup = resolvePoi(normalizedRegistry, pickupPoiId, sectorId, "pickup");
+    const dropoff = resolvePoi(normalizedRegistry, dropoffPoiId, sectorId, "dropoff");
     const priority = rules.length;
 
     const rule = {

@@ -11,6 +11,7 @@ import { manhattan, positionKey } from "../utils/geometry.js";
 
 const PDDL_DOMAIN_URL = new URL("../pddl/test_domain.pddl", import.meta.url);
 const VALID_PDDL_SECTORS = new Set(["l1", "l2", "l3"]);
+const LOCAL_PDDL_AGENT_ID = "a3";
 
 function asToolError(toolName, message, extra = {}) {
   return {
@@ -253,6 +254,70 @@ export function createToolExecutor({ beliefs, executor, logger, config }) {
         error: error.message
       });
     }
+  }
+
+  function prepareOrchestrationDistribution(parsedPlan) {
+    const recipients = [];
+    for (const [pddlAgentId, agent] of Object.entries(PDDL_MAP_REGISTRY.agents)) {
+      if (pddlAgentId === LOCAL_PDDL_AGENT_ID) continue;
+      const rules = parsedPlan.rules.filter((rule) => rule.pddlAgentId === pddlAgentId);
+      const message = buildTeammateSyncMessage({
+        type: "orchestration_rules_replace",
+        entry: {
+          rules,
+          reason: "pddl_orchestration_distribution"
+        }
+      });
+      if (!message) {
+        throw new Error(`could not prepare orchestration rules for ${pddlAgentId}`);
+      }
+      recipients.push({
+        pddlAgentId,
+        runtimeAgentId: agent.runtimeAgentId,
+        ruleCount: rules.length,
+        message
+      });
+    }
+    return recipients;
+  }
+
+  async function sendOrchestrationDistribution(preparedRecipients) {
+    const recipients = [];
+    for (const recipient of preparedRecipients) {
+      let sent = false;
+      let errorMessage = null;
+      try {
+        sent = await executor.writeMessage({
+          toId: recipient.runtimeAgentId,
+          message: recipient.message
+        }) !== false;
+      } catch (error) {
+        errorMessage = error.message;
+      }
+      if (!sent) {
+        logger.warn("orchestration rule distribution failed", {
+          pddlAgentId: recipient.pddlAgentId,
+          runtimeAgentId: recipient.runtimeAgentId,
+          ...(errorMessage ? { error: errorMessage } : {})
+        });
+      }
+      recipients.push({
+        pddlAgentId: recipient.pddlAgentId,
+        runtimeAgentId: recipient.runtimeAgentId,
+        ruleCount: recipient.ruleCount,
+        sent
+      });
+    }
+
+    const sentAgentCount = recipients.filter((recipient) => recipient.sent).length;
+    const attemptedAgentCount = recipients.length;
+    return {
+      status: sentAgentCount === attemptedAgentCount ? "complete" : "partial",
+      attemptedAgentCount,
+      sentAgentCount,
+      failedAgentCount: attemptedAgentCount - sentAgentCount,
+      recipients
+    };
   }
 
   function validateWalkableTarget(target, { rejectForbidden = true } = {}) {
@@ -1197,16 +1262,69 @@ export function createToolExecutor({ beliefs, executor, logger, config }) {
           );
         }
 
-        
-        return asToolSuccess(toolName, "PDDL sector-routing solution received.", {
-          toolArgs: constraints,
-          data: {
-            status: result.status,
-            constraints,
-            solutionPlan: result.solutionPlan,
-            parsedPlan
+        const localRules = parsedPlan.rules.filter(
+          (rule) => rule.pddlAgentId === LOCAL_PDDL_AGENT_ID
+        );
+        let preparedRecipients;
+        try {
+          preparedRecipients = prepareOrchestrationDistribution(parsedPlan);
+        } catch (error) {
+          return asToolError(
+            toolName,
+            `The PDDL routing rules could not be prepared for distribution: ${error.message}`,
+            {
+              toolArgs: constraints,
+              data: {
+                reason: "distribution_prepare_error",
+                status: result.status,
+                constraints,
+                solutionPlan: result.solutionPlan,
+                parsedPlan,
+                localPddlAgentId: LOCAL_PDDL_AGENT_ID
+              }
+            }
+          );
+        }
+
+        let installedRules;
+        try {
+          installedRules = beliefs.replaceOrchestrationRules(localRules);
+        } catch (error) {
+          return asToolError(
+            toolName,
+            `The PDDL routing rules could not be installed locally: ${error.message}`,
+            {
+              toolArgs: constraints,
+              data: {
+                reason: "local_install_error",
+                status: result.status,
+                constraints,
+                solutionPlan: result.solutionPlan,
+                parsedPlan,
+                localPddlAgentId: LOCAL_PDDL_AGENT_ID
+              }
+            }
+          );
+        }
+
+        const appliedRuleCount = installedRules.length;
+        const distribution = await sendOrchestrationDistribution(preparedRecipients);
+        return asToolSuccess(
+          toolName,
+          `PDDL sector-routing solution received; applied ${appliedRuleCount} local rule(s) for ${LOCAL_PDDL_AGENT_ID}; sent rules to ${distribution.sentAgentCount}/${distribution.attemptedAgentCount} remote agent(s), ${distribution.failedAgentCount} failed.`,
+          {
+            toolArgs: constraints,
+            data: {
+              status: result.status,
+              constraints,
+              solutionPlan: result.solutionPlan,
+              parsedPlan,
+              localPddlAgentId: LOCAL_PDDL_AGENT_ID,
+              appliedRuleCount,
+              distribution
+            }
           }
-        });
+        );
       } catch (error) {
         return asToolError(toolName, `PDDL sector routing failed: ${error.message}`, {
           toolArgs: constraints,

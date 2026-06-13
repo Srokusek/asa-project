@@ -72,8 +72,8 @@ export const DEFAULT_PLANNER_CONFIG = Object.freeze({
   unifiedScoutDistanceWeight: 0.0,
   unifiedScoutTopKForRedTieBreak: 5,
   unifiedScoutRepeatTargetPenalty: 50,
-  unifiedScoutRepeatSectorPenalty: 10,
-  failedScoutTargetCooldownTicks: 40,
+  unifiedScoutRepeatSectorPenalty: 50,
+  failedScoutTargetCooldownTicks: 100,
 
   // Candidate selection and green clustering.
   clusterPickupRadius: 3,
