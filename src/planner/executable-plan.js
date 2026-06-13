@@ -28,6 +28,16 @@ function shouldPickUp(point) {
   return point?.type === "green" && point.package && !point.noPickup;
 }
 
+function pickupActionForPoint(point) {
+  return {
+    type: "pick_up",
+    at: copyPosition(point.position),
+    targetId: point.id,
+    ...(point.orchestrationRuleId ? { orchestrationRuleId: point.orchestrationRuleId } : {}),
+    ...(point.dropoffPoiId ? { dropoffPoiId: point.dropoffPoiId } : {})
+  };
+}
+
 function actionsFromOracle(routePlan) {
   const actions = [];
   const picked = new Set();
@@ -44,11 +54,7 @@ function actionsFromOracle(routePlan) {
 
     if (shouldPickUp(toPoint) && !picked.has(toPoint.id)) {
       picked.add(toPoint.id);
-      actions.push({
-        type: "pick_up",
-        at: copyPosition(toPoint.position),
-        targetId: toPoint.id
-      });
+      actions.push(pickupActionForPoint(toPoint));
     }
 
     if (toPoint.type === "red" && !putDownDone) {
@@ -79,7 +85,7 @@ function actionsFromFlatPath(routePlan) {
     const green = greenByPosition.get(positionKey(action.to));
     if (green && !picked.has(green.id)) {
       picked.add(green.id);
-      actions.splice(i + 1, 0, { type: "pick_up", at: copyPosition(green.position), targetId: green.id });
+      actions.splice(i + 1, 0, pickupActionForPoint(green));
       i += 1;
     }
   }

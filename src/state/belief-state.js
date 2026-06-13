@@ -168,6 +168,62 @@ function copyParcelTileTask(entry) {
   };
 }
 
+function normalizeOrchestrationTiles(tiles, fieldName) {
+  if (!Array.isArray(tiles) || tiles.length === 0) {
+    throw new TypeError(`${fieldName} must be a non-empty array`);
+  }
+
+  const normalized = [];
+  const seen = new Set();
+  for (const tile of tiles) {
+    const x = Number(tile?.x);
+    const y = Number(tile?.y);
+    if (!Number.isFinite(x) || !Number.isFinite(y)) {
+      throw new TypeError(`${fieldName} must contain finite x/y coordinates`);
+    }
+    const position = roundTilePosition({ x, y });
+    const key = positionKey(position);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    normalized.push(position);
+  }
+
+  if (normalized.length === 0) {
+    throw new TypeError(`${fieldName} must contain at least one coordinate`);
+  }
+  return normalized;
+}
+
+function normalizeOrchestrationRule(rule, index) {
+  if (!rule || typeof rule !== "object" || Array.isArray(rule)) {
+    throw new TypeError(`orchestration rule at index ${index} must be an object`);
+  }
+
+  const id = String(rule.id ?? "").trim();
+  const pickupPoiId = String(rule.pickupPoiId ?? "").trim();
+  const dropoffPoiId = String(rule.dropoffPoiId ?? "").trim();
+  if (!id) throw new TypeError(`orchestration rule at index ${index} requires id`);
+  if (!pickupPoiId) throw new TypeError(`orchestration rule ${id} requires pickupPoiId`);
+  if (!dropoffPoiId) throw new TypeError(`orchestration rule ${id} requires dropoffPoiId`);
+
+  return {
+    id,
+    pickupPoiId,
+    dropoffPoiId,
+    pickupTiles: normalizeOrchestrationTiles(rule.pickupTiles, `orchestration rule ${id} pickupTiles`),
+    dropoffTiles: normalizeOrchestrationTiles(rule.dropoffTiles, `orchestration rule ${id} dropoffTiles`),
+    ...(Object.hasOwn(rule, "priority") ? { priority: rule.priority } : {})
+  };
+}
+
+function copyOrchestrationRule(rule) {
+  return {
+    ...rule,
+    pickupTiles: rule.pickupTiles.map((tile) => ({ ...tile })),
+    dropoffTiles: rule.dropoffTiles.map((tile) => ({ ...tile }))
+  };
+}
+
 function buildParcelTileTaskEntry(beliefs, target, meta, current, time, { includeIgnoredParcelIds = false } = {}) {
   const cell = roundTilePosition(target);
   if (!Number.isFinite(cell.x) || !Number.isFinite(cell.y)) return null;
@@ -234,6 +290,10 @@ export class BeliefState {
     this.deliveryValueThresholdRule = null; // sticky delivery-value multiplier rule by per-parcel delivered value
     this.parcelPickupTileTask = null; // sticky local pickup zone for parcel handoff
     this.parcelDeliveryTileTask = null; // sticky teammate delivery zone plus ignored dropped parcel ids
+    this.orchestration = {
+      rules: [],
+      activeRuleId: null
+    };
     this.sensingRange = normalizeSensingRange(config?.planner?.sensingRange, 5);
     this.manualTasks = [];
     this.manualTaskSequence = 0;
@@ -366,6 +426,63 @@ export class BeliefState {
       reason: String(reason),
       pickupTask: copyParcelTileTask(clearedPickup),
       deliveryTask: copyParcelTileTask(clearedDelivery)
+    });
+    this.markDirty();
+    return true;
+  }
+
+  replaceOrchestrationRules(rules) {
+    if (!Array.isArray(rules)) {
+      throw new TypeError("orchestration rules must be an array");
+    }
+
+    const normalizedRules = rules.map((rule, index) => normalizeOrchestrationRule(rule, index));
+    const ruleIds = new Set();
+    for (const rule of normalizedRules) {
+      if (ruleIds.has(rule.id)) {
+        throw new TypeError(`duplicate orchestration rule id: ${rule.id}`);
+      }
+      ruleIds.add(rule.id);
+    }
+
+    this.orchestration = {
+      rules: normalizedRules,
+      activeRuleId: null
+    };
+    const snapshot = normalizedRules.map(copyOrchestrationRule);
+    this.pushEvent("ORCHESTRATION_RULES_REPLACED", { rules: snapshot });
+    this.markDirty();
+    return snapshot;
+  }
+
+  activateOrchestrationRule(ruleId) {
+    const normalizedRuleId = String(ruleId ?? "").trim();
+    const rule = this.orchestration.rules.find((entry) => entry.id === normalizedRuleId);
+    if (!rule) return false;
+    if (this.orchestration.activeRuleId === normalizedRuleId) return true;
+
+    this.orchestration = {
+      rules: this.orchestration.rules,
+      activeRuleId: normalizedRuleId
+    };
+    this.pushEvent("ORCHESTRATION_RULE_ACTIVATED", {
+      ruleId: normalizedRuleId,
+      dropoffPoiId: rule.dropoffPoiId
+    });
+    this.markDirty();
+    return true;
+  }
+
+  clearActiveOrchestrationRule(reason = "putdown_succeeded") {
+    const activeRuleId = this.orchestration.activeRuleId;
+    if (!activeRuleId) return false;
+    this.orchestration = {
+      rules: this.orchestration.rules,
+      activeRuleId: null
+    };
+    this.pushEvent("ORCHESTRATION_RULE_DEACTIVATED", {
+      ruleId: activeRuleId,
+      reason: String(reason)
     });
     this.markDirty();
     return true;

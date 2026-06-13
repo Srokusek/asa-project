@@ -73,6 +73,88 @@ function bestParcelAt(beliefs, parcels, config) {
   return best;
 }
 
+function activeOrchestrationRules(beliefs) {
+  const rules = Array.isArray(beliefs?.orchestration?.rules) ? beliefs.orchestration.rules : [];
+  if (rules.length === 0) return null;
+
+  const activeRuleId = beliefs.orchestration.activeRuleId;
+  if (!activeRuleId) {
+    return {
+      activeRuleId: null,
+      rules
+    };
+  }
+
+  const activeRule = rules.find((rule) => rule.id === activeRuleId);
+  if (!activeRule) {
+    return {
+      activeRuleId: null,
+      rules
+    };
+  }
+
+  return {
+    activeRuleId,
+    rules: rules.filter((rule) => rule.dropoffPoiId === activeRule.dropoffPoiId)
+  };
+}
+
+function orchestrationGreens(orchestration, beliefs, parcelsByPosition, config) {
+  const greens = [];
+  const seen = new Set();
+
+  for (const rule of orchestration.rules) {
+    for (const tile of rule.pickupTiles) {
+      const position = roundTilePosition(tile);
+      const key = positionKey(position);
+      if (seen.has(key)) continue;
+      seen.add(key);
+      const best = bestParcelAt(beliefs, parcelsByPosition.get(key) ?? [], config);
+      greens.push({
+        id: `ORCHESTRATION_GREEN_${position.x}_${position.y}`,
+        position,
+        orchestrationRuleId: rule.id,
+        pickupPoiId: rule.pickupPoiId,
+        dropoffPoiId: rule.dropoffPoiId,
+        package: best
+          ? {
+              id: best.parcel.id,
+              value: best.reward,
+              reward: best.reward,
+              carriedBy: best.parcel.carriedBy,
+              decayRate: config.planner.decayRate,
+              confidence: best.parcel.confidence,
+              lastSeenTime: best.parcel.lastSeenTime
+            }
+          : null
+      });
+    }
+  }
+
+  return greens;
+}
+
+function orchestrationReds(orchestration) {
+  const reds = [];
+  const seen = new Set();
+
+  for (const rule of orchestration.rules) {
+    for (const tile of rule.dropoffTiles) {
+      const position = roundTilePosition(tile);
+      const key = positionKey(position);
+      if (seen.has(key)) continue;
+      seen.add(key);
+      reds.push({
+        id: `ORCHESTRATION_RED_${position.x}_${position.y}`,
+        position,
+        dropoffPoiId: rule.dropoffPoiId
+      });
+    }
+  }
+
+  return reds;
+}
+
 function inferBoundsFromTiles(beliefs) {
   let maxX = Math.max(0, beliefs.width - 1);
   let maxY = Math.max(0, beliefs.height - 1);
@@ -100,6 +182,7 @@ export function buildPlannerState(beliefs, config) {
   const greenPositions = new Set();
   const pickupTileTask = activeParcelTileTask(beliefs?.parcelPickupTileTask);
   const deliveryTileTask = activeParcelTileTask(beliefs?.parcelDeliveryTileTask);
+  const orchestration = activeOrchestrationRules(beliefs);
   const activeRoleTask = config?.agentType === "llm" ? pickupTileTask : config?.agentType === "bdi" ? deliveryTileTask : null;
   const ignoreDroppedDeliveryTileParcels = config?.agentType === "bdi" && deliveryTileTask;
   const preferredTaskTiles = preferredTaskZoneTiles(beliefs, activeRoleTask, config);
@@ -294,6 +377,19 @@ export function buildPlannerState(beliefs, config) {
       id: `HANDOFF_RED_${tile.x}_${tile.y}`,
       position: { ...tile }
     }));
+  }
+
+  if (orchestration) {
+    planningState.greens = orchestrationGreens(orchestration, beliefs, parcelsByPosition, config);
+    planningState.reds = orchestrationReds(orchestration);
+    planningState.orchestration = {
+      activeRuleId: orchestration.activeRuleId,
+      rules: orchestration.rules.map((rule) => ({
+        ...rule,
+        pickupTiles: rule.pickupTiles.map((tile) => ({ ...tile })),
+        dropoffTiles: rule.dropoffTiles.map((tile) => ({ ...tile }))
+      }))
+    };
   }
 
   Object.defineProperty(planningState, "__plannerStateNormalized", {

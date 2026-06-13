@@ -1,3 +1,9 @@
+import {
+  DEFAULT_PDDL_SOLVER_ENDPOINT,
+  DEFAULT_PDDL_SOLVER_LOG_FILE,
+  DEFAULT_PDDL_SOLVER_TIMEOUT_MS
+} from "./pddl/planner-client.js";
+
 function numberFromEnv(env, name, fallback) {
   const value = Number(env[name]);
   return Number.isFinite(value) ? value : fallback;
@@ -51,12 +57,11 @@ export const DEFAULT_PLANNER_CONFIG = Object.freeze({
   // Belief aging and world-state timing.
   periodicReplanTicks: 50,
   timeTickMs: 1,
-  beliefDecayRate: 0.08,
+  beliefDecayRate: 0.001,
   sensingRange: 5,
 
   // Scouting and exploration behavior.
   scoutCooldownTicks: 200,
-  scoutCongestionPenalty: 10,
   maxStalenessValue: 10000,
   greenInfoMultiplier: 4,
   redInfoMultiplier: 0.2,
@@ -117,6 +122,11 @@ export function createConfig(env = process.env) {
     },
     planner: {
       ...DEFAULT_PLANNER_CONFIG
+    },
+    pddl: {
+      endpoint: stringFromEnv(env, "PDDL_SOLVER_ENDPOINT", DEFAULT_PDDL_SOLVER_ENDPOINT),
+      timeoutMs: numberFromEnv(env, "PDDL_SOLVER_TIMEOUT_MS", DEFAULT_PDDL_SOLVER_TIMEOUT_MS),
+      logFile: stringFromEnv(env, "PDDL_SOLVER_LOG_FILE", DEFAULT_PDDL_SOLVER_LOG_FILE)
     },
     llm: {
       enabled: llmEnabled,

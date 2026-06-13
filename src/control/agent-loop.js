@@ -65,6 +65,11 @@ function hasVisibleParcelEvent(events) {
   // if we have sensed a positive number of parcels, return true
 }
 
+function hasOrchestrationPickupEvent(events, beliefs) {
+  if (!beliefs?.orchestration?.activeRuleId) return false;
+  return events.some((event) => eventType(event) === "PICK_PACKAGE");
+}
+
 export function routePathIsExecutable(routePlan) {
   /**
    * function for checking whether a path is executable
@@ -330,6 +335,10 @@ export class AgentLoop {
     };
 
     if (!this.currentRoutePlan || !this.currentExecutablePlan) return decide(true, "missing_plan");
+
+    if (hasOrchestrationPickupEvent(events, this.beliefs)) {
+      return decide(true, "orchestration_pickup");
+    }
 
     if (this.actionIndex >= this.currentExecutablePlan.length) {
       if (isStartOnlyPlan(this.currentRoutePlan, this.currentExecutablePlan)) {
