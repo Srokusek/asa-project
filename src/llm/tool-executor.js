@@ -1,7 +1,14 @@
+import { readFile } from "node:fs/promises";
+
 import { chatTools } from "./tool-definitions.js";
 import { resolveTileSelector } from "./tile-selector.js";
+import { solvePddl } from "../pddl/planner-client.js";
+import { buildPddlProblem } from "../pddl/problem-builder.js";
 import { buildTeammateSyncMessage } from "../utils/teammate-sync.js";
 import { manhattan, positionKey } from "../utils/geometry.js";
+
+const PDDL_DOMAIN_URL = new URL("../pddl/test_domain.pddl", import.meta.url);
+const VALID_PDDL_SECTORS = new Set(["l1", "l2", "l3"]);
 
 function asToolError(toolName, message, extra = {}) {
   return {
@@ -27,6 +34,45 @@ function parseJsonArguments(raw, errorMessage) {
   } catch (_error) {
     return { ok: false, error: errorMessage };
   }
+}
+
+function validateSectorRoutingArgs(args) {
+  if (!args || typeof args !== "object" || Array.isArray(args)) {
+    return { ok: false, reason: "invalid_payload" };
+  }
+
+  const allowedKeys = new Set(["requiredSectors", "forbiddenSectors"]);
+  const extraKey = Object.keys(args).find((key) => !allowedKeys.has(key));
+  if (extraKey) {
+    return { ok: false, reason: `unknown_field:${extraKey}` };
+  }
+  if (!Array.isArray(args.requiredSectors) || !Array.isArray(args.forbiddenSectors)) {
+    return { ok: false, reason: "sector_constraints_must_be_arrays" };
+  }
+
+  for (const [name, sectors] of [
+    ["requiredSectors", args.requiredSectors],
+    ["forbiddenSectors", args.forbiddenSectors]
+  ]) {
+    const invalidSector = sectors.find((sector) => !VALID_PDDL_SECTORS.has(sector));
+    if (invalidSector !== undefined) {
+      return { ok: false, reason: `${name}_contains_unknown_sector:${String(invalidSector)}` };
+    }
+  }
+
+  const forbiddenSet = new Set(args.forbiddenSectors);
+  const conflict = args.requiredSectors.find((sector) => forbiddenSet.has(sector));
+  if (conflict) {
+    return { ok: false, reason: `sector_both_required_and_forbidden:${conflict}` };
+  }
+
+  return {
+    ok: true,
+    value: {
+      requiredSectors: [...new Set(args.requiredSectors)],
+      forbiddenSectors: [...new Set(args.forbiddenSectors)]
+    }
+  };
 }
 
 function evaluateArithmeticExpression(rawExpression) {
@@ -1086,6 +1132,67 @@ export function createToolExecutor({ beliefs, executor, logger, config }) {
         toolArgs: parsed.value,
         data: { results, expressionCount: Object.keys(results).length }
       });
+    }
+
+    if (toolName === "solve_sector_routing") {
+      const parsed = parseJsonArguments(
+        rawArgs,
+        "I could not parse the sector-routing constraints."
+      );
+      if (!parsed.ok) return asToolError(toolName, parsed.error);
+
+      const validation = validateSectorRoutingArgs(parsed.value);
+      if (!validation.ok) {
+        return asToolError(toolName, `Sector routing rejected: ${validation.reason}.`, {
+          toolArgs: parsed.value,
+          data: { reason: validation.reason }
+        });
+      }
+
+      const constraints = validation.value;
+      try {
+        const [domain, problem] = await Promise.all([
+          readFile(PDDL_DOMAIN_URL, "utf8"),
+          buildPddlProblem(constraints)
+        ]);
+        const result = await solvePddl({
+          domain,
+          problem,
+          endpoint: config?.pddl?.endpoint,
+          timeoutMs: config?.pddl?.timeoutMs,
+          logFile: config?.pddl?.logFile,
+          logger
+        });
+
+        if (!result.solutionPlan) {
+          return asToolError(toolName, "The PDDL planner found no solution.", {
+            toolArgs: constraints,
+            data: {
+              reason: "no_solution",
+              status: result.status,
+              constraints,
+              solutionPlan: null
+            }
+          });
+        }
+
+        return asToolSuccess(toolName, "PDDL sector-routing solution received.", {
+          toolArgs: constraints,
+          data: {
+            status: result.status,
+            constraints,
+            solutionPlan: result.solutionPlan
+          }
+        });
+      } catch (error) {
+        return asToolError(toolName, `PDDL sector routing failed: ${error.message}`, {
+          toolArgs: constraints,
+          data: {
+            reason: "planner_error",
+            constraints
+          }
+        });
+      }
     }
 
     if (toolName === "set_explicit_plan") {

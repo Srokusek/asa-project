@@ -142,6 +142,39 @@ export const calculateExpressionsTool = {
   }
 };
 
+export const solveSectorRoutingTool = {
+  type: "function",
+  function: {
+    name: "solve_sector_routing",
+    description: "Solve the fixture PDDL sector-routing problem from structured constraints. Translate references like 'sector 2' to 'l2'. This only requests a planner solution; it does not apply rules or change agent beliefs.",
+    parameters: {
+      type: "object",
+      properties: {
+        requiredSectors: {
+          type: "array",
+          description: "Sectors every source flow must visit.",
+          items: {
+            type: "string",
+            enum: ["l1", "l2", "l3"]
+          },
+          uniqueItems: true
+        },
+        forbiddenSectors: {
+          type: "array",
+          description: "Sectors every source flow must avoid.",
+          items: {
+            type: "string",
+            enum: ["l1", "l2", "l3"]
+          },
+          uniqueItems: true
+        }
+      },
+      required: ["requiredSectors", "forbiddenSectors"],
+      additionalProperties: false
+    }
+  }
+};
+
 export const setForbiddenTileTool = {
   type: "function",
   function: {
@@ -313,6 +346,7 @@ export const setDeliveryValueThresholdMultiplierTool = {
 
 export const chatTools = [
   calculateExpressionsTool,
+  solveSectorRoutingTool,
   explicitPlanTool,
   teamRendezvousTool,
   parityLineWaitTool,
