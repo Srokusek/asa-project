@@ -216,7 +216,7 @@ export function buildUnifiedScoutPlan(state, profile, config, greenScores, check
     for (const greenId of checkpoint.coveredGreenIds ?? []) {
       const green = greenById.get(greenId);
       if (!green) continue;
-      const observedAt = state.lastObservedAtByGreen?.[positionKey(green.position)];
+      const observedAt = state.lastObservedAtByTile?.[positionKey(green.position)];
       const staleness =
         observedAt === undefined
           ? stalenessCap

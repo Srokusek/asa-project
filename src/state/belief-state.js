@@ -276,7 +276,6 @@ export class BeliefState {
     this.lastPosition = null; // self position at previous belief state
     this.recentPositions = []; // list of recent posiitons
     this.lastObservedAtByTile = new Map(); // last observation of a given tile
-    this.lastObservedAtByGreen = new Map(); // last observation of a given green tile
     this.chatInbox = []; // recent chat messages seen in Deliveroo.js
     this.chatSequence = 0;
     this.forbiddenTiles = new Map(); // sticky manually forbidden tiles overlay
@@ -956,11 +955,6 @@ export class BeliefState {
     const cell = roundTilePosition(position);
     const key = positionKey(cell);
     this.lastObservedAtByTile.set(key, this.time); // mark last observed time as now
-
-    const tile = this.tiles.get(key);
-    if (tile?.type === "1") {
-      this.lastObservedAtByGreen.set(key, this.time); // keep special track of green tiles
-    }
   }
 
   markVisibleAreaObserved(visiblePositions = []) { // iterate marking as observed for a list of visible postions
@@ -971,12 +965,6 @@ export class BeliefState {
 
   tileStaleness(position) { // compute "staleness" of a tile as a linear increase of time since last observed
     const last = this.lastObservedAtByTile.get(positionKey(position));
-    if (last === undefined) return Infinity;
-    return Math.max(0, this.time - last);
-  }
-
-  greenStaleness(position) { // same staleness computation, but for green tiles
-    const last = this.lastObservedAtByGreen.get(positionKey(position));
     if (last === undefined) return Infinity;
     return Math.max(0, this.time - last);
   }
