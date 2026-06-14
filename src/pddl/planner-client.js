@@ -1,9 +1,10 @@
 import { appendFile, mkdir, readFile } from "node:fs/promises";
+import { createHash } from "node:crypto";
 import { dirname, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 
 export const DEFAULT_PDDL_SOLVER_ENDPOINT =
-  "http://localhost:5001/package/lama-first/solve";
+  "https://solver.planning.domains:5001/package/dual-bfws-ffparser/solve";
 export const DEFAULT_PDDL_SOLVER_TIMEOUT_MS = 30_000;
 export const DEFAULT_PDDL_SOLVER_LOG_FILE = "logs/pddl-planner-results.jsonl";
 
@@ -86,13 +87,32 @@ function wait(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-function compactPlannerResult(result) {
-  const rawPlan = result?.result?.output?.sas_plan;
+function inspectPlannerOutput(result) {
+  const output = result?.result?.output;
+  const normalizedOutput =
+    output && typeof output === "object" && !Array.isArray(output) ? output : {};
+  const selectedPlanKey = ["sas_plan", "plan"].find((key) => {
+    const value = normalizedOutput[key];
+    return typeof value === "string" && value.trim().length > 0;
+  }) ?? null;
+
+  return {
+    output: normalizedOutput,
+    outputKeys: Object.keys(normalizedOutput),
+    selectedPlanKey,
+    solutionPlan: selectedPlanKey ? normalizedOutput[selectedPlanKey] : null
+  };
+}
+
+function compactPlannerResult(result, inspectedOutput = inspectPlannerOutput(result)) {
   return {
     status: String(result.status).toLowerCase(),
-    solutionPlan:
-      typeof rawPlan === "string" && rawPlan.trim().length > 0 ? rawPlan : null
+    solutionPlan: inspectedOutput.solutionPlan
   };
+}
+
+function sha256(value) {
+  return createHash("sha256").update(value).digest("hex");
 }
 
 async function writePlannerResultLog({ logFile, logger }, result) {
@@ -135,6 +155,7 @@ export async function solvePddl({
   const normalizedEndpoint = new URL(endpoint).toString();
   const normalizedTimeoutMs = requirePositiveNumber(timeoutMs, "timeoutMs");
   const normalizedPollIntervalMs = requirePositiveNumber(pollIntervalMs, "pollIntervalMs");
+  const startedAt = Date.now();
   const deadline = Date.now() + normalizedTimeoutMs;
 
   const submission = await fetchJson(
@@ -161,9 +182,11 @@ export async function solvePddl({
   }
 
   const resultUrl = new URL(submission.result, normalizedEndpoint).toString();
+  let pollCount = 0;
 
   while (Date.now() < deadline) {
     const result = await fetchJson(fetchImpl, resultUrl, { method: "POST" }, deadline);
+    pollCount += 1;
     const apiError = describeApiError(result);
     if (apiError) {
       throw new Error(`PDDL solver API error: ${apiError}`);
@@ -171,8 +194,28 @@ export async function solvePddl({
 
     const status = typeof result?.status === "string" ? result.status.toUpperCase() : null;
     if (status === "OK") {
-      const compactResult = compactPlannerResult(result);
-      await writePlannerResultLog({ logFile, logger }, compactResult);
+      const inspectedOutput = inspectPlannerOutput(result);
+      const compactResult = compactPlannerResult(result, inspectedOutput);
+      await writePlannerResultLog(
+        { logFile, logger },
+        {
+          ...compactResult,
+          endpoint: normalizedEndpoint,
+          resultUrl,
+          elapsedMs: Date.now() - startedAt,
+          pollCount,
+          domainSha256: sha256(normalizedDomain),
+          problemSha256: sha256(normalizedProblem),
+          solverCall: result?.result?.call ?? null,
+          outputType: result?.result?.output_type ?? null,
+          outputKeys: inspectedOutput.outputKeys,
+          selectedPlanKey: inspectedOutput.selectedPlanKey,
+          stdout: result?.result?.stdout ?? null,
+          stderr: result?.result?.stderr ?? null,
+          submission,
+          plannerResult: result
+        }
+      );
       return compactResult;
     }
     if (status !== "PENDING") {
