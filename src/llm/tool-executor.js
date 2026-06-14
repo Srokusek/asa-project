@@ -21,7 +21,7 @@ const VALID_PDDL_SECTORS = new Set([
   "l8",
   "l9"
 ]);
-const LOCAL_PDDL_AGENT_ID = "a3";
+const LOCAL_PDDL_AGENT_ID = "a9";
 
 function asToolError(toolName, message, extra = {}) {
   return {
