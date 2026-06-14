@@ -9,8 +9,18 @@ import { buildPddlProblem } from "../pddl/problem-builder.js";
 import { buildTeammateSyncMessage } from "../utils/teammate-sync.js";
 import { manhattan, positionKey } from "../utils/geometry.js";
 
-const PDDL_DOMAIN_URL = new URL("../pddl/test_domain.pddl", import.meta.url);
-const VALID_PDDL_SECTORS = new Set(["l1", "l2", "l3"]);
+const PDDL_DOMAIN_URL = new URL("../pddl/big_domain.pddl", import.meta.url);
+const VALID_PDDL_SECTORS = new Set([
+  "l1",
+  "l2",
+  "l3",
+  "l4",
+  "l5",
+  "l6",
+  "l7",
+  "l8",
+  "l9"
+]);
 const LOCAL_PDDL_AGENT_ID = "a3";
 
 function asToolError(toolName, message, extra = {}) {

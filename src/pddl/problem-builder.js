@@ -1,10 +1,20 @@
 import { readFile } from "node:fs/promises";
 
-const TEMPLATE_URL = new URL("./test_problem.pddl", import.meta.url);
+const TEMPLATE_URL = new URL("./big_problem.pddl", import.meta.url);
 const START_MARKER = "    ; BEGIN GENERATED HAS_VISITED GOALS";
 const END_MARKER = "    ; END GENERATED HAS_VISITED GOALS";
-const SOURCE_FLOWS = ["source1", "source2"];
-const VALID_SECTORS = new Set(["l1", "l2", "l3"]);
+const SOURCE_FLOWS = ["source1", "source2", "source3", "source7"];
+const VALID_SECTORS = new Set([
+  "l1",
+  "l2",
+  "l3",
+  "l4",
+  "l5",
+  "l6",
+  "l7",
+  "l8",
+  "l9"
+]);
 
 function normalizeSectors(sectors, name) {
   if (!Array.isArray(sectors)) {
@@ -60,7 +70,7 @@ export async function buildPddlProblem({
   const endIndex = template.indexOf(END_MARKER);
 
   if (startIndex < 0 || endIndex < 0 || endIndex <= startIndex) {
-    throw new Error("test_problem.pddl is missing valid generated-goal markers");
+    throw new Error("big_problem.pddl is missing valid generated-goal markers");
   }
 
   const goals = buildVisitGoals(required, forbidden);

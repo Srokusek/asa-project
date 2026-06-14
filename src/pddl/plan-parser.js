@@ -144,7 +144,6 @@ export function parsePddlPlan(solutionPlan, registry) {
     const agent = resolveAgent(normalizedRegistry, pddlAgentId, sectorId);
     const pickup = resolvePoi(normalizedRegistry, pickupPoiId, sectorId, "pickup");
     const dropoff = resolvePoi(normalizedRegistry, dropoffPoiId, sectorId, "dropoff");
-    const priority = rules.length;
 
     const rule = {
       id: `pddl:${pddlAgentId}:${pickupPoiId}:${dropoffPoiId}`,
@@ -156,8 +155,7 @@ export function parsePddlPlan(solutionPlan, registry) {
       pickupTiles: pickup.tiles,
       dropoffTiles: dropoff.tiles,
       ...(pickup.idleTile ? { pickupIdleTile: pickup.idleTile } : {}),
-      ...(dropoff.idleTile ? { dropoffIdleTile: dropoff.idleTile } : {}),
-      priority
+      ...(dropoff.idleTile ? { dropoffIdleTile: dropoff.idleTile } : {})
     };
 
     rules.push(rule);

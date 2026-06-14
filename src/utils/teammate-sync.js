@@ -75,8 +75,7 @@ function parseOrchestrationRules(rules) {
       pickupPoiId,
       dropoffPoiId,
       pickupTiles,
-      dropoffTiles,
-      ...(Object.hasOwn(rule, "priority") ? { priority: rule.priority } : {})
+      dropoffTiles
     });
   }
   return normalized;

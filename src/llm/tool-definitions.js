@@ -146,7 +146,7 @@ export const solveSectorRoutingTool = {
   type: "function",
   function: {
     name: "solve_sector_routing",
-    description: "Solve the fixture PDDL sector-routing problem from structured constraints. Translate references like 'sector 2' to 'l2'. A successful solve replaces this LLM agent's local a3 rules and distributes complete rule sets to the other registry agents.",
+    description: "Solve the big-map PDDL sector-routing problem from structured constraints. Translate references like 'sector 2' to 'l2'. A successful solve replaces this LLM agent's local a3 rules and distributes complete rule sets to the other registry agents.",
     parameters: {
       type: "object",
       properties: {
@@ -155,7 +155,7 @@ export const solveSectorRoutingTool = {
           description: "Sectors every source flow must visit.",
           items: {
             type: "string",
-            enum: ["l1", "l2", "l3"]
+            enum: ["l1", "l2", "l3", "l4", "l5", "l6", "l7", "l8", "l9"]
           },
           uniqueItems: true
         },
@@ -164,7 +164,7 @@ export const solveSectorRoutingTool = {
           description: "Sectors every source flow must avoid.",
           items: {
             type: "string",
-            enum: ["l1", "l2", "l3"]
+            enum: ["l1", "l2", "l3", "l4", "l5", "l6", "l7", "l8", "l9"]
           },
           uniqueItems: true
         }

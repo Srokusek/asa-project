@@ -211,8 +211,7 @@ function normalizeOrchestrationRule(rule, index) {
     pickupPoiId,
     dropoffPoiId,
     pickupTiles: normalizeOrchestrationTiles(rule.pickupTiles, `orchestration rule ${id} pickupTiles`),
-    dropoffTiles: normalizeOrchestrationTiles(rule.dropoffTiles, `orchestration rule ${id} dropoffTiles`),
-    ...(Object.hasOwn(rule, "priority") ? { priority: rule.priority } : {})
+    dropoffTiles: normalizeOrchestrationTiles(rule.dropoffTiles, `orchestration rule ${id} dropoffTiles`)
   };
 }
 

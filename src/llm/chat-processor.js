@@ -62,7 +62,7 @@ function buildPrompt(message) {
         "Keep final replies brief and operational. Prefer wording like 'queued', 'applied', 'rejected', or 'need clarification' over verbose explanations.",
         "Tool mapping:",
         "- calculate_expressions: evaluate arithmetic expressions and return numeric results for later tool calls.",
-        "- solve_sector_routing: solve the fixture PDDL routing problem. Translate sector numbers to exact ids l1, l2, or l3 and pass requiredSectors and forbiddenSectors. A successful solve replaces this LLM agent's local a3 rules and sends complete rule sets to the other registry agents. Report both the local rule count and remote send successes/failures.",
+        "- solve_sector_routing: solve the big-map PDDL routing problem. Translate sector numbers to exact ids l1 through l9 and pass requiredSectors and forbiddenSectors. A successful solve replaces this LLM agent's local a3 rules and sends complete rule sets to the other registry agents. Report both the local rule count and remote send successes/failures.",
         "- set_explicit_plan: create explicit goto_tile manual tasks, optionally as a sequence with targets=[{x,y},...] or with a selector for one relative tile.",
         "- set_team_rendezvous_task: create a sticky rendezvous task for both agents near one target coordinate. Use target={x,y} and include maxDistance when the admin states one.",
         "- set_parity_line_wait_task: create sticky wait tasks for both agents on the nearest walkable odd/even row or column. Use axis='row' or axis='column' with parity='odd' or parity='even'.",

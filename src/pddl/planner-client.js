@@ -188,8 +188,8 @@ export async function solvePddl({
 }
 
 async function runTestProblem() {
-  const domainUrl = new URL("./test_domain.pddl", import.meta.url);
-  const problemUrl = new URL("./test_problem.pddl", import.meta.url);
+  const domainUrl = new URL("./big_domain.pddl", import.meta.url);
+  const problemUrl = new URL("./big_problem.pddl", import.meta.url);
   const [domain, problem] = await Promise.all([
     readFile(domainUrl, "utf8"),
     readFile(problemUrl, "utf8")

@@ -37,6 +37,12 @@ trap stop_team EXIT INT TERM
 start_agent "coordinator" ".env.llm"
 start_agent "bdi-1" ".env.bdi"
 start_agent "bdi-2" ".env.bdi2"
+start_agent "bdi-3" ".env.bdi3"
+start_agent "bdi-4" ".env.bdi4"
+start_agent "bdi-5" ".env.bdi5"
+start_agent "bdi-6" ".env.bdi6"
+start_agent "bdi-7" ".env.bdi7"
+start_agent "bdi-8" ".env.bdi8"
 
 echo "Agent team running."
 echo "Logs: logs/agents/"
