@@ -11,18 +11,16 @@ function pairKey(fromId, toId) {
   return `${fromId}->${toId}`;
 }
 
-function returnToRedPenalty(state, position, config) { // penalty for getting trapped or long travel distance
+function returnToRedInfo(state, position) {
   const distance = distanceToNearestReachableRed(state, position);
   if (!Number.isFinite(distance)) {
     return {
       distanceToNearestRed: Infinity,
-      penalty: state.reds?.length > 0 ? asNumber(config.trapPenalty, DEFAULT_PARAMS.trapPenalty) : 0,
       trapPenaltyApplied: state.reds?.length > 0
     };
   }
   return {
     distanceToNearestRed: distance,
-    penalty: asNumber(config.returnToRedWeight, DEFAULT_PARAMS.returnToRedWeight) * distance,
     trapPenaltyApplied: false
   };
 }
@@ -68,7 +66,7 @@ function routePlanForScoutPoint({ mode, state, profile, config, greenScores, poi
     scoutTarget: {
       ...scoutTarget,
       distanceFromMe: scoutTarget?.distanceFromMe ?? edge.cost,
-      distanceToNearestRed: scoutTarget?.distanceToNearestRed ?? returnToRedPenalty(state, point, config).distanceToNearestRed,
+      distanceToNearestRed: scoutTarget?.distanceToNearestRed ?? returnToRedInfo(state, point).distanceToNearestRed,
       trapPenaltyApplied: Boolean(scoutTarget?.trapPenaltyApplied)
     },
     oracle,
@@ -199,9 +197,8 @@ export function buildUnifiedScoutPlan(state, profile, config, greenScores, check
 
   const start = copyPosition(state.me.position);
   const stalenessCap = Math.max(1, asNumber(config.maxStalenessValue, DEFAULT_PARAMS.maxStalenessValue));
-  const stalenessWeight = asNumber(config.unifiedScoutStalenessWeight, 1);
-  const distanceWeight = asNumber(config.unifiedScoutDistanceWeight, 0.5);
-  const topK = Math.max(1, Math.round(asNumber(config.unifiedScoutTopKForRedTieBreak, 5)));
+  const exposureWeight = Math.max(0, asNumber(config.unifiedScoutExposureWeight, 1));
+  const distanceWeight = Math.max(0, asNumber(config.unifiedScoutDistanceWeight, 1));
   const startSearch = profile.hasUniformCosts ? bfsAllDistancesFrom(state, state.me.position) : null;
   const greenById = new Map((state.greens ?? []).map((green) => [green.id, green]));
   const candidates = [];
@@ -214,7 +211,7 @@ export function buildUnifiedScoutPlan(state, profile, config, greenScores, check
     if (!Number.isFinite(edge.cost) || edge.path.length <= 1) continue;
 
     let normalizedStalenessSum = 0;
-    let multiplierComponent = 0;
+    let multiplierSum = 0;
     let coveredGreenCount = 0;
     for (const greenId of checkpoint.coveredGreenIds ?? []) {
       const green = greenById.get(greenId);
@@ -226,49 +223,55 @@ export function buildUnifiedScoutPlan(state, profile, config, greenScores, check
           : Math.max(0, asNumber(state.time, 0) - asNumber(observedAt, 0));
       const normalizedStaleness = Math.min(stalenessCap, staleness) / stalenessCap;
       const multiplier = pickupMultiplierAt(state, green.position);
-      multiplierComponent += multiplier;
+      multiplierSum += multiplier;
       normalizedStalenessSum += normalizedStaleness;
       coveredGreenCount += 1;
     }
     if (coveredGreenCount === 0) continue;
 
-    const checkpointStaleness = normalizedStalenessSum / coveredGreenCount; // average staleness green tiles around checkpoint
-    const stalenessComponent = stalenessWeight * checkpointStaleness * coveredGreenCount;
-    const normalizedMultiplierComponent = multiplierComponent / coveredGreenCount // take into account multipliers (average for simplicity)
-    // this should give the expected reward (scaled by staleness for potential respawns) and using the mean package value
-    const meanPackageValue = Number(state.meanPackageValue ?? config.meanPackageValue ?? DEFAULT_PARAMS.meanPackageValue);
-    const checkpointValue = multiplierComponent * stalenessComponent * meanPackageValue;
-    const redInfo = returnToRedPenalty(state, position, config);
+    const checkpointStaleness = normalizedStalenessSum / coveredGreenCount;
+    const averageMultiplier = multiplierSum / coveredGreenCount;
+    const meanPackageValue = asNumber(
+      state.meanPackageValue ?? config.meanPackageValue,
+      DEFAULT_PARAMS.meanPackageValue
+    );
+    const exposureValue =
+      averageMultiplier * checkpointStaleness * coveredGreenCount * meanPackageValue;
+    const exposureScore = exposureWeight * exposureValue;
+    const redInfo = returnToRedInfo(state, position);
     if (redInfo.trapPenaltyApplied) continue;
+    const totalTravelDistance = edge.cost + redInfo.distanceToNearestRed;
+    const distanceScore = distanceWeight * totalTravelDistance;
     const sector = sectorIdFor(position, config);
     const repeatPenalty = unifiedScoutRepeatPenalty(state, checkpoint.id, sector, config);
-    const primaryScore = checkpointValue - distanceWeight * edge.cost - repeatPenalty;
+    const score = exposureScore - distanceScore - repeatPenalty;
 
     candidates.push({
       checkpoint,
       position,
       edge,
-      checkpointValue,
+      exposureValue,
+      exposureScore,
+      distanceScore,
+      totalTravelDistance,
       checkpointStaleness,
-      stalenessComponent,
-      multiplierComponent,
+      averageMultiplier,
       coveredGreenCount,
       repeatPenalty,
       distanceToNearestRed: redInfo.distanceToNearestRed,
-      primaryScore
+      score
     });
   }
 
   if (candidates.length === 0) return null;
-  candidates.sort((a, b) => b.primaryScore - a.primaryScore || a.edge.cost - b.edge.cost || a.checkpoint.id.localeCompare(b.checkpoint.id));
-  const top = candidates.slice(0, topK);
-  top.sort(
+  candidates.sort(
     (a, b) =>
-      a.distanceToNearestRed - b.distanceToNearestRed ||
+      b.score - a.score ||
+      a.totalTravelDistance - b.totalTravelDistance ||
       a.edge.cost - b.edge.cost ||
       a.checkpoint.id.localeCompare(b.checkpoint.id)
   );
-  const best = top[0];
+  const best = candidates[0];
 
   return routePlanForScoutPoint({
     mode: "SCOUT_UNIFIED",
@@ -279,15 +282,17 @@ export function buildUnifiedScoutPlan(state, profile, config, greenScores, check
     pointId: best.checkpoint.id,
     point: best.position,
     edge: best.edge,
-    value: best.primaryScore,
+    value: best.score,
     scoutTarget: {
       id: best.checkpoint.id,
       position: copyPosition(best.position),
-      score: best.primaryScore,
-      primaryScore: best.primaryScore,
-      checkpointValue: best.checkpointValue,
-      stalenessComponent: best.stalenessComponent,
-      multiplierComponent: best.multiplierComponent,
+      score: best.score,
+      exposureValue: best.exposureValue,
+      exposureScore: best.exposureScore,
+      distanceScore: best.distanceScore,
+      totalTravelDistance: best.totalTravelDistance,
+      checkpointStaleness: best.checkpointStaleness,
+      averageMultiplier: best.averageMultiplier,
       repeatPenalty: best.repeatPenalty,
       coveredGreenCount: best.coveredGreenCount,
       sampleGreenIds: (best.checkpoint.coveredGreenIds ?? []).slice(0, 8),
