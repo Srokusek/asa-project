@@ -4,14 +4,18 @@
   "type": "module",
   "scripts": {
     "start": "node src/index.js",
-    "start:bdi": "DOTENV_CONFIG_PATH=.env.bdi node src/index.js",
-    "start:llm": "DOTENV_CONFIG_PATH=.env.llm node src/index.js",
+    "start:bdi": "cross-env DOTENV_CONFIG_PATH=.env.bdi node src/index.js",
+    "start:llm": "cross-env DOTENV_CONFIG_PATH=.env.llm node src/index.js",
     "dev": "node src/index.js",
     "test": "node --test"
   },
   "dependencies": {
     "@unitn-asa/deliveroo-js-sdk": "latest",
-    "dotenv": "latest",
-    "openai": "latest"
+    "dotenv": "^17.4.2",
+    "duck-duck-scrape": "^2.2.7",
+    "openai": "^6.42.0"
+  },
+  "devDependencies": {
+    "cross-env": "^10.1.0"
   }
 }

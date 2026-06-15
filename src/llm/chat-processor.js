@@ -399,7 +399,7 @@ export function createChatProcessor({ beliefs, executor, logger, config, llmCall
   const maxToolIterations = Math.max(1, Number(llmConfig.maxToolIterations ?? 8) || 8);
   const maxTotalToolCalls = Math.max(1, Number(llmConfig.maxTotalToolCalls ?? 16) || 16);
   const writeChatDiagnostics = createChatDiagnostics({ logger, config });
-  const { callModel } = createModelClient({ config, llmCaller, tools: chatTools });
+  const { callModel } = createModelClient({ config, llmCaller, tools: chatTools, logger });
   const { executeToolCall } = createToolExecutor({ beliefs, executor, logger, config });
 
   async function evaluateChatPrompt(messages, senderId, sourceChatId) {
