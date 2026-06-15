@@ -62,6 +62,7 @@ function buildPrompt(message) {
         "Keep final replies brief and operational. Prefer wording like 'queued', 'applied', 'rejected', or 'need clarification' over verbose explanations.",
         "Tool mapping:",
         "- calculate_expressions: evaluate arithmetic expressions and return numeric results for later tool calls.",
+        "- solve_sector_routing: solve the big-map PDDL routing problem. Translate sector numbers to exact ids l1 through l9 and pass requiredSectors and forbiddenSectors. A successful solve replaces this LLM agent's local a9 rules and sends complete rule sets to the other registry agents. Report both the local rule count and remote send successes/failures.",
         "- set_explicit_plan: create explicit goto_tile manual tasks, optionally as a sequence with targets=[{x,y},...] or with a selector for one relative tile.",
         "- set_team_rendezvous_task: create a sticky rendezvous task for both agents near one target coordinate. Use target={x,y} and include maxDistance when the admin states one.",
         "- set_parity_line_wait_task: create sticky wait tasks for both agents on the nearest walkable odd/even row or column. Use axis='row' or axis='column' with parity='odd' or parity='even'.",
@@ -77,6 +78,57 @@ function buildPrompt(message) {
         "Non-actionable chat, acknowledgements, and unrelated questions should be answered briefly in plain text.",
         "Never output a raw JSON object, fake function call, or pseudo-tool payload in assistant text when a tool should be used."
       ].join("\n")
+    },
+    {
+      role: "user",
+      content: "Route all packages through sector 2 and avoid sector 3."
+    },
+    {
+      role: "assistant",
+      content: "",
+      tool_calls: [
+        {
+          id: "example_solve_sector_routing",
+          type: "function",
+          function: {
+            name: "solve_sector_routing",
+            arguments: JSON.stringify({
+              requiredSectors: ["l2"],
+              forbiddenSectors: ["l3"]
+            })
+          }
+        }
+      ]
+    },
+    {
+      role: "tool",
+      tool_call_id: "example_solve_sector_routing",
+      name: "solve_sector_routing",
+      content: JSON.stringify({
+        ok: true,
+        tool: "solve_sector_routing",
+        message: "PDDL sector-routing solution received; applied 0 local rule(s) for a9; sent rules to 2/2 remote agent(s), 0 failed.",
+        data: {
+          status: "ok",
+          constraints: {
+            requiredSectors: ["l2"],
+            forbiddenSectors: ["l3"]
+          },
+          solutionPlan: "(set_rule s1 t12 a1 l1)",
+          localPddlAgentId: "a9",
+          appliedRuleCount: 0,
+          distribution: {
+            status: "complete",
+            attemptedAgentCount: 2,
+            sentAgentCount: 2,
+            failedAgentCount: 0
+          }
+        }
+      })
+    },
+    {
+      role: "assistant",
+      content: "Planner solution received; applied 0 local rules for a9 and sent updates to 2/2 remote agents."
     },
     {
       role: "user",

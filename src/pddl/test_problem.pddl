@@ -40,13 +40,10 @@
 )
 
 (:goal (and
-    ;example - deliver all packages, all pass through l2 l3
     (delivered source1)
     (delivered source2)
-    (has_visited source1 l2)
-    (has_visited source1 l3)
-    (has_visited source2 l2)
-    (has_visited source2 l3)
+    ; BEGIN GENERATED HAS_VISITED GOALS
+    ; END GENERATED HAS_VISITED GOALS
 ))
 
 ;un-comment the following line if metric is needed

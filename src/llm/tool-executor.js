@@ -1,7 +1,27 @@
+import { readFile } from "node:fs/promises";
+
 import { chatTools } from "./tool-definitions.js";
 import { resolveTileSelector } from "./tile-selector.js";
+import { PDDL_MAP_REGISTRY } from "../pddl/map-registry.js";
+import { parsePddlPlan } from "../pddl/plan-parser.js";
+import { solvePddl } from "../pddl/planner-client.js";
+import { buildPddlProblem } from "../pddl/problem-builder.js";
 import { buildTeammateSyncMessage } from "../utils/teammate-sync.js";
 import { manhattan, positionKey } from "../utils/geometry.js";
+
+const PDDL_DOMAIN_URL = new URL("../pddl/big_domain.pddl", import.meta.url);
+const VALID_PDDL_SECTORS = new Set([
+  "l1",
+  "l2",
+  "l3",
+  "l4",
+  "l5",
+  "l6",
+  "l7",
+  "l8",
+  "l9"
+]);
+const LOCAL_PDDL_AGENT_ID = "a9";
 
 function asToolError(toolName, message, extra = {}) {
   return {
@@ -27,6 +47,45 @@ function parseJsonArguments(raw, errorMessage) {
   } catch (_error) {
     return { ok: false, error: errorMessage };
   }
+}
+
+function validateSectorRoutingArgs(args) {
+  if (!args || typeof args !== "object" || Array.isArray(args)) {
+    return { ok: false, reason: "invalid_payload" };
+  }
+
+  const allowedKeys = new Set(["requiredSectors", "forbiddenSectors"]);
+  const extraKey = Object.keys(args).find((key) => !allowedKeys.has(key));
+  if (extraKey) {
+    return { ok: false, reason: `unknown_field:${extraKey}` };
+  }
+  if (!Array.isArray(args.requiredSectors) || !Array.isArray(args.forbiddenSectors)) {
+    return { ok: false, reason: "sector_constraints_must_be_arrays" };
+  }
+
+  for (const [name, sectors] of [
+    ["requiredSectors", args.requiredSectors],
+    ["forbiddenSectors", args.forbiddenSectors]
+  ]) {
+    const invalidSector = sectors.find((sector) => !VALID_PDDL_SECTORS.has(sector));
+    if (invalidSector !== undefined) {
+      return { ok: false, reason: `${name}_contains_unknown_sector:${String(invalidSector)}` };
+    }
+  }
+
+  const forbiddenSet = new Set(args.forbiddenSectors);
+  const conflict = args.requiredSectors.find((sector) => forbiddenSet.has(sector));
+  if (conflict) {
+    return { ok: false, reason: `sector_both_required_and_forbidden:${conflict}` };
+  }
+
+  return {
+    ok: true,
+    value: {
+      requiredSectors: [...new Set(args.requiredSectors)],
+      forbiddenSectors: [...new Set(args.forbiddenSectors)]
+    }
+  };
 }
 
 function evaluateArithmeticExpression(rawExpression) {
@@ -205,6 +264,70 @@ export function createToolExecutor({ beliefs, executor, logger, config }) {
         error: error.message
       });
     }
+  }
+
+  function prepareOrchestrationDistribution(parsedPlan) {
+    const recipients = [];
+    for (const [pddlAgentId, agent] of Object.entries(PDDL_MAP_REGISTRY.agents)) {
+      if (pddlAgentId === LOCAL_PDDL_AGENT_ID) continue;
+      const rules = parsedPlan.rules.filter((rule) => rule.pddlAgentId === pddlAgentId);
+      const message = buildTeammateSyncMessage({
+        type: "orchestration_rules_replace",
+        entry: {
+          rules,
+          reason: "pddl_orchestration_distribution"
+        }
+      });
+      if (!message) {
+        throw new Error(`could not prepare orchestration rules for ${pddlAgentId}`);
+      }
+      recipients.push({
+        pddlAgentId,
+        runtimeAgentId: agent.runtimeAgentId,
+        ruleCount: rules.length,
+        message
+      });
+    }
+    return recipients;
+  }
+
+  async function sendOrchestrationDistribution(preparedRecipients) {
+    const recipients = [];
+    for (const recipient of preparedRecipients) {
+      let sent = false;
+      let errorMessage = null;
+      try {
+        sent = await executor.writeMessage({
+          toId: recipient.runtimeAgentId,
+          message: recipient.message
+        }) !== false;
+      } catch (error) {
+        errorMessage = error.message;
+      }
+      if (!sent) {
+        logger.warn("orchestration rule distribution failed", {
+          pddlAgentId: recipient.pddlAgentId,
+          runtimeAgentId: recipient.runtimeAgentId,
+          ...(errorMessage ? { error: errorMessage } : {})
+        });
+      }
+      recipients.push({
+        pddlAgentId: recipient.pddlAgentId,
+        runtimeAgentId: recipient.runtimeAgentId,
+        ruleCount: recipient.ruleCount,
+        sent
+      });
+    }
+
+    const sentAgentCount = recipients.filter((recipient) => recipient.sent).length;
+    const attemptedAgentCount = recipients.length;
+    return {
+      status: sentAgentCount === attemptedAgentCount ? "complete" : "partial",
+      attemptedAgentCount,
+      sentAgentCount,
+      failedAgentCount: attemptedAgentCount - sentAgentCount,
+      recipients
+    };
   }
 
   function validateWalkableTarget(target, { rejectForbidden = true } = {}) {
@@ -1086,6 +1209,141 @@ export function createToolExecutor({ beliefs, executor, logger, config }) {
         toolArgs: parsed.value,
         data: { results, expressionCount: Object.keys(results).length }
       });
+    }
+
+    if (toolName === "solve_sector_routing") {
+      const parsed = parseJsonArguments(
+        rawArgs,
+        "I could not parse the sector-routing constraints."
+      );
+      if (!parsed.ok) return asToolError(toolName, parsed.error);
+
+      const validation = validateSectorRoutingArgs(parsed.value);
+      if (!validation.ok) {
+        return asToolError(toolName, `Sector routing rejected: ${validation.reason}.`, {
+          toolArgs: parsed.value,
+          data: { reason: validation.reason }
+        });
+      }
+
+      const constraints = validation.value;
+      try {
+        const [domain, problem] = await Promise.all([
+          readFile(PDDL_DOMAIN_URL, "utf8"),
+          buildPddlProblem(constraints)
+        ]);
+        const result = await solvePddl({
+          domain,
+          problem,
+          endpoint: config?.pddl?.endpoint,
+          timeoutMs: config?.pddl?.timeoutMs,
+          logFile: config?.pddl?.logFile,
+          logger
+        });
+
+        if (!result.solutionPlan) {
+          return asToolError(toolName, "The PDDL planner found no solution.", {
+            toolArgs: constraints,
+            data: {
+              reason: "no_solution",
+              status: result.status,
+              constraints,
+              solutionPlan: null
+            }
+          });
+        }
+
+        let parsedPlan;
+        try {
+          parsedPlan = parsePddlPlan(result.solutionPlan, PDDL_MAP_REGISTRY);
+        } catch (error) {
+          return asToolError(
+            toolName,
+            `The PDDL planner result could not be parsed: ${error.message}`,
+            {
+              toolArgs: constraints,
+              data: {
+                reason: "plan_parse_error",
+                status: result.status,
+                constraints,
+                solutionPlan: result.solutionPlan
+              }
+            }
+          );
+        }
+
+        const localRules = parsedPlan.rules.filter(
+          (rule) => rule.pddlAgentId === LOCAL_PDDL_AGENT_ID
+        );
+        let preparedRecipients;
+        try {
+          preparedRecipients = prepareOrchestrationDistribution(parsedPlan);
+        } catch (error) {
+          return asToolError(
+            toolName,
+            `The PDDL routing rules could not be prepared for distribution: ${error.message}`,
+            {
+              toolArgs: constraints,
+              data: {
+                reason: "distribution_prepare_error",
+                status: result.status,
+                constraints,
+                solutionPlan: result.solutionPlan,
+                parsedPlan,
+                localPddlAgentId: LOCAL_PDDL_AGENT_ID
+              }
+            }
+          );
+        }
+
+        let installedRules;
+        try {
+          installedRules = beliefs.replaceOrchestrationRules(localRules);
+        } catch (error) {
+          return asToolError(
+            toolName,
+            `The PDDL routing rules could not be installed locally: ${error.message}`,
+            {
+              toolArgs: constraints,
+              data: {
+                reason: "local_install_error",
+                status: result.status,
+                constraints,
+                solutionPlan: result.solutionPlan,
+                parsedPlan,
+                localPddlAgentId: LOCAL_PDDL_AGENT_ID
+              }
+            }
+          );
+        }
+
+        const appliedRuleCount = installedRules.length;
+        const distribution = await sendOrchestrationDistribution(preparedRecipients);
+        return asToolSuccess(
+          toolName,
+          `PDDL sector-routing solution received; applied ${appliedRuleCount} local rule(s) for ${LOCAL_PDDL_AGENT_ID}; sent rules to ${distribution.sentAgentCount}/${distribution.attemptedAgentCount} remote agent(s), ${distribution.failedAgentCount} failed.`,
+          {
+            toolArgs: constraints,
+            data: {
+              status: result.status,
+              constraints,
+              solutionPlan: result.solutionPlan,
+              parsedPlan,
+              localPddlAgentId: LOCAL_PDDL_AGENT_ID,
+              appliedRuleCount,
+              distribution
+            }
+          }
+        );
+      } catch (error) {
+        return asToolError(toolName, `PDDL sector routing failed: ${error.message}`, {
+          toolArgs: constraints,
+          data: {
+            reason: "planner_error",
+            constraints
+          }
+        });
+      }
     }
 
     if (toolName === "set_explicit_plan") {

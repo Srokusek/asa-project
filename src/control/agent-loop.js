@@ -29,7 +29,8 @@ const HARD_REPLAN_EVENTS = new Set([
   "FORBIDDEN_TILE_ADDED",
   "PICKUP_MULTIPLIER_SET",
   "DELIVERY_MULTIPLIER_SET",
-  "DELIVERY_COUNT_MULTIPLIER_SET"
+  "DELIVERY_COUNT_MULTIPLIER_SET",
+  "ORCHESTRATION_RULES_REPLACED"
 ]);
 
 const PACKAGE_REPLAN_EVENTS = new Set([
@@ -63,6 +64,11 @@ function hasEvent(events, eventSet) {
 function hasVisibleParcelEvent(events) {
   return events.some((event) => eventType(event) === "PARCELS_SENSING" && eventPayloadCount(event) > 0);
   // if we have sensed a positive number of parcels, return true
+}
+
+function hasOrchestrationPickupEvent(events, beliefs) {
+  if (!beliefs?.orchestration?.activeRuleId) return false;
+  return events.some((event) => eventType(event) === "PICK_PACKAGE");
 }
 
 export function routePathIsExecutable(routePlan) {
@@ -330,6 +336,10 @@ export class AgentLoop {
     };
 
     if (!this.currentRoutePlan || !this.currentExecutablePlan) return decide(true, "missing_plan");
+
+    if (hasOrchestrationPickupEvent(events, this.beliefs)) {
+      return decide(true, "orchestration_pickup");
+    }
 
     if (this.actionIndex >= this.currentExecutablePlan.length) {
       if (isStartOnlyPlan(this.currentRoutePlan, this.currentExecutablePlan)) {

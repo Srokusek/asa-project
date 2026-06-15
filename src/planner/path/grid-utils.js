@@ -352,7 +352,6 @@ export function parseMap(json) {
     recentScoutTargets: Array.isArray(input.recentScoutTargets) ? input.recentScoutTargets.map(String) : [],
     lastDeliveryPosition: input.lastDeliveryPosition ? copyPosition(input.lastDeliveryPosition) : null,
     lastObservedAtByTile: normalizeObservationMap(input.lastObservedAtByTile),
-    lastObservedAtByGreen: normalizeObservationMap(input.lastObservedAtByGreen),
     sensingRange: normalizeSensingRange(input.sensingRange, params.sensingRange),
     greens,
     reds,

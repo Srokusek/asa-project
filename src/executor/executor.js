@@ -175,7 +175,14 @@ export class Executor {
             });
           }
         }
-        this.beliefs.pushEvent("PICK_PACKAGE", { parcels: result });
+        const orchestrationActivated = action?.orchestrationRuleId
+          ? this.beliefs.activateOrchestrationRule?.(action.orchestrationRuleId) === true
+          : false;
+        this.beliefs.pushEvent("PICK_PACKAGE", {
+          parcels: result,
+          orchestrationRuleId: orchestrationActivated ? action.orchestrationRuleId : null,
+          dropoffPoiId: orchestrationActivated ? action.dropoffPoiId ?? null : null
+        });
         this.telemetry?.record("pick_up", {
           action,
           result,
@@ -210,6 +217,7 @@ export class Executor {
         if (this.beliefs.me) {
           this.beliefs.lastDeliveryPosition = { x: this.beliefs.me.x, y: this.beliefs.me.y };
         }
+        this.beliefs.clearActiveOrchestrationRule?.("putdown_succeeded");
         this.beliefs.pushEvent("DELIVER_PACKAGES", { parcels: result });
         this.telemetry?.record("put_down", {
           action: { type: "put_down", parcels: selected ?? "all" },
