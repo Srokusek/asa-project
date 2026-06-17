@@ -45,8 +45,8 @@ function requiredAgentType(env) {
 
 export const DEFAULT_PLANNER_CONFIG = Object.freeze({
   // Parcel scoring and competition.
-  meanPackageValue: 10,
-  decayRate: 0.05,
+  meanPackageValue: 30,
+  decayRate: 0.001, // tick rate = decay rate
   kWin: 1,
   ignoreEnemyEta: false,
   moveWeight: 1,
@@ -66,14 +66,12 @@ export const DEFAULT_PLANNER_CONFIG = Object.freeze({
   greenInfoMultiplier: 4,
   redInfoMultiplier: 0.2,
   coverageSectorSize: 5,
-  returnToRedWeight: 0.1,
   unifiedScoutCheckpointCount: 24,
-  unifiedScoutStalenessWeight: 1.0,
-  unifiedScoutDistanceWeight: 0.0,
-  unifiedScoutTopKForRedTieBreak: 5,
-  unifiedScoutRepeatTargetPenalty: 50,
-  unifiedScoutRepeatSectorPenalty: 50,
-  failedScoutTargetCooldownTicks: 100,
+  unifiedScoutExposureWeight: 1.0,
+  unifiedScoutDistanceWeight: 0.5,
+  unifiedScoutRepeatTargetPenalty: 500,
+  unifiedScoutRepeatSectorPenalty: 0,
+  failedScoutTargetCooldownTicks: 500,
 
   // Candidate selection and green clustering.
   clusterPickupRadius: 3,
