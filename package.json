@@ -4,8 +4,8 @@
   "type": "module",
   "scripts": {
     "start": "node src/index.js",
-    "start:bdi": "cross-env DOTENV_CONFIG_PATH=.env.bdi node src/index.js",
-    "start:llm": "cross-env DOTENV_CONFIG_PATH=.env.llm node src/index.js",
+    "start:bdi": "bash scripts/start-agent.sh bdi-1 .env.bdi",
+    "start:llm": "bash scripts/start-agent.sh coordinator .env.llm",
     "dev": "node src/index.js",
     "test": "node --test"
   },
