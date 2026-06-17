@@ -165,6 +165,7 @@ export function extendToRed(plan, red, _state, oracle, _config) {
   };
 }
 
+// function for scoring partial plans (plans without a specific delivery endpoint yet)
 export function carriedPotential(plan, _state, oracle, config = null) {
   if (plan.pickedPackages.length === 0) return 0;
   const reds = oracle.points.filter((point) => point.type === "red");
@@ -182,6 +183,8 @@ export function carriedPotential(plan, _state, oracle, config = null) {
   return Number.isFinite(best) ? best : 0;
 }
 
+// function for search of continuation for partial plans, 
+// deliveredScore is the score of a completed plan
 export function planValue(plan, state, oracle, config) {
   return (
     plan.deliveredScore +
@@ -190,6 +193,7 @@ export function planValue(plan, state, oracle, config) {
   );
 }
 
+// fucntion for scoring complete plans
 export function finalObjective(plan, config) {
   return plan.deliveredScore - config.moveWeight * plan.moveCost;
 }
