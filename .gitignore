@@ -7,4 +7,10 @@ CONFIG_PARAMETERS.md
 parameters_to_remove.md
 plan-search-report.md
 node_modules
+.env*
 test
+logs
+TODO.md
+PDDL_SECTOR_ORCHESTRATION.md
+src/pddl/map-registry-legacy.js
+logs/chat-diagnostics.jsonl
