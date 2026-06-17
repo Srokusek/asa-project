@@ -62,6 +62,8 @@ npm run start:llm
 ```
 
 These scripts load `.env.bdi` and `.env.llm` respectively via `DOTENV_CONFIG_PATH`.
+They redirect stdout and stderr to `logs/agents/bdi-1.log` and
+`logs/agents/coordinator.log`, matching the filenames used by `scripts/start-team.sh`.
 
 ## Test
 
@@ -77,14 +79,44 @@ Flow:
 
 File layout:
 
-- `src/index.js`: SDK connection and loop lifecycle.
-- `src/state/belief-state.js`: partial sensing memory for map, me, parcels, agents, carried parcels, and internal events.
-- `src/state/sdk-adapter.js`: SDK event adapter. It updates only beliefs.
-- `src/state/planner-state.js`: pure conversion from beliefs to planner input.
-- `src/planner/route-planner.js`: pure route planning on a reduced graph.
-- `src/planner/executable-plan.js`: converts route sequence/path into `move`, `pick_up`, `put_down`.
-- `src/executor/executor.js`: awaits SDK actions and pushes failure/success events.
-- `src/control/agent-loop.js`: owns current plan memory and replanning policy.
+- `src/index.js`: runtime entry point. Loads config, connects to Deliveroo.js, wires beliefs, SDK listeners, telemetry, and the agent loop.
+- `src/config.js`: environment parsing and defaults for BDI, LLM, planner, telemetry, and PDDL solver settings.
+- `src/control/`: loop orchestration. `agent-loop.js` owns current plan memory, replanning policy, chat dispatch, and handoff coordination.
+- `src/state/`: world-state layer.
+  - `belief-state.js`: partial sensing memory for map, me, parcels, agents, carried parcels, and internal events.
+  - `sdk-adapter.js`: SDK event adapter. It updates beliefs and applies trusted teammate sync messages.
+  - `planner-state.js`: pure conversion from beliefs to planner input.
+- `src/planner/`: BDI route planning.
+  - `route-planner.js`: reduced-graph route planning entry point.
+  - `route-plan.js`: shared route-plan result helpers.
+  - `executable-plan.js`: converts route paths into `move`, `pick_up`, and `put_down` actions.
+  - `default-params.js`: planner parameter defaults from config.
+  - `path/`: grid utilities, pathfinding, distance oracle, and red-tile distance cache.
+  - `scoring/`: green-cell scoring and reward overlay helpers.
+  - `search/`: sequence search over selected pickup and delivery points.
+  - `scout/`: exploration planner for scouting useful map positions.
+- `src/executor/`: SDK action execution. `executor.js` awaits actions and pushes failure/success events.
+- `src/llm/`: admin chat and tool-calling coordinator mode.
+  - `chat-processor.js`: chat lifecycle and model/tool loop.
+  - `model-client.js`: LiteLLM/OpenAI-compatible model calls.
+  - `tool-definitions.js`: callable admin tools exposed to the model.
+  - `tool-executor.js`: tool side effects, including PDDL solve requests and teammate sync.
+  - `tile-selector.js`: resolves relative tile requests such as leftmost pickup or nearest delivery.
+  - `diagnostics.js`: optional JSONL chat diagnostics logging.
+- `src/pddl/`: PDDL planner integration.
+  - `planner-client.js`: HTTP client for the external PDDL solver, timeout handling, and solve logging.
+  - `problem-builder.js`: builds runtime PDDL problems from registered map templates.
+  - `plan-parser.js`: parses PDDL solver output into executable movement steps.
+  - `map-registry.js`: registered big-map sectors, sources, targets, and runtime ids.
+  - `map-registry-legacy.js`: legacy registry data kept for older map/test references.
+  - `*_domain.pddl` and `*_problem.pddl`: domain/problem templates.
+- `src/telemetry/`: optional JSONL telemetry writer.
+- `src/utils/`: shared geometry, logging, and teammate sync helpers.
+- `scripts/`: process helpers for running one agent or the paired BDI/LLM team.
+- `test/`: Node test suite for config, state adapters, planner helpers, PDDL integration, LLM tools, diagnostics, and team orchestration.
+- `logs/`: runtime output directory. Agent logs and chat diagnostics are generated here.
+- `big-map.json` and `test-map.json`: local map fixtures used by planner/PDDL tooling and tests.
+- `AGENT_CONTEXT.md`: project notes and operating context for agent development.
 
 ## Deliveroo Rules
 
