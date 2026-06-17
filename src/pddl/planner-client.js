@@ -4,7 +4,7 @@ import { dirname, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 
 export const DEFAULT_PDDL_SOLVER_ENDPOINT =
-  "https://solver.planning.domains:5001/package/dual-bfws-ffparser/solve";
+  "http://localhost:5001/package/dual-bfws-ffparser/solve";
 export const DEFAULT_PDDL_SOLVER_TIMEOUT_MS = 30_000;
 export const DEFAULT_PDDL_SOLVER_LOG_FILE = "logs/pddl-planner-results.jsonl";
 
@@ -29,6 +29,29 @@ function describeApiError(payload) {
   const error = payload?.Error ?? payload?.error;
   if (error == null) return null;
   return typeof error === "string" ? error : JSON.stringify(error);
+}
+
+function errorDetails(error) {
+  if (!(error instanceof Error)) {
+    return {
+      name: "Error",
+      message: String(error)
+    };
+  }
+
+  return {
+    name: error.name,
+    message: error.message,
+    ...(error.details ? { details: error.details } : {}),
+    ...(error.cause
+      ? {
+          cause: {
+            name: error.cause.name ?? "Error",
+            message: error.cause.message ?? String(error.cause)
+          }
+        }
+      : {})
+  };
 }
 
 async function fetchJson(fetchImpl, url, options, deadline) {
@@ -67,7 +90,21 @@ async function fetchJson(fetchImpl, url, options, deadline) {
       throw new Error("PDDL solver returned an invalid HTTP response");
     }
     if (!response.ok) {
-      throw new Error(`PDDL solver HTTP error: ${response.status} ${response.statusText}`.trim());
+      let responseBody = null;
+      try {
+        responseBody = await Promise.race([response.json(), timeout]);
+      } catch {
+        // The status and status text still identify the failed request.
+      }
+      const error = new Error(
+        `PDDL solver HTTP error: ${response.status} ${response.statusText}`.trim()
+      );
+      error.details = {
+        status: response.status,
+        statusText: response.statusText,
+        responseBody
+      };
+      throw error;
     }
 
     try {
@@ -157,77 +194,110 @@ export async function solvePddl({
   const normalizedPollIntervalMs = requirePositiveNumber(pollIntervalMs, "pollIntervalMs");
   const startedAt = Date.now();
   const deadline = Date.now() + normalizedTimeoutMs;
-
-  const submission = await fetchJson(
-    fetchImpl,
-    normalizedEndpoint,
-    {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({
-        domain: normalizedDomain,
-        problem: normalizedProblem
-      })
-    },
-    deadline
-  );
-
-  const submissionError = describeApiError(submission);
-  if (submissionError) {
-    throw new Error(`PDDL solver API error: ${submissionError}`);
-  }
-
-  if (!submission || typeof submission.result !== "string" || submission.result.trim().length === 0) {
-    throw new Error("PDDL solver submission did not return a result URL");
-  }
-
-  const resultUrl = new URL(submission.result, normalizedEndpoint).toString();
+  const logContext = {
+    endpoint: normalizedEndpoint,
+    resultUrl: null,
+    pollCount: 0,
+    domainSha256: sha256(normalizedDomain),
+    problemSha256: sha256(normalizedProblem),
+    submission: null,
+    plannerResult: null
+  };
+  let phase = "submission";
+  let submission;
+  let resultUrl;
   let pollCount = 0;
 
-  while (Date.now() < deadline) {
-    const result = await fetchJson(fetchImpl, resultUrl, { method: "POST" }, deadline);
-    pollCount += 1;
-    const apiError = describeApiError(result);
-    if (apiError) {
-      throw new Error(`PDDL solver API error: ${apiError}`);
+  try {
+    submission = await fetchJson(
+      fetchImpl,
+      normalizedEndpoint,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          domain: normalizedDomain,
+          problem: normalizedProblem
+        })
+      },
+      deadline
+    );
+    logContext.submission = submission;
+
+    const submissionError = describeApiError(submission);
+    if (submissionError) {
+      throw new Error(`PDDL solver API error: ${submissionError}`);
     }
 
-    const status = typeof result?.status === "string" ? result.status.toUpperCase() : null;
-    if (status === "OK") {
-      const inspectedOutput = inspectPlannerOutput(result);
-      const compactResult = compactPlannerResult(result, inspectedOutput);
-      await writePlannerResultLog(
-        { logFile, logger },
-        {
-          ...compactResult,
-          endpoint: normalizedEndpoint,
-          resultUrl,
-          elapsedMs: Date.now() - startedAt,
-          pollCount,
-          domainSha256: sha256(normalizedDomain),
-          problemSha256: sha256(normalizedProblem),
-          solverCall: result?.result?.call ?? null,
-          outputType: result?.result?.output_type ?? null,
-          outputKeys: inspectedOutput.outputKeys,
-          selectedPlanKey: inspectedOutput.selectedPlanKey,
-          stdout: result?.result?.stdout ?? null,
-          stderr: result?.result?.stderr ?? null,
-          submission,
-          plannerResult: result
-        }
-      );
-      return compactResult;
-    }
-    if (status !== "PENDING") {
-      throw new Error(`PDDL solver returned unexpected task status: ${result?.status ?? "missing"}`);
+    if (!submission || typeof submission.result !== "string" || submission.result.trim().length === 0) {
+      throw new Error("PDDL solver submission did not return a result URL");
     }
 
-    const remainingMs = deadline - Date.now();
-    if (remainingMs <= 0) break;
-    await wait(Math.min(normalizedPollIntervalMs, remainingMs));
+    resultUrl = new URL(submission.result, normalizedEndpoint).toString();
+    logContext.resultUrl = resultUrl;
+    phase = "polling";
+
+    while (Date.now() < deadline) {
+      const result = await fetchJson(fetchImpl, resultUrl, { method: "POST" }, deadline);
+      pollCount += 1;
+      logContext.pollCount = pollCount;
+      logContext.plannerResult = result;
+      const apiError = describeApiError(result);
+      if (apiError) {
+        throw new Error(`PDDL solver API error: ${apiError}`);
+      }
+
+      const status = typeof result?.status === "string" ? result.status.toUpperCase() : null;
+      if (status === "OK") {
+        const inspectedOutput = inspectPlannerOutput(result);
+        const compactResult = compactPlannerResult(result, inspectedOutput);
+        await writePlannerResultLog(
+          { logFile, logger },
+          {
+            ...compactResult,
+            ...logContext,
+            elapsedMs: Date.now() - startedAt,
+            solverCall: result?.result?.call ?? null,
+            outputType: result?.result?.output_type ?? null,
+            outputKeys: inspectedOutput.outputKeys,
+            selectedPlanKey: inspectedOutput.selectedPlanKey,
+            stdout: result?.result?.stdout ?? null,
+            stderr: result?.result?.stderr ?? null
+          }
+        );
+        return compactResult;
+      }
+      if (status !== "PENDING") {
+        throw new Error(`PDDL solver returned unexpected task status: ${result?.status ?? "missing"}`);
+      }
+
+      const remainingMs = deadline - Date.now();
+      if (remainingMs <= 0) break;
+      await wait(Math.min(normalizedPollIntervalMs, remainingMs));
+    }
+
+    throw new Error("PDDL solver request timed out");
+  } catch (error) {
+    const inspectedOutput = inspectPlannerOutput(logContext.plannerResult);
+    await writePlannerResultLog(
+      { logFile, logger },
+      {
+        status: "error",
+        solutionPlan: null,
+        ...logContext,
+        phase,
+        elapsedMs: Date.now() - startedAt,
+        solverCall: logContext.plannerResult?.result?.call ?? null,
+        outputType: logContext.plannerResult?.result?.output_type ?? null,
+        outputKeys: inspectedOutput.outputKeys,
+        selectedPlanKey: inspectedOutput.selectedPlanKey,
+        stdout: logContext.plannerResult?.result?.stdout ?? null,
+        stderr: logContext.plannerResult?.result?.stderr ?? null,
+        error: errorDetails(error)
+      }
+    );
+    throw error;
   }
-
-  throw new Error("PDDL solver request timed out");
 }
 
 async function runTestProblem() {
