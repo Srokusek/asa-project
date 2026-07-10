@@ -118,6 +118,16 @@ File layout:
 - `big-map.json` and `test-map.json`: local map fixtures used by planner/PDDL tooling and tests.
 - `AGENT_CONTEXT.md`: project notes and operating context for agent development.
 
+## Contributors
+
+This project was developed collaboratively by [Simon Rokusek](https://github.com/Srokusek) and [Daniele Ippolito](https://github.com/DanielSan-hub).
+
+Selected contribution areas:
+- Simon Rokusek: BDI planner architecture, route planning, state modeling, and Deliveroo.js runtime integration.
+- [Daniele Ippolito](https://github.com/DanielSan-hub): LLM coordinator mode, tool-calling layer, PDDL integration, teammate synchronization, diagnostics, and cross-platform agent launch configuration.
+
+See the [contributors graph](https://github.com/Srokusek/asa-project/graphs/contributors) and [commit history](https://github.com/Srokusek/asa-project/commits?author=DanielSan-hub) for the authoritative project history.
+
 ## Deliveroo Rules
 
 - Tile `"0"`: wall / non-walkable.
